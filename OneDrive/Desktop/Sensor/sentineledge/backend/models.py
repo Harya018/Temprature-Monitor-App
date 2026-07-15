@@ -66,6 +66,12 @@ class SubscriberIn(BaseModel):
     email: EmailStr = Field(max_length=254)
     escalation_order: int = Field(ge=1, le=100)
     pin: Optional[str] = None  # if provided: 4-20 alphanumeric chars, stored as bcrypt hash
+    # Profile fields
+    employee_id: Optional[str] = Field(default=None, max_length=50)
+    department: Optional[str] = Field(default=None, max_length=100)
+    designation: Optional[str] = Field(default=None, max_length=100)
+    shift_timing: Optional[str] = Field(default=None, max_length=50)
+    address: Optional[str] = Field(default=None, max_length=255)
 
     @field_validator("name", mode="before")
     @classmethod
@@ -119,7 +125,42 @@ class SubscriberOut(BaseModel):
     active: bool
     has_pin: bool
     created_at: str
+    # Profile fields — None if not yet populated
+    employee_id: Optional[str] = None
+    department: Optional[str] = None
+    designation: Optional[str] = None
+    shift_timing: Optional[str] = None
+    address: Optional[str] = None
     # NOTE: 'pin' field intentionally excluded — never returned to clients
+
+
+class SubscriberUpdate(BaseModel):
+    """PATCH/PUT schema — all fields optional; only supplied fields are updated."""
+    name: Optional[str] = Field(default=None, min_length=1, max_length=50)
+    phone: Optional[str] = Field(default=None, min_length=1, max_length=20)
+    email: Optional[EmailStr] = Field(default=None, max_length=254)
+    escalation_order: Optional[int] = Field(default=None, ge=1, le=100)
+    employee_id: Optional[str] = Field(default=None, max_length=50)
+    department: Optional[str] = Field(default=None, max_length=100)
+    designation: Optional[str] = Field(default=None, max_length=100)
+    shift_timing: Optional[str] = Field(default=None, max_length=50)
+    address: Optional[str] = Field(default=None, max_length=255)
+
+    @field_validator("phone", mode="before")
+    @classmethod
+    def strip_phone(cls, v: Optional[str]) -> Optional[str]:
+        return v.strip() if isinstance(v, str) else v
+
+    @field_validator("phone")
+    @classmethod
+    def validate_phone(cls, v: Optional[str]) -> Optional[str]:
+        if v is None:
+            return v
+        if not re.match(r"^\+?[0-9]{10,15}$", v):
+            raise ValueError(
+                "phone must be 10-15 digits, optionally prefixed with +"
+            )
+        return v
 
 
 class PushSubscriptionIn(BaseModel):

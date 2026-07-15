@@ -37,8 +37,8 @@ _ENV_PATH = os.path.join(cfg.SERVER_WORKING_DIR, ".env.development")
 load_dotenv(_ENV_PATH, override=False)
 
 # Override developer contact from env if present
-DEVELOPER_EMAIL = os.getenv("DEVELOPER_EMAIL", cfg.DEVELOPER_EMAIL).strip()
-DEVELOPER_PHONE = os.getenv("DEVELOPER_PHONE", cfg.DEVELOPER_PHONE).strip()
+WATCHDOG_ALERT_EMAIL = os.getenv("WATCHDOG_ALERT_EMAIL", cfg.WATCHDOG_ALERT_EMAIL).strip()
+WATCHDOG_ALERT_PHONE = os.getenv("WATCHDOG_ALERT_PHONE", cfg.WATCHDOG_ALERT_PHONE).strip()
 
 # SMTP credentials (same as main server)
 SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com")
@@ -157,8 +157,8 @@ def send_alert_email(subject: str, body: str) -> None:
     """Send an alert email to DEVELOPER_EMAIL using the project SMTP config."""
     if not cfg.ALERT_EMAIL:
         return
-    if not DEVELOPER_EMAIL:
-        log.warning("ALERT_EMAIL=True but DEVELOPER_EMAIL is empty — skipping email.")
+    if not WATCHDOG_ALERT_EMAIL:
+        log.warning("ALERT_EMAIL=True but WATCHDOG_ALERT_EMAIL is empty — skipping email.")
         return
     if not SMTP_USER or not SMTP_PASS:
         log.warning("SMTP credentials missing in .env — skipping alert email.")
@@ -168,7 +168,7 @@ def send_alert_email(subject: str, body: str) -> None:
         msg = MIMEMultipart("alternative")
         msg["Subject"] = subject
         msg["From"]    = SMTP_USER
-        msg["To"]      = DEVELOPER_EMAIL
+        msg["To"]      = WATCHDOG_ALERT_EMAIL
 
         text_body = body.strip()
         html_body = f"""
@@ -189,9 +189,9 @@ def send_alert_email(subject: str, body: str) -> None:
             smtp.ehlo()
             smtp.starttls()
             smtp.login(SMTP_USER, SMTP_PASS)
-            smtp.sendmail(SMTP_USER, DEVELOPER_EMAIL, msg.as_string())
+            smtp.sendmail(SMTP_USER, WATCHDOG_ALERT_EMAIL, msg.as_string())
 
-        log.info("Alert email sent to %s", DEVELOPER_EMAIL)
+        log.info("Alert email sent to %s", WATCHDOG_ALERT_EMAIL)
     except Exception as exc:
         log.error("Failed to send alert email: %s", exc)
 
@@ -270,7 +270,7 @@ def _print_banner() -> None:
     print(f"   Failures needed: {cfg.CONSECUTIVE_FAILURES_TO_RESTART}")
     print(f"   Max restarts   : {cfg.MAX_RESTART_ATTEMPTS}")
     print(f"   Log file       : {cfg.LOG_FILE}")
-    print(f"   Alert email    : {DEVELOPER_EMAIL or '(not set)'}")
+    print(f"   Alert email    : {WATCHDOG_ALERT_EMAIL or '(not set)'}")
     print()
 
 

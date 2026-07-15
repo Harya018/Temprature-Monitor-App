@@ -31,8 +31,8 @@ echo.
 
 :loop
 echo [%date% %time%] Starting SentinelEdge...
-set PYTHONPATH=C:\Users\harya\OneDrive\Desktop\Sensor\sentineledge\backend
-cd /d C:\Users\harya\OneDrive\Desktop\Sensor\sentineledge
+SET PYTHONPATH=%~dp0backend
+cd /d %~dp0
 call venv\Scripts\uvicorn backend.main:app --host 0.0.0.0 --port 5000
 
 echo.

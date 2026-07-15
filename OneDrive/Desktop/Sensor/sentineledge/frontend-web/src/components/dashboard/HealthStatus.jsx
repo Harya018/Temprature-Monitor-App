@@ -17,11 +17,15 @@ const MODULE_ICONS = {
 }
 
 function statusBadge(s) {
-  if (!s || s === 'not_built') return { color:'gray', label:'Not built' }
-  if (s === 'ok')              return { color:'green', label:'OK' }
-  if (s === 'starting')        return { color:'amber', label:'Starting' }
-  if (s.startsWith('error'))   return { color:'red',   label:'Error' }
-  return { color:'gray', label: s }
+  // Unwrap { status: "..." } objects returned by the new health API
+  const str = String((s && typeof s === 'object' ? s.status : s) || '')
+  if (!str || str === 'not_built')    return { color:'gray',  label:'Not built' }
+  if (str === 'ok')                   return { color:'green', label:'OK' }
+  if (str === 'starting')             return { color:'amber', label:'Starting' }
+  if (str.startsWith('configured'))   return { color:'green', label:'Configured' }
+  if (str.startsWith('ok'))           return { color:'green', label:'OK' }
+  if (str.startsWith('error'))        return { color:'red',   label:'Error' }
+  return { color:'gray', label: str }
 }
 
 export default function HealthStatus() {
@@ -70,7 +74,9 @@ export default function HealthStatus() {
       {/* Modules */}
       <div className="space-y-2 mb-4">
         {['sensor','database','email','sms','websocket'].map(mod => {
-          const val = modules[mod] || 'unknown'
+          const raw = modules[mod]
+          // API returns modules as { status: "ok" } objects — unwrap .status for string ops
+          const val = String((raw && typeof raw === 'object' ? raw.status : raw) || 'unknown')
           const sb  = statusBadge(val)
           return (
             <div key={mod} className="flex items-center justify-between py-1.5 px-3 rounded-lg bg-gray-50">

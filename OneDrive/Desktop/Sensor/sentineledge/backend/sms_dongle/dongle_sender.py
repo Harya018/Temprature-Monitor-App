@@ -18,8 +18,6 @@ Standalone — zero imports from the main SentinelEdge project.
 Requires: pyserial  (pip install pyserial)
 """
 
-from __future__ import annotations
-
 import logging
 import time
 from typing import Optional

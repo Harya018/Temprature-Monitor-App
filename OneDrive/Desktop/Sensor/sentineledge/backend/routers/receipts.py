@@ -33,13 +33,13 @@ async def get_receipts(
         params: list = []
 
         if channel != "all":
-            where_clauses.append("dr.channel = ?")
+            where_clauses.append("dr.channel = %s")
             params.append(channel)
 
         if status == "success":
-            where_clauses.append("dr.success = 1")
+            where_clauses.append("dr.success = true")
         elif status == "failed":
-            where_clauses.append("dr.success = 0")
+            where_clauses.append("dr.success = false")
 
         where_sql = ("WHERE " + " AND ".join(where_clauses)) if where_clauses else ""
 
@@ -61,9 +61,10 @@ async def get_receipts(
             FROM delivery_receipts dr
             LEFT JOIN alerts       a ON dr.alert_id = a.id
             LEFT JOIN subscribers  s ON dr.subscriber_id = s.id
-            {where_sql}
+            WHERE dr.sent_at::timestamptz >= NOW() - INTERVAL '30 days'
+            {"AND " + " AND ".join(where_clauses) if where_clauses else ""}
             ORDER BY dr.id DESC
-            LIMIT ?
+            LIMIT %s
             """,
             (*params, limit),
         )

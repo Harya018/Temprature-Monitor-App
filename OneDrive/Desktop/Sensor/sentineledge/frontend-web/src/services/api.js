@@ -100,3 +100,8 @@ export const updateSubAdminPwd    = (id, newPwd)       => req('PUT',  `/api/admi
 
 // ── Alert management ─────────────────────────────────────────────────────────
 export const deleteAlerts         = (period)           => req('DELETE', `/api/alerts?period=${period}`)
+
+// ── Subscriber Profiles ───────────────────────────────────────────────────────
+export const fetchSubscriber      = (id)               => req('GET',  `/api/subscribers/${id}`,                  undefined, adminHeaders())
+export const updateSubscriber     = (id, data)         => req('PUT',  `/api/subscribers/${id}`,                  data)
+export const fetchSubscriberAcks  = (id)               => req('GET',  `/api/subscribers/${id}/acknowledgements`, undefined, adminHeaders())

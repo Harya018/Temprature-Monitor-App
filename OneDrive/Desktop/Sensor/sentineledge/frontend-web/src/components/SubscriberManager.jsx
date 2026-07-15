@@ -5,6 +5,7 @@
 
 import React, { useState, useEffect, useCallback } from 'react';
 import { fetchSubscribers, addSubscriber, deleteSubscriber } from '../services/api';
+import ConfirmModal from './shared/ConfirmModal';
 
 const ORDER_LABELS = {
   1: { label: 'Primary', color: 'text-danger bg-danger/10 border-danger/30' },
@@ -18,6 +19,7 @@ export default function SubscriberManager() {
   const [form, setForm] = useState({ name: '', phone: '', email: '', escalation_order: 1 });
   const [adding, setAdding] = useState(false);
   const [error, setError] = useState('');
+  const [confirmId, setConfirmId] = useState(null); // subscriber id pending deletion
 
   const load = useCallback(() => {
     fetchSubscribers()
@@ -49,13 +51,20 @@ export default function SubscriberManager() {
     }
   };
 
-  const handleDelete = async (id) => {
-    if (!window.confirm('Remove this subscriber?')) return;
+  // Step 1: open the confirmation modal
+  const handleDeleteClick = (id) => {
+    setConfirmId(id);
+  };
+
+  // Step 2: user confirmed — run the actual delete
+  const handleDeleteConfirm = async () => {
+    const id = confirmId;
+    setConfirmId(null);
     try {
       await deleteSubscriber(id);
       load();
     } catch (err) {
-      alert('Failed to delete: ' + err.message);
+      setError('Failed to delete: ' + (err.message || 'Unknown error'));
     }
   };
 
@@ -122,7 +131,7 @@ export default function SubscriberManager() {
                         </td>
                         <td className="py-2.5 px-2 text-right">
                           <button
-                            onClick={() => handleDelete(s.id)}
+                            onClick={() => handleDeleteClick(s.id)}
                             className="text-xs text-danger hover:text-danger/80 font-medium transition-colors"
                           >
                             Remove
@@ -193,6 +202,15 @@ export default function SubscriberManager() {
           </form>
         </div>
       )}
+      <ConfirmModal
+        isOpen={confirmId !== null}
+        title="Remove Subscriber"
+        message="Remove this subscriber? They will no longer receive alert notifications."
+        confirmLabel="Remove"
+        cancelLabel="Cancel"
+        onConfirm={handleDeleteConfirm}
+        onCancel={() => setConfirmId(null)}
+      />
     </div>
   );
 }

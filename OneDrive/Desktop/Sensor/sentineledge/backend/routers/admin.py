@@ -72,9 +72,11 @@ class _VerifyIn(BaseModel):
     description="Checks whether the supplied password matches ADMIN_PASSWORD. "
                 "No auth header required. Returns {valid: bool}.",
 )
-async def verify_password(body: _VerifyIn):
+@limiter.limit("10/minute")
+async def verify_password(body: _VerifyIn, request: Request):
     """Used by the frontend admin modal to verify the password on first entry."""
-    return {"valid": body.password == ADMIN_PASSWORD}
+    from utils.security import verify_pin
+    return {"valid": verify_pin(body.password, ADMIN_PASSWORD)}
 
 
 # ─── Admin Profile (GET + PATCH username/PIN) ─────────────────────────────────
@@ -119,9 +121,9 @@ async def update_admin_profile(body: _ProfileUpdateIn, request: Request):
     """Change admin username and/or PIN. Invalidates all DB sessions on success."""
     import re as _re
     import os as _os
-    import config as _cfg
+    from utils.security import verify_pin, hash_pin
 
-    if body.current_pin != _cfg.ADMIN_PASSWORD:
+    if not verify_pin(body.current_pin, _cfg.ADMIN_PASSWORD):
         return JSONResponse(status_code=401, content={"detail": "Current PIN is incorrect"})
 
     new_username = None
@@ -150,10 +152,11 @@ async def update_admin_profile(body: _ProfileUpdateIn, request: Request):
         with open(env_file, "r", encoding="utf-8") as f:
             content = f.read()
         if new_pin:
+            hashed_pin = hash_pin(new_pin)
             if _re.search(r"^ADMIN_PASSWORD=.*$", content, flags=_re.MULTILINE):
-                content = _re.sub(r"^ADMIN_PASSWORD=.*$", f"ADMIN_PASSWORD={new_pin}", content, flags=_re.MULTILINE)
+                content = _re.sub(r"^ADMIN_PASSWORD=.*$", f"ADMIN_PASSWORD={hashed_pin}", content, flags=_re.MULTILINE)
             else:
-                content = content.rstrip("\n") + f"\nADMIN_PASSWORD={new_pin}\n"
+                content = content.rstrip("\n") + f"\nADMIN_PASSWORD={hashed_pin}\n"
         if new_username:
             if _re.search(r"^ADMIN_USERNAME=.*$", content, flags=_re.MULTILINE):
                 content = _re.sub(r"^ADMIN_USERNAME=.*$", f"ADMIN_USERNAME={new_username}", content, flags=_re.MULTILINE)
@@ -166,7 +169,7 @@ async def update_admin_profile(body: _ProfileUpdateIn, request: Request):
         return JSONResponse(status_code=500, content={"detail": f"Failed to write .env: {exc}"})
 
     if new_pin:
-        _cfg.ADMIN_PASSWORD = new_pin
+        _cfg.ADMIN_PASSWORD = hashed_pin
     if new_username:
         _cfg.ADMIN_USERNAME = new_username
 
@@ -215,8 +218,9 @@ async def admin_login(body: _AdminLoginIn, request: Request):
     pin      = body.pin.strip()
 
     # Validate against runtime ADMIN_USERNAME and ADMIN_PASSWORD
+    from utils.security import verify_pin
     stored_username = getattr(_cfg, "ADMIN_USERNAME", "admin").lower()
-    valid = (username == stored_username and pin == _cfg.ADMIN_PASSWORD)
+    valid = (username == stored_username and verify_pin(pin, _cfg.ADMIN_PASSWORD))
 
     if not valid:
         return JSONResponse(
@@ -260,10 +264,10 @@ class _ChangePasswordIn(BaseModel):
 async def change_admin_password(body: _ChangePasswordIn):
     """Change the admin password in-place without restarting the server."""
     import re as _re
-    import config as _cfg
+    from utils.security import verify_pin, hash_pin
 
     # 1. Verify current password
-    if body.current_password != _cfg.ADMIN_PASSWORD:
+    if not verify_pin(body.current_password, _cfg.ADMIN_PASSWORD):
         return JSONResponse(
             status_code=401,
             content={"error": "Current password is incorrect"},
@@ -291,15 +295,16 @@ async def change_admin_password(body: _ChangePasswordIn):
         with open(env_file, "r", encoding="utf-8") as f:
             content = f.read()
 
+        hashed_pwd = hash_pin(new_pwd)
         if _re.search(r"^ADMIN_PASSWORD=.*$", content, flags=_re.MULTILINE):
             new_content = _re.sub(
                 r"^ADMIN_PASSWORD=.*$",
-                f"ADMIN_PASSWORD={new_pwd}",
+                f"ADMIN_PASSWORD={hashed_pwd}",
                 content,
                 flags=_re.MULTILINE,
             )
         else:
-            new_content = content.rstrip("\n") + f"\nADMIN_PASSWORD={new_pwd}\n"
+            new_content = content.rstrip("\n") + f"\nADMIN_PASSWORD={hashed_pwd}\n"
 
         with open(env_file, "w", encoding="utf-8") as f:
             f.write(new_content)
@@ -312,7 +317,7 @@ async def change_admin_password(body: _ChangePasswordIn):
         )
 
     # 5. Update in-memory value — no restart needed
-    _cfg.ADMIN_PASSWORD = new_pwd
+    _cfg.ADMIN_PASSWORD = hashed_pwd
 
     # 6. Invalidate all DB sessions (password changed — everyone must re-login)
     try:
@@ -573,7 +578,7 @@ async def test_email(body: _TestEmailIn):
     """Send a test HTML email to verify the email template."""
     import asyncio
     try:
-        ok = await asyncio.get_event_loop().run_in_executor(
+        ok = await asyncio.get_running_loop().run_in_executor(
             None,
             send_alert_email,
             body.email,
@@ -651,7 +656,7 @@ async def test_sms(body: _TestSmsIn):
             _sms_queue.put((body.phone, message, result_holder))
             logger.info("Test SMS queued to %s (mode=%s)", body.phone, mode)
 
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             try:
                 await asyncio.wait_for(
                     loop.run_in_executor(None, _sms_queue.join),

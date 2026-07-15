@@ -13,7 +13,7 @@ from fastapi.responses import JSONResponse
 import database
 from middleware.auth import require_admin
 from middleware.rate_limit import limiter
-from models import PushSubscriptionIn, SetPinIn, SubscriberIn, SubscriberOut
+from models import PushSubscriptionIn, SetPinIn, SubscriberIn, SubscriberOut, SubscriberUpdate
 
 router = APIRouter(prefix="/api", tags=["Subscribers"])
 
@@ -31,6 +31,11 @@ def _row_to_out(r: dict) -> SubscriberOut:
         active=is_active,
         has_pin=bool(r.get("pin")),
         created_at=r["created_at"],
+        employee_id=r.get("employee_id"),
+        department=r.get("department"),
+        designation=r.get("designation"),
+        shift_timing=r.get("shift_timing"),
+        address=r.get("address"),
     )
 
 
@@ -143,3 +148,60 @@ async def set_subscriber_pin(subscriber_id: int, body: SetPinIn):
     if not ok:
         raise HTTPException(status_code=404, detail="Subscriber not found")
     return {"status": "pin_set", "subscriber_id": subscriber_id}
+
+
+# ── New profile endpoints ──────────────────────────────────────────────────────
+
+@router.get(
+    "/subscribers/{subscriber_id}",
+    response_model=SubscriberOut,
+    summary="Get single subscriber",
+    description="Returns the full subscriber record including profile fields.",
+)
+@limiter.limit("30/minute")
+async def get_subscriber(subscriber_id: int, request: Request):
+    row = database.get_subscriber_by_id(subscriber_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Subscriber not found")
+    return _row_to_out(row)
+
+
+@router.put(
+    "/subscribers/{subscriber_id}",
+    response_model=SubscriberOut,
+    summary="Update subscriber profile",
+    description="Partial update of subscriber fields. Only supplied fields are written.",
+    dependencies=[Depends(require_admin)],
+)
+@limiter.limit("30/minute")
+async def update_subscriber(subscriber_id: int, body: SubscriberUpdate, request: Request):
+    # Check subscriber exists first
+    existing = database.get_subscriber_by_id(subscriber_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="Subscriber not found")
+
+    # Build dict of only the non-None fields that were explicitly supplied
+    fields = {k: v for k, v in body.model_dump().items() if v is not None}
+
+    updated = database.update_subscriber(subscriber_id, fields)
+    if not updated:
+        raise HTTPException(status_code=500, detail="Update failed")
+    return _row_to_out(updated)
+
+
+@router.get(
+    "/subscribers/{subscriber_id}/acknowledgements",
+    summary="Get acknowledgement history for a subscriber",
+    description=(
+        "Returns all alerts acknowledged by this subscriber, with breach metadata "
+        "and computed response_time_seconds. Returns empty list if none found."
+    ),
+)
+@limiter.limit("30/minute")
+async def get_subscriber_acknowledgements(subscriber_id: int, request: Request):
+    # Return empty list gracefully if subscriber not found
+    sub = database.get_subscriber_by_id(subscriber_id)
+    if not sub:
+        raise HTTPException(status_code=404, detail="Subscriber not found")
+    rows = database.get_acks_for_subscriber(subscriber_id)
+    return rows

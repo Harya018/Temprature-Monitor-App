@@ -3,9 +3,10 @@ modules/sms/sender.py — SentinelEdge Module 3: SMS Alert Sender.
 
 Routes SMS delivery to the correct transport based on SMS_METHOD in config:
 
-    SMS_METHOD=adb     → adb_sender.py  (Android phone via USB — demo/dev)
-    SMS_METHOD=gammu   → gammu_sender.py (USB GSM modem — production)
-    SMS_METHOD=gateway → gateway.py      (Android SMS Gateway REST API — LAN)
+    SMS_METHOD=adb      → adb_sender.py     (Android phone via Termux HTTP — demo/dev)
+    SMS_METHOD=gammu    → gammu_sender.py   (USB GSM modem via Gammu — production)
+    SMS_METHOD=gateway  → gateway.py        (Android SMS Gateway REST API — LAN)
+    SMS_METHOD=sim7600  → sim7600_sender.py (SIM7600 EI 4G HAT via USB serial AT cmds)
 
 Public API
 ----------
@@ -16,8 +17,6 @@ Public API
                    direction, timestamp_utc)    → bool  (sync)
     send_alert_sms_async(...)                   → bool  (async, non-blocking)
 """
-
-from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timezone, timedelta
@@ -87,11 +86,11 @@ def initialize_gsm_modem() -> None:
     global _modem_port, _mock_mode
 
     method = (SMS_METHOD or "adb").lower().strip()
-    if method != "gammu":
-        # Only gammu uses a physical serial modem — other methods are always live
+    if method not in ("gammu", "sim7600"):
+        # Only gammu/sim7600 use a physical serial modem; other methods are always live
         _mock_mode  = False
         _modem_port = None
-        logger.debug("GSM modem init skipped — SMS_METHOD=%s (not gammu)", SMS_METHOD)
+        logger.debug("GSM modem init skipped — SMS_METHOD=%s (not gammu/sim7600)", SMS_METHOD)
         return
 
     _modem_port = detect_gsm_modem()
@@ -236,9 +235,13 @@ def send_sms(phone: str, message: str) -> bool:
         from modules.sms.gateway import send_sms as send_sms_gateway
         return send_sms_gateway(phone, message)
 
+    elif method == "sim7600":
+        from modules.sms.sim7600_sender import send_sms as send_sms_sim7600
+        return send_sms_sim7600(phone, message)
+
     else:
         logger.error(
-            "Unknown SMS_METHOD: '%s'. Valid values: adb, gammu, gateway. "
+            "Unknown SMS_METHOD: '%s'. Valid values: adb, gammu, gateway, sim7600. "
             "Check your .env file.",
             SMS_METHOD,
         )
@@ -298,7 +301,7 @@ async def send_alert_sms_async(
     -------
     bool — True on success
     """
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     return await loop.run_in_executor(
         None,
         send_alert_sms,
@@ -346,7 +349,7 @@ def _gsm_worker() -> None:
             method = (SMS_METHOD or "adb").lower().strip()
 
             # ── Mock mode: log and return success without touching serial port ──
-            if method == "gammu" and _mock_mode:
+            if method in ("gammu", "sim7600") and _mock_mode:
                 ok = _mock_send_sms(phone, message)
                 result_holder["status"] = "mock_sent"
                 result_holder["mock"]   = True
@@ -439,8 +442,11 @@ async def send_sms_to_all(
 
     message = build_sms_message(value, threshold, direction, timestamp_utc)
 
-    # ── GSM dongle path: use the queue worker ─────────────────────────────────
-    if method == "gammu":
+    # ── Serial modem path: use the queue worker ─────────────────────────────
+    # Both gammu and sim7600 own a single physical serial port — cannot be
+    # shared across threads.  Push all jobs onto the queue and let the single
+    # worker drain them in order.
+    if method in ("gammu", "sim7600"):
         results: list[dict] = []
         for sub in targets:
             holder: dict = {"to": sub["phone"], "status": "queued", "error": None}
@@ -448,18 +454,20 @@ async def send_sms_to_all(
             results.append(holder)
 
         logger.info(
-            "SMS batch: queued %d messages for GSM worker (method=gammu)",
-            len(results),
+            "SMS batch: queued %d messages for serial worker (method=%s)",
+            len(results), method,
         )
 
         # Wait for all queued jobs to finish (non-blocking via executor)
         timeout = len(results) * 15 + 30   # 15s per SMS + 30s buffer
         try:
-            loop = asyncio.get_event_loop()
-            await loop.run_in_executor(
-                None,
-                lambda: _sms_queue.join(),
+            loop = asyncio.get_running_loop()
+            await asyncio.wait_for(
+                loop.run_in_executor(None, _sms_queue.join),
+                timeout=timeout,
             )
+        except asyncio.TimeoutError:
+            logger.warning("SMS delivery timed out after %ds — continuing without SMS", timeout)
         except Exception as exc:
             logger.error("SMS batch join error: %s", exc)
 

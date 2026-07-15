@@ -15,8 +15,6 @@ Usage as script:
     python backend/utils/import_csv.py path/to/file.csv
 """
 
-from __future__ import annotations
-
 import csv
 import os
 import sys

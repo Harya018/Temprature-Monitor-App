@@ -9,8 +9,6 @@ Admin session tokens are now stored in PostgreSQL (admin_sessions table) so
 they survive server restarts. The in-memory _login_sessions dict has been removed.
 """
 
-from __future__ import annotations
-
 from typing import Any, Optional
 
 from fastapi import Header, HTTPException, Request, status
@@ -36,8 +34,9 @@ def require_admin(
     """
     from datetime import datetime, timezone
 
+    from utils.security import verify_pin
     # 1. Check X-Admin-Password header (always valid regardless of sessions)
-    if x_admin_password and x_admin_password == ADMIN_PASSWORD:
+    if x_admin_password and verify_pin(x_admin_password, ADMIN_PASSWORD):
         return True
 
     # 2. Check Authorization: Bearer <token> against DB sessions

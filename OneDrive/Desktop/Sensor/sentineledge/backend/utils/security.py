@@ -12,8 +12,6 @@ hash_pin(plain_pin)          → bcrypt hash string (stored in DB)
 verify_pin(plain_pin, hash)  → True if plain matches the stored hash
 """
 
-from __future__ import annotations
-
 import bcrypt
 
 from utils.logger import get_logger
@@ -42,3 +40,47 @@ def verify_pin(plain_pin: str, hashed_pin: str) -> bool:
     except Exception as exc:
         logger.warning("verify_pin: comparison error: %s", exc)
         return False
+
+
+def migrate_env_admin_password() -> None:
+    """
+    Reads the active .env file and hashes ADMIN_PASSWORD if it's plain text.
+    Called once during startup.
+    """
+    import os
+    import re
+    import config as _cfg
+
+    if not _cfg.ADMIN_PASSWORD or _cfg.ADMIN_PASSWORD.startswith("$2b$"):
+        return
+
+    root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
+    env_file = os.path.join(root, f".env.{_cfg.APP_ENV}")
+    if not os.path.exists(env_file):
+        env_file = os.path.join(root, ".env")
+        if not os.path.exists(env_file):
+            return
+
+    try:
+        with open(env_file, "r", encoding="utf-8") as f:
+            content = f.read()
+
+        hashed_pwd = hash_pin(_cfg.ADMIN_PASSWORD)
+        
+        if re.search(r"^ADMIN_PASSWORD=.*$", content, flags=re.MULTILINE):
+            new_content = re.sub(
+                r"^ADMIN_PASSWORD=.*$",
+                f"ADMIN_PASSWORD={hashed_pwd}",
+                content,
+                flags=re.MULTILINE,
+            )
+        else:
+            new_content = content.rstrip("\n") + f"\nADMIN_PASSWORD={hashed_pwd}\n"
+
+        with open(env_file, "w", encoding="utf-8") as f:
+            f.write(new_content)
+
+        _cfg.ADMIN_PASSWORD = hashed_pwd
+        logger.info("Migrated ADMIN_PASSWORD in .env to bcrypt")
+    except Exception as exc:
+        logger.error("Failed to migrate ADMIN_PASSWORD in .env: %s", exc)

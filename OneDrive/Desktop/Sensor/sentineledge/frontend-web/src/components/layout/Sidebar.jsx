@@ -7,8 +7,9 @@ import { NavLink, useNavigate } from 'react-router-dom'
 import {
   LayoutDashboard, Bell, Terminal, Archive, BarChart2,
   Receipt, Monitor, Users, Settings, Activity,
-  ClipboardList, Thermometer, LogOut, CheckCheck, UserCircle2, ShieldCheck,
+  ClipboardList, Thermometer, LogOut, CheckCheck, UserCircle2, ShieldCheck, UserRoundSearch,
 } from 'lucide-react'
+
 
 const NAV = [
   { to: '/dashboard',   icon: LayoutDashboard, label: 'Dashboard'    },
@@ -18,7 +19,8 @@ const NAV = [
   { to: '/reports',     icon: BarChart2,       label: 'Reports'       },
   { to: '/receipts',    icon: Receipt,         label: 'Receipts'      },
   { to: '/monitor',     icon: Monitor,         label: 'Monitor'       },
-  { to: '/subscribers', icon: Users,           label: 'Subscribers'   },
+  { to: '/subscribers', icon: Users,            label: 'Subscribers',       end: true  },
+  { to: '/subscribers/profiles', icon: UserRoundSearch, label: 'Subscriber Profiles' },
   { to: '/settings',    icon: Settings,        label: 'Settings'      },
   { to: '/health',      icon: Activity,        label: 'Health'        },
   { to: '/events',      icon: ClipboardList,   label: 'Audit Trail'   },
@@ -53,10 +55,11 @@ export default function Sidebar({ unreadCount }) {
 
       {/* Nav */}
       <nav className="flex-1 py-3 space-y-0.5 px-2">
-        {NAV.map(({ to, icon: Icon, label }) => (
+        {NAV.map(({ to, icon: Icon, label, end: endMatch }) => (
           <NavLink
             key={to}
             to={to}
+            end={!!endMatch}
             className={({ isActive }) =>
               `flex items-center gap-3 px-3 py-2 rounded-lg transition-all w-full no-underline text-sm font-medium ${
                 isActive ? 'text-white' : 'hover:bg-white/10'

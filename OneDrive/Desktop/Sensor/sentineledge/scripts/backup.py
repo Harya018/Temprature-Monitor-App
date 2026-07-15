@@ -23,29 +23,32 @@ import smtplib
 from email.mime.text import MIMEText
 from pathlib import Path
 
-# ─────────────────────────────────────────────
-# CONFIGURATION — fill these in before deploying
-# ─────────────────────────────────────────────
-GDRIVE_EMAIL       = "YOUR_GMAIL_HERE@gmail.com"        # TODO: fill in
-GDRIVE_PASSWORD    = "YOUR_APP_PASSWORD_HERE"           # TODO: fill in (App Password)
-GDRIVE_FOLDER_ID   = "YOUR_GOOGLE_DRIVE_FOLDER_ID"     # TODO: fill in
+from dotenv import load_dotenv
 
-# PostgreSQL connection details — must match backend .env
-PG_HOST     = "localhost"
-PG_PORT     = "5432"
-PG_DB       = "sentineledge"
-PG_USER     = "postgres"
-PG_PASSWORD = "your_postgres_password"                  # TODO: fill in
+# Load from .env if present (navigate up from scripts/ to project root)
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+load_dotenv(PROJECT_ROOT / ".env")
+load_dotenv(PROJECT_ROOT / ".env.development")
 
-# pg_dump path — default PostgreSQL 16 Windows install location
-PG_DUMP_PATH = r"C:\Program Files\PostgreSQL\16\bin\pg_dump.exe"
+# PostgreSQL connection details
+PG_HOST     = os.getenv("DB_HOST", "localhost")
+PG_PORT     = os.getenv("DB_PORT", "5432")
+PG_DB       = os.getenv("DB_NAME", "sentineledge")
+PG_USER     = os.getenv("DB_USER", "postgres")
+PG_PASSWORD = os.getenv("DB_PASSWORD", "postgres")
+
+# rclone settings
+RCLONE_REMOTE = os.getenv("RCLONE_REMOTE", "gdrive")
+RCLONE_PATH   = os.getenv("RCLONE_PATH", "sentineledge-backups")
+
+# pg_dump path
+PG_DUMP_PATH = os.getenv("PG_DUMP_PATH", r"C:\Program Files\PostgreSQL\16\bin\pg_dump.exe")
 
 # Local backup folder (keeps last 7 days)
-BACKUP_DIR = Path(r"C:\Users\harya\OneDrive\Desktop\Sensor\sentineledge\backups")
+BACKUP_DIR = PROJECT_ROOT / "backups"
 
 # Developer email for error notifications
-DEVELOPER_EMAIL = "YOUR_DEVELOPER_EMAIL@gmail.com"     # TODO: fill in
-# ─────────────────────────────────────────────
+ALERT_EMAIL = os.getenv("ALERT_EMAIL", "")
 
 
 def log(msg: str):
@@ -55,16 +58,28 @@ def log(msg: str):
 
 def send_error_email(subject: str, body: str):
     """Send error notification to developer if backup fails."""
-    if "YOUR_GMAIL" in GDRIVE_EMAIL:
-        log("Email not configured — skipping error notification.")
+    if not ALERT_EMAIL:
+        log("ALERT_EMAIL not configured — skipping error notification.")
         return
+        
+    SMTP_HOST = os.getenv("SMTP_HOST", "smtp.gmail.com")
+    SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
+    SMTP_USER = os.getenv("SMTP_USER", "")
+    SMTP_PASS = os.getenv("SMTP_PASSWORD", "")
+    
+    if not SMTP_USER or not SMTP_PASS:
+        log("SMTP credentials missing in .env — skipping error notification.")
+        return
+
     try:
         msg = MIMEText(body)
         msg["Subject"] = f"[SentinelEdge] Backup FAILED — {subject}"
-        msg["From"] = GDRIVE_EMAIL
-        msg["To"] = DEVELOPER_EMAIL
-        with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-            server.login(GDRIVE_EMAIL, GDRIVE_PASSWORD)
+        msg["From"] = SMTP_USER
+        msg["To"] = ALERT_EMAIL
+        with smtplib.SMTP(SMTP_HOST, SMTP_PORT) as server:
+            server.ehlo()
+            server.starttls()
+            server.login(SMTP_USER, SMTP_PASS)
             server.send_message(msg)
         log("Error notification sent to developer.")
     except Exception as e:
@@ -104,48 +119,8 @@ def run_pg_dump() -> Path:
     return backup_file
 
 
-def upload_to_gdrive(backup_file: Path):
-    """Upload backup file to Google Drive using PyDrive2."""
-    if "YOUR_GMAIL" in GDRIVE_EMAIL:
-        log("Google Drive not configured — skipping upload.")
-        log("Backup saved locally only.")
-        return
 
-    from pydrive2.auth import GoogleAuth
-    from pydrive2.drive import GoogleDrive
-    from oauth2client.service_account import ServiceAccountCredentials
 
-    log("Authenticating with Google Drive...")
-
-    # Use stored credentials if available, otherwise authenticate
-    gauth = GoogleAuth()
-    gauth.settings["client_config_backend"] = "settings"
-    gauth.settings["client_config"] = {
-        "client_id": "",
-        "client_secret": "",
-        "auth_uri": "https://accounts.google.com/o/oauth2/auth",
-        "token_uri": "https://oauth2.googleapis.com/token",
-        "redirect_uri": "urn:ietf:wg:oauth:2.0:oob"
-    }
-
-    # Use service account credentials via oauth2
-    import httplib2
-    from oauth2client.client import GoogleCredentials
-    import json
-
-    # Simple approach: use gdrive CLI via subprocess if available
-    # Fall back to pydrive2 OAuth flow
-    try:
-        drive = GoogleDrive(gauth)
-        file_obj = drive.CreateFile({
-            "title": backup_file.name,
-            "parents": [{"id": GDRIVE_FOLDER_ID}]
-        })
-        file_obj.SetContentFile(str(backup_file))
-        file_obj.Upload()
-        log(f"Uploaded to Google Drive: {backup_file.name}")
-    except Exception as e:
-        raise RuntimeError(f"Google Drive upload failed: {e}")
 
 
 def upload_via_rclone(backup_file: Path):
@@ -154,12 +129,12 @@ def upload_via_rclone(backup_file: Path):
     rclone must be configured once with: rclone config
     Remote name must be 'gdrive' pointing to Google Drive folder.
     """
-    log(f"Uploading via rclone → gdrive:{GDRIVE_FOLDER_ID}/")
+    log(f"Uploading via rclone → {RCLONE_REMOTE}:{RCLONE_PATH}/")
     result = subprocess.run(
         [
             "rclone", "copy",
             str(backup_file),
-            f"gdrive:{GDRIVE_FOLDER_ID}/",
+            f"{RCLONE_REMOTE}:{RCLONE_PATH}/",
             "--log-level", "INFO"
         ],
         capture_output=True,
@@ -174,10 +149,15 @@ def delete_old_backups(keep_days: int = 7):
     """Delete local backups older than keep_days."""
     cutoff = datetime.datetime.now() - datetime.timedelta(days=keep_days)
     deleted = 0
+    if not BACKUP_DIR.exists():
+        return
+        
     for f in BACKUP_DIR.glob("sentineledge_backup_*.sql"):
-        if datetime.datetime.fromtimestamp(f.stat().st_mtime) < cutoff:
-            f.unlink()
-            deleted += 1
+        if f.is_file():
+            mtime = datetime.datetime.fromtimestamp(f.stat().st_mtime)
+            if mtime < cutoff:
+                f.unlink()
+                deleted += 1
     if deleted:
         log(f"Deleted {deleted} old backup(s) older than {keep_days} days.")
 

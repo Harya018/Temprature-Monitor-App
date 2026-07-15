@@ -28,6 +28,8 @@ from database.queries.subscribers import (
     delete_subscriber,
     disable_subscriber,
     enable_subscriber,
+    update_subscriber,
+    get_acks_for_subscriber,
 )
 from database.queries.escalation_log import log_escalation
 from database.queries.receipts import (
@@ -67,6 +69,7 @@ __all__ = [
     "get_subscriber_by_name_and_pin", "set_subscriber_pin",
     "add_subscriber", "update_push_subscription", "delete_subscriber",
     "disable_subscriber", "enable_subscriber",
+    "update_subscriber", "get_acks_for_subscriber",
     # escalation log
     "log_escalation",
     # delivery receipts

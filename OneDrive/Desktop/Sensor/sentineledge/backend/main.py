@@ -11,8 +11,6 @@ Production upgrades in this version:
   - Persistent admin sessions (PostgreSQL admin_sessions table)
 """
 
-from __future__ import annotations
-
 import asyncio
 import json
 import os
@@ -88,9 +86,12 @@ logger = get_logger(__name__)
 async def lifespan(app: FastAPI):
     # ── Startup ───────────────────────────────────────────────────────────────
 
-    # 1. Initialise PostgreSQL connection pool + schema
+    # 1. Initialise PostgreSQL connection pool + schema + admin password migration
     database.get_db_pool()
     database.init_db()
+
+    from utils.security import migrate_env_admin_password
+    migrate_env_admin_password()
 
     # 2. Clean up any stale admin sessions from previous server runs
     try:
@@ -332,13 +333,16 @@ async def websocket_endpoint(ws: WebSocket):
 async def log_stream(websocket: WebSocket):
     """Stream sentineledge.log in real time to the admin dashboard."""
     await websocket.accept()
-    log_path = Path("logs/sentineledge.log")
 
-    # Send last 100 lines on connect
+    # Resolve log path relative to this file so it works regardless of CWD
+    log_path = Path(os.path.join(os.path.dirname(__file__), "..", "logs", "sentineledge.log")).resolve()
+
+    # Send last 100 lines on connect — silently skip if file missing or unreadable
     if log_path.exists():
         try:
             lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
-            for line in lines[-100:]:
+            initial_lines = lines[-100:] if len(lines) > 100 else lines
+            for line in initial_lines:
                 await websocket.send_text(line)
         except Exception as exc:
             logger.warning("log_stream: error reading initial lines: %s", exc)
@@ -361,6 +365,7 @@ async def log_stream(websocket: WebSocket):
         pass
     except Exception as exc:
         logger.warning("log_stream error: %s", exc)
+
 
 
 # ─── Readings endpoint ────────────────────────────────────────────────────────

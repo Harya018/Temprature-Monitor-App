@@ -13,8 +13,6 @@ send_email_async(to_address, subject, body) -> bool    # async plain-text wrappe
 send_alert_email_async(...)  -> bool                   # async HTML email
 """
 
-from __future__ import annotations
-
 import asyncio
 import logging
 import smtplib
@@ -116,7 +114,7 @@ async def send_alert_email_async(
     timestamp_utc: str,
 ) -> bool:
     """Async wrapper around send_alert_email() using a thread-pool executor."""
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     return await loop.run_in_executor(
         None,
         send_alert_email,
@@ -155,7 +153,7 @@ def send_email(to_address: str, subject: str, body: str) -> bool:
 
 async def send_email_async(to_address: str, subject: str, body: str) -> bool:
     """Async wrapper around send_email() using a thread-pool executor."""
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, send_email, to_address, subject, body)
 
 
@@ -225,7 +223,7 @@ async def send_alert_email_to_all(
             logger.error("Email batch: failed to %s: %s", sub["email"], exc)
         return result
 
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     max_workers = min(len(targets), 20)
 
     with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="email_batch") as executor:

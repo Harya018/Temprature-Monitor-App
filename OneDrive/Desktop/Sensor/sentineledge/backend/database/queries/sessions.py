@@ -11,8 +11,6 @@ Functions:
     cleanup_expired_sessions()             → int  (rows deleted)
 """
 
-from __future__ import annotations
-
 from datetime import datetime
 from typing import Optional
 

@@ -302,6 +302,22 @@ def _run_migrations(pool: psycopg2.pool.ThreadedConnectionPool) -> None:
                 cur.execute("UPDATE subscribers SET is_active = active")
                 logger.info("Migration: added is_active column to subscribers")
 
+            # Migration 8: subscriber profile fields
+            _sub_profile_cols = [
+                ("employee_id",  "TEXT"),
+                ("department",   "TEXT"),
+                ("designation",  "TEXT"),
+                ("shift_timing", "TEXT"),
+                ("address",      "TEXT"),
+            ]
+            if table_exists("subscribers"):
+                for _col, _ctype in _sub_profile_cols:
+                    if not col_exists("subscribers", _col):
+                        cur.execute(
+                            f"ALTER TABLE subscribers ADD COLUMN {_col} {_ctype}"
+                        )
+                        logger.info("Migration: added %s column to subscribers", _col)
+
             # Migration 7: admin_sessions table
             if not table_exists("admin_sessions"):
                 cur.execute("""

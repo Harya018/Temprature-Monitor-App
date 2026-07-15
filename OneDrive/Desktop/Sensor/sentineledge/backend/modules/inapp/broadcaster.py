@@ -5,8 +5,6 @@ Wraps pywebpush to deliver push notifications to browsers via VAPID.
 Extracted from the original notifier.py (send_push / send_push_async).
 """
 
-from __future__ import annotations
-
 import asyncio
 import json
 import logging
@@ -79,7 +77,7 @@ async def send_push_async(
     data: Optional[dict] = None,
 ) -> bool:
     """Async wrapper around send_push() using a thread-pool executor."""
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     return await loop.run_in_executor(
         None, send_push, push_subscription_json, title, body, data
     )

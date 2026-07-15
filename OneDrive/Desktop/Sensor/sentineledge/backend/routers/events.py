@@ -43,7 +43,7 @@ async def get_events(
         if type in ("all", "config"):
             rows = execute_read(
                 "SELECT id, changed_at as ts, changed_by, field_name, old_value, new_value "
-                "FROM config_changes ORDER BY id DESC LIMIT ?", (limit,)
+                "FROM config_changes ORDER BY id DESC LIMIT %s", (limit,)
             )
             for r in rows:
                 events.append({
@@ -64,7 +64,7 @@ async def get_events(
             rows = execute_read(
                 "SELECT id, timestamp as ts, parameter, value, severity, "
                 "direction, escalation_level, acknowledged, acknowledged_by "
-                "FROM alerts ORDER BY id DESC LIMIT ?", (limit,)
+                "FROM alerts ORDER BY id DESC LIMIT %s", (limit,)
             )
             for r in rows:
                 events.append({
@@ -88,7 +88,7 @@ async def get_events(
             try:
                 backup_dir = Path(_BACKUP_DIR)
                 if backup_dir.exists():
-                    for f in sorted(backup_dir.glob("sentineledge_*.db"),
+                    for f in sorted(backup_dir.glob("sentineledge_*.sql"),
                                     key=lambda p: p.stat().st_mtime, reverse=True)[:20]:
                         mtime = f.stat().st_mtime
                         from datetime import datetime, timezone

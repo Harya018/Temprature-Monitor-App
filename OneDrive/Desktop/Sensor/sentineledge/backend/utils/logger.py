@@ -45,7 +45,7 @@ def _configure() -> None:
 
     # Determine level from APP_ENV
     app_env = os.getenv("APP_ENV", "development").lower()
-    level = logging.DEBUG if app_env == "development" else logging.WARNING
+    level = logging.DEBUG if app_env == "development" else logging.INFO
 
     root = logging.getLogger(_ROOT_LOGGER_NAME)
     root.setLevel(level)

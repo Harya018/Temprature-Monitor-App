@@ -40,20 +40,24 @@ def verify_admin_password(name: str, plain: str) -> Optional[dict]:
 
 def create_admin(name: str, plain_password: str, role: str = "sub") -> Optional[int]:
     """
-    Create a new admin account. Returns the new row id, or None on failure.
+    Create a new admin account. Returns the new row id, or None if the name
+    already exists (UniqueViolation) or on any other database error.
     role must be 'main' or 'sub'.
     Password is stored as a bcrypt hash.
     """
     try:
         ts = datetime.now(timezone.utc).isoformat()
-        cur = execute_write(
+        # execute_write() captures the RETURNING id into _WriteResult.lastrowid.
+        # Do NOT call .fetchone() — _WriteResult is not a cursor.
+        result = execute_write(
             "INSERT INTO admins (name, password_hash, role, created_at) "
             "VALUES (%s, %s, %s, %s) RETURNING id",
             (name, hash_pin(plain_password), role, ts),
         )
-        return cur.lastrowid
+        return result.lastrowid
     except Exception as exc:
-        logger.error("create_admin failed: %s", exc)
+        # Log with repr() so the exception *type* (e.g. UniqueViolation) is always visible.
+        logger.error("create_admin failed for name=%r: %r", name, exc)
         return None
 
 

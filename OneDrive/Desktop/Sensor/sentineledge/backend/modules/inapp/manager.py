@@ -5,8 +5,6 @@ Manages the set of active WebSocket connections and provides
 the broadcast helper used by the /ws endpoint in main.py.
 """
 
-from __future__ import annotations
-
 import json
 import logging
 from typing import Set

@@ -6,6 +6,8 @@ Endpoints:
     GET /api/history/alerts?date=YYYY-MM-DD
     GET /api/history/export/alerts?start=&end=
     GET /api/history/export/readings?start=&end=
+
+NOTE: All SQL placeholders use %s (psycopg2/PostgreSQL). Never use ? here.
 """
 
 
@@ -34,11 +36,11 @@ async def history_stats(date: str = Query(..., description="YYYY-MM-DD")):
         end   = f"{date}T23:59:59"
 
         readings = execute_read(
-            "SELECT temperature FROM readings WHERE timestamp >= ? AND timestamp <= ?",
+            "SELECT temperature, timestamp FROM readings WHERE timestamp >= %s AND timestamp <= %s",
             (start, end),
         )
         alerts = execute_read(
-            "SELECT * FROM alerts WHERE timestamp >= ? AND timestamp <= ?",
+            "SELECT * FROM alerts WHERE timestamp >= %s AND timestamp <= %s",
             (start, end),
         )
 
@@ -51,7 +53,7 @@ async def history_stats(date: str = Query(..., description="YYYY-MM-DD")):
         # Delivery breakdown
         receipts = execute_read(
             "SELECT channel, success, COUNT(*) as cnt FROM delivery_receipts "
-            "WHERE sent_at >= ? AND sent_at <= ? GROUP BY channel, success",
+            "WHERE sent_at >= %s AND sent_at <= %s GROUP BY channel, success",
             (start, end),
         )
         delivery = {"email": {"sent": 0, "failed": 0}, "sms": {"sent": 0, "failed": 0}}
@@ -84,7 +86,7 @@ async def history_alerts(date: str = Query(..., description="YYYY-MM-DD")):
         start = f"{date}T00:00:00"
         end   = f"{date}T23:59:59"
         rows = execute_read(
-            "SELECT * FROM alerts WHERE timestamp >= ? AND timestamp <= ? ORDER BY id DESC",
+            "SELECT * FROM alerts WHERE timestamp >= %s AND timestamp <= %s ORDER BY id DESC",
             (start, end),
         )
         return [dict(r) for r in rows]
@@ -101,7 +103,7 @@ async def export_alerts_csv(
     """Export alerts in a date range as CSV."""
     try:
         rows = execute_read(
-            "SELECT * FROM alerts WHERE timestamp >= ? AND timestamp <= ? ORDER BY id",
+            "SELECT * FROM alerts WHERE timestamp >= %s AND timestamp <= %s ORDER BY id",
             (f"{start}T00:00:00", f"{end}T23:59:59"),
         )
         buf = io.StringIO()
@@ -133,7 +135,7 @@ async def export_readings_csv(
     try:
         rows = execute_read(
             "SELECT id, temperature, timestamp, is_valid FROM readings "
-            "WHERE timestamp >= ? AND timestamp <= ? ORDER BY id",
+            "WHERE timestamp >= %s AND timestamp <= %s ORDER BY id",
             (f"{start}T00:00:00", f"{end}T23:59:59"),
         )
         buf = io.StringIO()

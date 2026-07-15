@@ -5,6 +5,7 @@
  */
 import { useState, useEffect, useCallback } from 'react'
 import { Plus, Trash2, KeyRound, ShieldCheck, ShieldAlert, Eye, EyeOff, RefreshCw } from 'lucide-react'
+import ConfirmModal from '../components/shared/ConfirmModal'
 
 function adminHeaders() {
   return {
@@ -41,6 +42,9 @@ export default function ManageAdminsPage() {
   const [showEdit, setShowEdit]  = useState(false)
   const [updating, setUpdating]  = useState(false)
 
+  // Delete confirmation modal
+  const [confirmTarget, setConfirmTarget] = useState(null) // admin object pending deletion
+
   function notify(msg, ok = true) {
     setToast({ msg, ok })
     setTimeout(() => setToast(null), 4000)
@@ -74,8 +78,15 @@ export default function ManageAdminsPage() {
     }
   }
 
-  const handleDelete = async (admin) => {
-    if (!window.confirm(`Delete sub-admin "${admin.name}"? This cannot be undone.`)) return
+  // Step 1: open the confirmation modal
+  const handleDeleteClick = (admin) => {
+    setConfirmTarget(admin)
+  }
+
+  // Step 2: user confirmed — run the actual delete
+  const handleDeleteConfirm = async () => {
+    const admin = confirmTarget
+    setConfirmTarget(null)
     try {
       await apiFetch('DELETE', `/api/admin/admins/${admin.id}`)
       notify(`Sub-admin "${admin.name}" deleted`)
@@ -223,7 +234,7 @@ export default function ManageAdminsPage() {
                           <KeyRound size={14} />
                         </button>
                         <button
-                          onClick={() => handleDelete(admin)}
+                          onClick={() => handleDeleteClick(admin)}
                           title="Delete"
                           className="p-1.5 rounded-lg hover:bg-red-50 text-red-500 transition-colors"
                         >
@@ -278,6 +289,16 @@ export default function ManageAdminsPage() {
           </div>
         </div>
       )}
+      {/* Delete confirmation modal */}
+      <ConfirmModal
+        isOpen={confirmTarget !== null}
+        title={`Delete Sub-Admin`}
+        message={`Delete sub-admin "${confirmTarget?.name}"? This cannot be undone.`}
+        confirmLabel="Delete"
+        cancelLabel="Cancel"
+        onConfirm={handleDeleteConfirm}
+        onCancel={() => setConfirmTarget(null)}
+      />
     </div>
   )
 }

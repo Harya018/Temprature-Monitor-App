@@ -26,18 +26,24 @@ const MODULE_ICONS = {
 }
 
 function statusBadge(s) {
-  if (!s || s === 'not_built') return { color:'gray', label:'Not Built' }
-  if (s === 'ok')              return { color:'green', label:'OK' }
-  if (s === 'starting')        return { color:'amber', label:'Starting' }
-  if (s.startsWith('error'))   return { color:'red',   label:'Error' }
-  return { color:'gray', label: s }
+  const str = String(s || '')
+  if (!str || str === 'not_built')      return { color:'gray',  label:'Not Built' }
+  if (str === 'ok')                     return { color:'green', label:'OK' }
+  if (str === 'starting')               return { color:'amber', label:'Starting' }
+  if (str.startsWith('configured'))     return { color:'green', label:'Configured' }
+  if (str.startsWith('ok'))             return { color:'green', label:'OK' }
+  if (str.startsWith('error'))          return { color:'red',   label:'Error' }
+  return { color:'gray', label: str }
 }
 
 function statusIcon(s) {
-  if (!s || s === 'not_built') return <Archive size={16} className="text-gray-400" />
-  if (s === 'ok')              return <CheckCircle size={16} className="text-emerald-500" />
-  if (s === 'starting')        return <AlertTriangle size={16} className="text-amber-500" />
-  return <XCircle size={16} className="text-red-500" />
+  const str = String(s || '')
+  if (!str || str === 'not_built')   return <Archive size={16} className="text-gray-400" />
+  if (str.startsWith('ok'))          return <CheckCircle size={16} className="text-emerald-500" />
+  if (str.startsWith('configured'))  return <CheckCircle size={16} className="text-emerald-500" />
+  if (str === 'starting')            return <AlertTriangle size={16} className="text-amber-500" />
+  if (str.startsWith('error'))       return <XCircle size={16} className="text-red-500" />
+  return <AlertTriangle size={16} className="text-amber-400" />
 }
 
 export default function HealthPage() {
@@ -207,8 +213,12 @@ export default function HealthPage() {
           <h2 className="text-sm font-semibold text-gray-700 mb-3">Module Status</h2>
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
             {['sensor','database','email','sms','websocket'].map(mod => {
-              const val = modules[mod] || 'unknown'
-              const sb  = statusBadge(val)
+              // API now returns modules as { status: "ok" } objects — unwrap .status
+              const raw = modules[mod]
+              const val = String(
+                (raw && typeof raw === 'object' ? raw.status : raw) ?? 'unknown'
+              )
+              const sb      = statusBadge(val)
               const isError = val.startsWith('error')
               return (
                 <div key={mod} className="card p-5">
@@ -237,6 +247,9 @@ export default function HealthPage() {
                   )}
                   {val === 'not_built' && (
                     <p className="text-xs text-gray-400 mt-2">Module not implemented yet</p>
+                  )}
+                  {val !== 'unknown' && val !== 'not_built' && !isError && (
+                    <p className="text-xs text-gray-400 mt-2 truncate" title={val}>{val}</p>
                   )}
                 </div>
               )

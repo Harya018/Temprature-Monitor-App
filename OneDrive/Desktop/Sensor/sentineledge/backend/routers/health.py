@@ -1,8 +1,8 @@
 """
 routers/health.py — /api/health endpoint.
 
-Returns comprehensive system health including module statuses,
-uptime, connected clients, alert count, last reading, and delivery stats.
+Returns status, timestamp, uptime_seconds, and a modules dict.
+No credential values (passwords, usernames, etc.) are ever included.
 
 Rate limiting (slowapi): 120/minute per IP (mobile app polls frequently).
 """
@@ -12,10 +12,9 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, Request
 
-import database
-from config import MODULE_STATUS, APP_ENV, APP_VERSION, SMS_METHOD, SMTP_USER
+import config
+from config import MODULE_STATUS
 from middleware.rate_limit import limiter
-from modules.inapp.manager import active_connections
 
 router = APIRouter(prefix="/api")
 logger = logging.getLogger("sentineledge.routers.health")
@@ -25,21 +24,6 @@ _START_TIME = datetime.now(timezone.utc)
 
 # Last sensor reading — updated by main.py WebSocket handler
 last_reading: dict = {}
-
-
-def _format_uptime() -> str:
-    """Return a human-readable uptime string like '2h 34m 12s'."""
-    delta = datetime.now(timezone.utc) - _START_TIME
-    total_seconds = int(delta.total_seconds())
-    hours, remainder = divmod(total_seconds, 3600)
-    minutes, seconds = divmod(remainder, 60)
-    parts = []
-    if hours:
-        parts.append(f"{hours}h")
-    if minutes:
-        parts.append(f"{minutes}m")
-    parts.append(f"{seconds}s")
-    return " ".join(parts)
 
 
 def _overall_status() -> str:
@@ -61,65 +45,70 @@ def _overall_status() -> str:
     return "degraded" if has_error else "ok"
 
 
+def _probe_database() -> str:
+    """Try a lightweight SELECT 1 through the pool. Returns 'ok' or 'error'."""
+    try:
+        from database.connection import execute_read
+        execute_read("SELECT 1")
+        return "ok"
+    except Exception as exc:
+        logger.warning("health: db probe failed: %s", exc)
+        return "error"
+
+
+def _probe_email() -> str:
+    """Return 'configured' if SMTP_HOST and SMTP_USER are set, else 'not configured'."""
+    if config.SMTP_HOST and config.SMTP_USER:
+        return "configured"
+    return "not configured"
+
+
+def _probe_sms() -> str:
+    """Map SMS_METHOD to a human-readable status string."""
+    method = (config.SMS_METHOD or "").lower().strip()
+    if method == "gammu":
+        return "configured"          # USB GSM dongle (production path)
+    if method == "adb":
+        return "adb mode"            # Android phone via USB
+    if method == "gateway":
+        return "gateway mode"        # Android SMS Gateway REST API
+    return "not configured"
+
+
+def _probe_websocket() -> str:
+    """Return 'ok (N clients)' based on live connection count."""
+    try:
+        from modules.inapp.manager import active_connections
+        count = len(active_connections)
+        return f"ok ({count} client{'s' if count != 1 else ''} connected)"
+    except Exception:
+        return "ok"
+
+
+def _probe_sensor() -> str:
+    """Return 'demo mode' or 'live' based on DEMO_MODE flag — no hardware ping."""
+    return "demo mode" if config.DEMO_MODE else "live"
+
+
 @router.get("/health")
 @limiter.limit("120/minute")
 async def health(request: Request):
-    """Full system health check."""
-    connected = len(active_connections)
-
-    # Build module status dict with websocket client count
-    modules = dict(MODULE_STATUS)
-    if modules.get("websocket") == "ok" or connected > 0:
-        modules["websocket"] = f"ok -- {connected} client(s) connected"
-        MODULE_STATUS["websocket"] = "ok"
-
-    # Email module status
-    from config import SMTP_HOST
-    if SMTP_HOST and SMTP_USER:
-        modules["email"] = "ok -- Configured"
-    else:
-        modules["email"] = "warning -- Not configured"
-
-    # Enrich SMS status with method label when not already set by transport
-    sms_status = modules.get("sms", "not_built")
-    if sms_status in ("not_built", "starting", "", None):
-        modules["sms"] = "not_configured"
-
-    # Alerts today
-    try:
-        alerts_today = database.get_alerts_today_count()
-    except Exception:
-        alerts_today = 0
-
-    # Delivery stats
-    try:
-        delivery_stats = database.get_delivery_stats_today()
-    except Exception:
-        delivery_stats = {}
-
-    # GSM modem status (gammu mode only)
-    try:
-        from modules.sms.sender import _mock_mode as gsm_mock, _modem_port as gsm_port
-        gsm_modem_info = {
-            "connected": not gsm_mock,
-            "port":      gsm_port if gsm_port else "not detected",
-            "mode":      "live" if not gsm_mock else "mock",
-        }
-    except Exception:
-        gsm_modem_info = {"connected": False, "port": "unknown", "mode": "mock"}
+    """Health check — returns status, timestamp, uptime_seconds, and module probes."""
+    db_status     = _probe_database()
+    email_status  = _probe_email()
+    sms_status    = _probe_sms()
+    ws_status     = _probe_websocket()
+    sensor_status = _probe_sensor()
 
     return {
-        "status":               _overall_status(),
-        "version":              APP_VERSION,
-        "environment":          APP_ENV,
-        "uptime":               _format_uptime(),
-        "timestamp":            datetime.now(timezone.utc).isoformat(),
-        "modules":              modules,
-        "connected_clients":    connected,
-        "alerts_today":         alerts_today,
-        "last_reading":         last_reading if last_reading else None,
-        "delivery_stats_today": delivery_stats,
-        "smtp_user":            SMTP_USER,
-        "sms_method":           SMS_METHOD,
-        "gsm_modem":            gsm_modem_info,
+        "status":         _overall_status(),
+        "timestamp":      datetime.now(timezone.utc).isoformat(),
+        "uptime_seconds": int((datetime.now(timezone.utc) - _START_TIME).total_seconds()),
+        "modules": {
+            "database":  {"status": db_status},
+            "email":     {"status": email_status},
+            "sms":       {"status": sms_status},
+            "websocket": {"status": ws_status},
+            "sensor":    {"status": sensor_status},
+        },
     }

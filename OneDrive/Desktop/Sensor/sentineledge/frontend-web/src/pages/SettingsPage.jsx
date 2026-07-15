@@ -2,8 +2,8 @@
  * src/pages/SettingsPage.jsx
  * Threshold config, demo controls (CSV playback), and admin info.
  */
-import { useState, useEffect, useCallback } from 'react'
-import { Settings2, RotateCcw, Zap, Database, Info, Server, RefreshCw, AlertTriangle, Mail, CheckCircle, MessageSquare, Smartphone, PlusCircle } from 'lucide-react'
+import { useState, useEffect, useCallback, useRef } from 'react'
+import { Settings2, RotateCcw, Zap, Database, Info, Server, RefreshCw, AlertTriangle, Mail, CheckCircle, MessageSquare, Smartphone, PlusCircle, Pencil } from 'lucide-react'
 import {
   fetchThresholds, updateThresholds, resetThresholds,
   simulateBreach, createBackup, fetchHealth,
@@ -13,11 +13,10 @@ import Badge from '../components/shared/Badge.jsx'
 import { useToast, ToastContainer } from '../components/shared/Toast.jsx'
 import PasswordConfirmModal from '../components/PasswordConfirmModal.jsx'
 
-// ─── API helpers for new simulate endpoints ───────────────────────────────────
-const simulateDemo  = (speed) => fetch('/api/simulate/demo',  {
+const simulateDemo = (speed) => fetch('/api/simulate/demo', {
   method: 'POST',
   headers: {
-    'Content-Type':   'application/json',
+    'Content-Type': 'application/json',
     'X-Admin-Password': sessionStorage.getItem('adminPassword') || '',
   },
   body: JSON.stringify({ speed }),
@@ -30,63 +29,59 @@ const simulateReset = () => fetch('/api/simulate/reset', {
   credentials: 'include',
 }).then(r => r.json())
 
-// ─── Speed options ────────────────────────────────────────────────────────────
 const SPEED_OPTIONS = [
-  { value: 10,  label: '10x faster',  desc: '~15 min per cycle'  },
-  { value: 30,  label: '30x faster',  desc: '~5 min per cycle'   },
-  { value: 50,  label: '50x faster',  desc: '~3 min per cycle'   },
+  { value: 10, label: '10x faster', desc: '~15 min per cycle' },
+  { value: 30, label: '30x faster', desc: '~5 min per cycle' },
+  { value: 50, label: '50x faster', desc: '~3 min per cycle' },
 ]
 
 export default function SettingsPage() {
   const { toasts, addToast, dismiss } = useToast()
 
-  // ── Threshold state ──────────────────────────────────────────────────────────
   const [threshData, setThreshData] = useState(null)
-  const [high,       setHigh]       = useState(90)
-  const [low,        setLow]        = useState(38)
-  const [saving,     setSaving]     = useState(false)
-  const [resetting,  setResetting]  = useState(false)
-  const [threshMsg,  setThreshMsg]  = useState(null)
+  const [high, setHigh] = useState(90)
+  const [low, setLow] = useState(38)
+  const [saving, setSaving] = useState(false)
+  const [resetting, setResetting] = useState(false)
+  const [threshMsg, setThreshMsg] = useState(null)
 
-  // ── Demo state ───────────────────────────────────────────────────────────────
-  const [demoSpeed,    setDemoSpeed]    = useState(30)
-  const [demoRunning,  setDemoRunning]  = useState(false)
-  const [demoStatus,   setDemoStatus]   = useState(null)
-  const [demoResetting,setDemoResetting]= useState(false)
-  const [simulating,   setSimulating]   = useState(false)
+  const [demoSpeed, setDemoSpeed] = useState(30)
+  const [demoRunning, setDemoRunning] = useState(false)
+  const [demoStatus, setDemoStatus] = useState(null)
+  const [demoResetting, setDemoResetting] = useState(false)
+  const [simulating, setSimulating] = useState(false)
 
-  // ── Admin state ──────────────────────────────────────────────────────────────
   const [backing, setBacking] = useState(false)
-  const [health,  setHealth]  = useState(null)
+  const [health, setHealth] = useState(null)
 
-  // ── Email test state ─────────────────────────────────────────────────────────
-  const [testEmailAddr,  setTestEmailAddr]  = useState('crharya@gmail.com')
-  const [testingEmail,   setTestingEmail]   = useState(false)
-  const [testEmailMsg,   setTestEmailMsg]   = useState(null)
+  const [testEmailAddr, setTestEmailAddr] = useState('crharya@gmail.com')
+  const [testingEmail, setTestingEmail] = useState(false)
+  const [testEmailMsg, setTestEmailMsg] = useState(null)
 
-  // ── SMS test state ───────────────────────────────────────────────────────────────────
-  const [testSmsPhone,   setTestSmsPhone]   = useState('6385936224')
-  const [testingSms,     setTestingSms]     = useState(false)
-  const [testSmsMsg,     setTestSmsMsg]     = useState(null)
+  const [testSmsPhone, setTestSmsPhone] = useState('6385936224')
+  const [testingSms, setTestingSms] = useState(false)
+  const [testSmsMsg, setTestSmsMsg] = useState(null)
 
-  // ── Add Parameter state ──────────────────────────────────────────────────────
-  const [paramName,  setParamName]  = useState('')
-  const [paramUnit,  setParamUnit]  = useState('')
-  const [paramMin,   setParamMin]   = useState('')
-  const [paramMax,   setParamMax]   = useState('')
+  const [paramName, setParamName] = useState('')
+  const [paramUnit, setParamUnit] = useState('')
+  const [paramMin, setParamMin] = useState('')
+  const [paramMax, setParamMax] = useState('')
   const [paramSaved, setParamSaved] = useState(false)
 
-  // ── Password Confirm Modal state (for threshold changes) ─────────────────────
-  const [pwdAction,  setPwdAction]  = useState(null)  // 'update' | 'reset' | null
-  const [pwdError,   setPwdError]   = useState(null)
+  const [pwdAction, setPwdAction] = useState(null)
+  const [pwdError, setPwdError] = useState(null)
 
-  // ── Load data ────────────────────────────────────────────────────────────────
+  // Track whether user has touched the inputs so fetches don't overwrite
+  const dirtyRef = useRef(false)
+
   const loadThresholds = useCallback(async () => {
     try {
       const d = await fetchThresholds()
       setThreshData(d)
-      setHigh(d.temperature?.high ?? 90)
-      setLow(d.temperature?.low  ?? 38)
+      if (!dirtyRef.current) {
+        setHigh(d.temperature?.high ?? 90)
+        setLow(d.temperature?.low ?? 38)
+      }
     } catch { /* silent */ }
   }, [])
 
@@ -96,19 +91,16 @@ export default function SettingsPage() {
 
   useEffect(() => { loadThresholds(); loadHealth() }, [loadThresholds, loadHealth])
 
-  // Pre-fill test email from health when it loads
   useEffect(() => {
     if (health?.smtp_user) setTestEmailAddr(health.smtp_user)
   }, [health])
 
-  // ── Threshold handlers ───────────────────────────────────────────────────────
   const handleUpdate = async (e) => {
-    e.preventDefault()
+    if (e && e.preventDefault) e.preventDefault()
     if (Number(high) <= Number(low)) {
-      setThreshMsg({ type:'error', text:'High must be greater than low.' })
+      setThreshMsg({ type: 'error', text: 'High must be greater than low.' })
       return
     }
-    // Gate behind password modal
     setPwdAction('update')
     setPwdError(null)
   }
@@ -117,12 +109,13 @@ export default function SettingsPage() {
     setSaving(true); setThreshMsg(null)
     try {
       await updateThresholds({ temp_high: Number(high), temp_low: Number(low) }, password)
-      setThreshMsg({ type:'success', text:'Thresholds updated.' })
+      setThreshMsg({ type: 'success', text: 'Thresholds updated.' })
       setPwdAction(null)
+      dirtyRef.current = false
       loadThresholds()
     } catch (err) {
       if (err.message?.includes('401')) { setPwdError('Incorrect password'); return }
-      setThreshMsg({ type:'error', text: err.message })
+      setThreshMsg({ type: 'error', text: err.message })
       setPwdAction(null)
     } finally { setSaving(false) }
   }
@@ -136,12 +129,13 @@ export default function SettingsPage() {
     setResetting(true); setThreshMsg(null)
     try {
       await resetThresholds(password)
-      setThreshMsg({ type:'success', text:'Reset to defaults (90°C / 42°C).' })
+      setThreshMsg({ type: 'success', text: 'Reset to defaults (90°C / 42°C).' })
       setPwdAction(null)
+      dirtyRef.current = false
       loadThresholds()
     } catch (err) {
       if (err.message?.includes('401')) { setPwdError('Incorrect password'); return }
-      setThreshMsg({ type:'error', text: err.message })
+      setThreshMsg({ type: 'error', text: err.message })
       setPwdAction(null)
     } finally { setResetting(false) }
   }
@@ -149,10 +143,9 @@ export default function SettingsPage() {
   const handlePasswordConfirm = (password) => {
     setPwdError(null)
     if (pwdAction === 'update') doUpdate(password)
-    if (pwdAction === 'reset')  doReset(password)
+    if (pwdAction === 'reset') doReset(password)
   }
 
-  // ── Demo handlers ─────────────────────────────────────────────────────────────
   const handleDemoRun = async () => {
     setDemoRunning(true); setDemoStatus(null)
     try {
@@ -161,7 +154,7 @@ export default function SettingsPage() {
       setDemoStatus({
         type: 'info',
         text: `Demo started at ${demoSpeed}x speed — ~${mins} min for full cycle. `
-            + `Alert fires when temperature drops to 38°C.`,
+          + `Alert fires when temperature drops to 38°C.`,
       })
       addToast({
         type: 'warning',
@@ -192,17 +185,15 @@ export default function SettingsPage() {
     finally { setSimulating(false) }
   }
 
-  // ── Backup ────────────────────────────────────────────────────────────────────
   const handleBackup = async () => {
     setBacking(true)
     try {
       const r = await createBackup()
-      addToast({ type:'success', message:`✅ Backup created: ${r.filename} (${r.size_mb} MB)` })
-    } catch (err) { addToast({ type:'error', message:'Backup failed: ' + err.message }) }
+      addToast({ type: 'success', message: `✅ Backup created: ${r.filename} (${r.size_mb} MB)` })
+    } catch (err) { addToast({ type: 'error', message: 'Backup failed: ' + err.message }) }
     finally { setBacking(false) }
   }
 
-  // ── Test Email ────────────────────────────────────────────────────────────────
   const handleTestEmail = async () => {
     if (!testEmailAddr.trim()) return
     setTestingEmail(true); setTestEmailMsg(null)
@@ -231,7 +222,6 @@ export default function SettingsPage() {
     } finally { setTestingEmail(false) }
   }
 
-  // ── Test SMS ───────────────────────────────────────────────────────────────────────
   const handleTestSms = async () => {
     if (!testSmsPhone.trim()) return
     setTestingSms(true); setTestSmsMsg(null)
@@ -265,7 +255,6 @@ export default function SettingsPage() {
 
   const isOverride = threshData?.source === 'runtime_override'
 
-  // ── UI helpers ────────────────────────────────────────────────────────────────
   const Section = ({ title, icon: Icon, children }) => (
     <div className="card">
       <div className="flex items-center gap-2.5 px-5 py-4 border-b border-gray-100">
@@ -279,14 +268,12 @@ export default function SettingsPage() {
   )
 
   const StatusMsg = ({ msg }) => msg ? (
-    <p className={`text-xs rounded-lg px-3 py-2 ${
-      msg.type === 'success' ? 'text-emerald-700 bg-emerald-50' :
-      msg.type === 'info'    ? 'text-blue-700 bg-blue-50'       :
-      'text-red-700 bg-red-50'
-    }`}>{msg.text}</p>
+    <p className={`text-xs rounded-lg px-3 py-2 ${msg.type === 'success' ? 'text-emerald-700 bg-emerald-50' :
+        msg.type === 'info' ? 'text-blue-700 bg-blue-50' :
+          'text-red-700 bg-red-50'
+      }`}>{msg.text}</p>
   ) : null
 
-  // ─── Render ──────────────────────────────────────────────────────────────────
   return (
     <>
       <div className="space-y-5 max-w-2xl">
@@ -303,19 +290,34 @@ export default function SettingsPage() {
             </div>
 
             <div className="grid grid-cols-2 gap-4">
+              {/* ── High Threshold ── */}
               <div>
                 <label className="text-xs font-medium text-gray-600 mb-1 block">
                   High Threshold (°C) <span className="text-red-400">↑ Overheating danger</span>
                 </label>
-                <input className="form-input" type="number" step="0.1" min="-50" max="150"
-                  value={high} onChange={e => setHigh(e.target.value)} />
+                <input
+                  className="form-input"
+                  type="number"
+                  step="any"
+                  value={high}
+                  onChange={e => { setHigh(e.target.value); dirtyRef.current = true }}
+                  onFocus={e => { e.target.select(); dirtyRef.current = true }}
+                />
               </div>
+
+              {/* ── Low Threshold ── */}
               <div>
                 <label className="text-xs font-medium text-gray-600 mb-1 block">
                   Low Threshold (°C) <span className="text-blue-400">↓ Machine ready</span>
                 </label>
-                <input className="form-input" type="number" step="0.1" min="-50" max="150"
-                  value={low} onChange={e => setLow(e.target.value)} />
+                <input
+                  className="form-input"
+                  type="number"
+                  step="any"
+                  value={low}
+                  onChange={e => { setLow(e.target.value); dirtyRef.current = true }}
+                  onFocus={e => { e.target.select(); dirtyRef.current = true }}
+                />
               </div>
             </div>
 
@@ -346,7 +348,6 @@ export default function SettingsPage() {
         <Section title="Demo Controls" icon={Zap}>
           <div className="space-y-4">
 
-            {/* Info banner */}
             <div className="rounded-xl bg-blue-50 border border-blue-200 px-4 py-3">
               <p className="text-xs font-semibold text-blue-800 mb-1">📊 Real Client Data Playback</p>
               <p className="text-xs text-blue-700 leading-relaxed">
@@ -356,7 +357,6 @@ export default function SettingsPage() {
               </p>
             </div>
 
-            {/* Speed selector + start demo */}
             <div className="rounded-xl bg-orange-50 border border-orange-200 p-4 space-y-3">
               <div>
                 <label className="text-xs font-semibold text-orange-800 block mb-2">
@@ -368,11 +368,10 @@ export default function SettingsPage() {
                       key={opt.value}
                       type="button"
                       onClick={() => setDemoSpeed(opt.value)}
-                      className={`flex-1 rounded-lg py-2 px-3 text-xs font-medium border transition-all ${
-                        demoSpeed === opt.value
+                      className={`flex-1 rounded-lg py-2 px-3 text-xs font-medium border transition-all ${demoSpeed === opt.value
                           ? 'bg-orange-500 text-white border-orange-500'
                           : 'bg-white text-orange-700 border-orange-300 hover:bg-orange-50'
-                      }`}
+                        }`}
                     >
                       <div className="font-semibold">{opt.label}</div>
                       <div className="opacity-75 mt-0.5">{opt.desc}</div>
@@ -405,7 +404,6 @@ export default function SettingsPage() {
               <StatusMsg msg={demoStatus} />
             </div>
 
-            {/* Reset to normal */}
             <div className="flex items-center gap-4 p-4 rounded-xl bg-gray-50 border border-gray-200">
               <div className="flex-1 min-w-0">
                 <p className="text-sm font-semibold text-gray-700">Reset to Normal</p>
@@ -425,7 +423,6 @@ export default function SettingsPage() {
               </button>
             </div>
 
-            {/* Simulate Breach (testing) */}
             <div className="flex items-center gap-4 p-4 rounded-xl bg-red-50 border border-red-200">
               <div className="flex-1 min-w-0">
                 <p className="text-sm font-semibold text-red-700 flex items-center gap-1.5">
@@ -449,7 +446,6 @@ export default function SettingsPage() {
               </button>
             </div>
 
-            {/* Backup */}
             <div className="flex items-center gap-4 p-4 rounded-xl bg-blue-50 border border-blue-200">
               <div className="flex-1 min-w-0">
                 <p className="text-sm font-semibold text-blue-800">Create Database Backup</p>
@@ -470,7 +466,6 @@ export default function SettingsPage() {
         <Section title="Email Configuration" icon={Mail}>
           <div className="space-y-4">
 
-            {/* SMTP status */}
             <div className="flex items-center justify-between py-2 border-b border-gray-100">
               <div className="flex items-center gap-2 text-xs text-gray-500">
                 <Mail size={13} />
@@ -485,14 +480,16 @@ export default function SettingsPage() {
                 <CheckCircle size={13} />
                 <span className="font-medium">Email Status</span>
               </div>
-              <span className={`text-xs font-semibold ${
-                health?.modules?.email === 'ok' ? 'text-emerald-600' : 'text-amber-600'
-              }`}>
-                {health?.modules?.email === 'ok' ? '✓ Configured' : '⚠ Not yet verified'}
+              <span className={`text-xs font-semibold ${String(health?.modules?.email?.status || health?.modules?.email || '') === 'configured'
+                  || String(health?.modules?.email?.status || health?.modules?.email || '') === 'ok'
+                  ? 'text-emerald-600' : 'text-amber-600'
+                }`}>
+                {String(health?.modules?.email?.status || health?.modules?.email || '') === 'configured'
+                  || String(health?.modules?.email?.status || health?.modules?.email || '') === 'ok'
+                  ? '✓ Configured' : '⚠ Not yet verified'}
               </span>
             </div>
 
-            {/* Test email form */}
             <div className="rounded-xl bg-indigo-50 border border-indigo-200 p-4 space-y-3">
               <p className="text-xs font-semibold text-indigo-800">
                 📧 Send Test HTML Email
@@ -530,7 +527,6 @@ export default function SettingsPage() {
         <Section title="SMS Configuration" icon={MessageSquare}>
           <div className="space-y-4">
 
-            {/* Method + Status */}
             <div className="flex items-center justify-between py-2 border-b border-gray-100">
               <div className="flex items-center gap-2 text-xs text-gray-500">
                 <Smartphone size={13} />
@@ -545,20 +541,19 @@ export default function SettingsPage() {
                 <CheckCircle size={13} />
                 <span className="font-medium">SMS Status</span>
               </div>
-              <span className={`text-xs font-semibold ${
-                (health?.modules?.sms || '').startsWith('ok') ? 'text-emerald-600' :
-                (health?.modules?.sms || '').startsWith('error') ? 'text-red-500' :
-                'text-amber-600'
-              }`}>
-                {(health?.modules?.sms || '').startsWith('ok')
-                  ? `✓ ${health.modules.sms}`
-                  : (health?.modules?.sms || '').startsWith('error')
-                  ? `⚠ ${health.modules.sms}`
-                  : '⚠ Not yet tested'}
+              <span className={`text-xs font-semibold ${String(health?.modules?.sms?.status || '').startsWith('ok') ? 'text-emerald-600' :
+                  String(health?.modules?.sms?.status || '').startsWith('configured') ? 'text-emerald-600' :
+                    String(health?.modules?.sms?.status || '').startsWith('error') ? 'text-red-500' :
+                      'text-amber-600'
+                }`}>
+                {String(health?.modules?.sms?.status || '').startsWith('ok') || String(health?.modules?.sms?.status || '').startsWith('configured')
+                  ? `✓ ${health.modules.sms.status ?? health.modules.sms}`
+                  : String(health?.modules?.sms?.status || '').startsWith('error')
+                    ? `⚠ ${health.modules.sms.status ?? health.modules.sms}`
+                    : '⚠ Not yet tested'}
               </span>
             </div>
 
-            {/* Context info box — changes based on method */}
             {health?.sms_method === 'adb' || !health?.sms_method ? (
               <div className="rounded-xl bg-blue-50 border border-blue-200 px-4 py-3">
                 <p className="text-xs font-semibold text-blue-800 mb-1">📱 ADB Mode (USB Android Phone)</p>
@@ -573,7 +568,7 @@ export default function SettingsPage() {
                 <p className="text-xs font-semibold text-purple-800 mb-1">📻 Gammu Mode (USB GSM Modem)</p>
                 <p className="text-xs text-purple-700 leading-relaxed">
                   USB GSM modem must be connected to port{' '}
-                  <code className="bg-purple-100 px-1 rounded">{health?.modules?.sms?.includes('COM') ? health.modules.sms : 'COM3'}</code>.
+                  <code className="bg-purple-100 px-1 rounded">{String(health?.modules?.sms?.status || '').includes('COM') ? health.modules.sms.status : 'COM3'}</code>.
                   Install driver and run: <code className="bg-purple-100 px-1 rounded">pip install python-gammu</code>.
                 </p>
               </div>
@@ -587,7 +582,6 @@ export default function SettingsPage() {
               </div>
             )}
 
-            {/* Test SMS form */}
             <div className="rounded-xl bg-green-50 border border-green-200 p-4 space-y-3">
               <p className="text-xs font-semibold text-green-800">
                 📱 Send Test SMS
@@ -627,7 +621,6 @@ export default function SettingsPage() {
             Define a new sensor metric to monitor. This will appear as a live card on the Dashboard.
           </p>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
-            {/* Parameter Name */}
             <div style={{ gridColumn: '1 / -1' }}>
               <label style={{ display: 'block', fontSize: 12, fontWeight: 600, color: '#374151', marginBottom: 4 }}>
                 Parameter Name
@@ -644,7 +637,6 @@ export default function SettingsPage() {
                 }}
               />
             </div>
-            {/* Unit */}
             <div style={{ gridColumn: '1 / -1' }}>
               <label style={{ display: 'block', fontSize: 12, fontWeight: 600, color: '#374151', marginBottom: 4 }}>
                 Unit
@@ -661,7 +653,6 @@ export default function SettingsPage() {
                 }}
               />
             </div>
-            {/* Min Value */}
             <div>
               <label style={{ display: 'block', fontSize: 12, fontWeight: 600, color: '#374151', marginBottom: 4 }}>
                 Min Value
@@ -679,7 +670,6 @@ export default function SettingsPage() {
                 }}
               />
             </div>
-            {/* Max Value */}
             <div>
               <label style={{ display: 'block', fontSize: 12, fontWeight: 600, color: '#374151', marginBottom: 4 }}>
                 Max Value
@@ -699,7 +689,6 @@ export default function SettingsPage() {
             </div>
           </div>
 
-          {/* Save button + feedback */}
           <div style={{ marginTop: 20, display: 'flex', alignItems: 'center', gap: 12 }}>
             <button
               id="save-parameter-btn"
@@ -734,7 +723,6 @@ export default function SettingsPage() {
             )}
           </div>
 
-          {/* Info note */}
           <div
             style={{
               marginTop: 16, padding: '10px 14px', borderRadius: 8,
@@ -750,11 +738,11 @@ export default function SettingsPage() {
           <div className="space-y-3">
             {[
               { label: 'Dashboard Passcode', value: '••••  (4 digits)', icon: '🔐' },
-              { label: 'Server Host',         value: window.location.hostname, icon: <Server size={13} /> },
-              { label: 'Backend Port',        value: '5000 (HTTPS)', icon: '🌐' },
-              { label: 'App Version',         value: health?.version || 'v1.0.0', icon: '📦' },
-              { label: 'Environment',         value: health?.environment || 'development', icon: '⚙️' },
-              { label: 'Sensor Mode',         value: 'CSV Playback (real client data)', icon: '📊' },
+              { label: 'Server Host', value: window.location.hostname, icon: <Server size={13} /> },
+              { label: 'Backend Port', value: '5000 (HTTPS)', icon: '🌐' },
+              { label: 'App Version', value: health?.version || 'v1.0.0', icon: '📦' },
+              { label: 'Environment', value: health?.environment || 'development', icon: '⚙️' },
+              { label: 'Sensor Mode', value: 'CSV Playback (real client data)', icon: '📊' },
             ].map(({ label, value, icon }) => (
               <div key={label} className="flex items-center justify-between py-2 border-b border-gray-100 last:border-0">
                 <div className="flex items-center gap-2 text-xs text-gray-500">
@@ -771,7 +759,6 @@ export default function SettingsPage() {
 
       <ToastContainer toasts={toasts} onDismiss={dismiss} />
 
-      {/* ── Password Confirm Modal (threshold changes) ─────────────────────── */}
       <PasswordConfirmModal
         isOpen={!!pwdAction}
         actionLabel={pwdAction === 'update' ? 'update thresholds' : 'reset thresholds to defaults'}

@@ -13,8 +13,6 @@ any callers that still use it (escalation._build_message uses formatter.py,
 so this is just a safety net — it is NOT used by the HTML email path).
 """
 
-from __future__ import annotations
-
 from datetime import datetime, timezone, timedelta
 
 

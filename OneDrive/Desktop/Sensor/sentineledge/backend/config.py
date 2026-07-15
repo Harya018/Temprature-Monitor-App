@@ -42,13 +42,21 @@ SMS_GATEWAY_USER: str = os.getenv("SMS_GATEWAY_USER", "admin")
 SMS_GATEWAY_PASS: str = os.getenv("SMS_GATEWAY_PASS", "password")
 
 # ── SMS Transport Method ───────────────────────────────────────────────────────
-# "adb"   — Android phone via USB (demo / development)
-# "gammu" — USB GSM modem/dongle (production)
-# "gateway" — Original Android SMS Gateway REST API
+# "adb"     — Android phone via Termux HTTP (demo / development)
+# "gammu"   — USB GSM modem via Gammu library (production)
+# "gateway" — Android SMS Gateway REST API
+# "sim7600" — SIM7600 EI 4G HAT via USB serial AT commands (production)
 SMS_METHOD: str      = os.getenv("SMS_METHOD", "adb")
 SMS_ADB_SERIAL: str  = os.getenv("SMS_ADB_SERIAL", "")        # e.g. "emulator-5554" or ""
 SMS_GAMMU_PORT: str  = os.getenv("SMS_GAMMU_PORT", "COM3")    # Windows: COM3, Linux: /dev/ttyUSB0
 SMS_GAMMU_BAUD: int  = int(os.getenv("SMS_GAMMU_BAUD", "9600"))
+
+# ── SIM7600 EI 4G HAT (USB serial / AT commands) ──────────────────────────────
+# Used when SMS_METHOD=sim7600.
+# Leave SMS_SIM7600_PORT empty to enable auto-detection (scans for SimCom USB device).
+# Windows typical: COM4, COM5  |  Linux typical: /dev/ttyUSB2
+SMS_SIM7600_PORT: str = os.getenv("SMS_SIM7600_PORT", "")      # empty → auto-detect
+SMS_SIM7600_BAUD: int = int(os.getenv("SMS_SIM7600_BAUD", "115200"))  # SIM7600 default
 
 # ── Escalation / Cooldown ─────────────────────────────────────────────────────
 ESCALATION_TIMEOUT_SECONDS: int = int(os.getenv("ESCALATION_TIMEOUT_SECONDS", "60"))

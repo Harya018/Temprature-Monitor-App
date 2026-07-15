@@ -20,8 +20,6 @@ AT command reference used here:
   ATI         — device identification / model info
 """
 
-from __future__ import annotations
-
 import logging
 import time
 from typing import Optional

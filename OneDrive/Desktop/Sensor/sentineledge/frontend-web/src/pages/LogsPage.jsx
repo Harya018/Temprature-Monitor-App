@@ -62,50 +62,62 @@ export default function LogsPage() {
   return (
     <div className="flex flex-col h-full" style={{ height: 'calc(100vh - 64px - 48px)' }}>
       {/* Control bar */}
-      <div className="card mb-4 px-4 py-3 flex flex-wrap items-center gap-3">
-        <div className="flex items-center gap-2 mr-2">
-          <Terminal size={16} className="text-purple-600" />
-          <span className="text-sm font-semibold text-gray-800">Live Logs</span>
-          {isConnected
-            ? <span className="flex items-center gap-1 text-xs text-emerald-600"><Wifi size={12} /> Connected</span>
-            : <span className="flex items-center gap-1 text-xs text-red-500"><WifiOff size={12} /> Disconnected</span>
-          }
+      <div className="card mb-4 px-4 py-3 flex flex-col gap-3">
+        {/* Row 1: Live Logs label + status + filter — always horizontal */}
+        <div className="flex flex-row items-center gap-4">
+          {/* Label */}
+          <div className="flex items-center gap-2 flex-shrink-0">
+            <Terminal size={16} className="text-purple-600" />
+            <span className="text-sm font-semibold text-gray-800">Live Logs</span>
+          </div>
+
+          {/* Connection status */}
+          <div className="flex-shrink-0">
+            {isConnected
+              ? <span className="flex items-center gap-1 text-xs text-emerald-600"><Wifi size={12} /> Connected</span>
+              : <span className="flex items-center gap-1 text-xs text-red-500"><WifiOff size={12} /> Disconnected</span>
+            }
+          </div>
+
+          {/* Keyword filter */}
+          <div className="relative flex items-center flex-1 min-w-[160px]">
+            <Search size={13} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 pointer-events-none" />
+            <input
+              className="form-input py-1.5 text-xs w-full"
+              style={{ paddingLeft: '2rem' }}
+              placeholder="Filter logs…"
+              value={filter}
+              onChange={e => setFilter(e.target.value)}
+            />
+          </div>
         </div>
 
-        {/* Keyword filter */}
-        <div className="relative flex-1 min-w-[160px]">
-          <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-400" />
-          <input
-            className="form-input pl-7 py-1.5 text-xs"
-            placeholder="Filter logs…"
-            value={filter}
-            onChange={e => setFilter(e.target.value)}
-          />
-        </div>
+        {/* Row 2: level filter + action buttons */}
+        <div className="flex flex-wrap items-center gap-3">
+          {/* Level filter */}
+          <div className="flex gap-1">
+            {LEVELS.map(l => (
+              <button
+                key={l}
+                onClick={() => setLevelFilter(l)}
+                className={`px-2 py-1 rounded text-xs font-medium transition-all ${
+                  levelFilter === l
+                    ? 'bg-purple-600 text-white'
+                    : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                }`}
+              >
+                {l}
+              </button>
+            ))}
+          </div>
 
-        {/* Level filter */}
-        <div className="flex gap-1">
-          {LEVELS.map(l => (
-            <button
-              key={l}
-              onClick={() => setLevelFilter(l)}
-              className={`px-2 py-1 rounded text-xs font-medium transition-all ${
-                levelFilter === l
-                  ? 'bg-purple-600 text-white'
-                  : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
-              }`}
-            >
-              {l}
+          <div className="flex gap-2 ml-auto">
+            <button onClick={togglePause} className="btn btn-ghost btn-sm">
+              {isPaused ? <><Play size={13} /> Resume {newCount > 0 && <span className="ml-1 text-amber-600">+{newCount}</span>}</> : <><Pause size={13} /> Pause</>}
             </button>
-          ))}
-        </div>
-
-        <div className="flex gap-2 ml-auto">
-          <button onClick={togglePause} className="btn btn-ghost btn-sm">
-            {isPaused ? <><Play size={13} /> Resume {newCount > 0 && <span className="ml-1 text-amber-600">+{newCount}</span>}</> : <><Pause size={13} /> Pause</>}
-          </button>
-          <button onClick={clearLines} className="btn btn-ghost btn-sm"><Trash2 size={13} /> Clear</button>
-          <button onClick={handleDownload} className="btn btn-ghost btn-sm"><Download size={13} /> Download</button>
+            <button onClick={clearLines} className="btn btn-ghost btn-sm"><Trash2 size={13} /> Clear</button>
+            <button onClick={handleDownload} className="btn btn-ghost btn-sm"><Download size={13} /> Download</button>
+          </div>
         </div>
       </div>
 

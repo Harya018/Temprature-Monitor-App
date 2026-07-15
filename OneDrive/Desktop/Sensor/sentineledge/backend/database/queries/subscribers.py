@@ -176,3 +176,63 @@ def enable_subscriber(subscriber_id: int) -> bool:
     except Exception as exc:
         logger.error("enable_subscriber failed: %s", exc)
         return False
+
+
+def update_subscriber(subscriber_id: int, fields: dict) -> Optional[dict]:
+    """
+    Partial update of subscriber profile fields.
+    *fields* is a dict of {column_name: value} — only provided keys are updated.
+    Returns the updated subscriber row, or None if not found or no fields given.
+    """
+    if not fields:
+        return get_subscriber_by_id(subscriber_id)
+    try:
+        set_clause = ", ".join(f"{k} = %s" for k in fields)
+        values = list(fields.values()) + [subscriber_id]
+        execute_write(
+            f"UPDATE subscribers SET {set_clause} WHERE id = %s",
+            tuple(values),
+        )
+        return get_subscriber_by_id(subscriber_id)
+    except Exception as exc:
+        logger.error("update_subscriber failed: %s", exc)
+        return None
+
+
+def get_acks_for_subscriber(subscriber_id: int) -> list:
+    """
+    Return acknowledgement records for a specific subscriber.
+    Joins the alerts table to fetch breach metadata.
+    response_time_seconds = (acknowledged_at - timestamp) in seconds.
+    """
+    try:
+        rows = execute_read(
+            """
+            SELECT
+                a.id,
+                a.id            AS alert_id,
+                a.parameter     AS sensor_id,
+                a.severity      AS breach_severity,
+                a.value         AS breach_value,
+                a.acknowledged_at,
+                CAST(
+                    EXTRACT(
+                        EPOCH FROM (
+                            a.acknowledged_at::TIMESTAMPTZ - a.timestamp::TIMESTAMPTZ
+                        )
+                    ) AS INTEGER
+                ) AS response_time_seconds
+            FROM alerts a
+            WHERE a.acknowledged = 1
+              AND a.acknowledged_at IS NOT NULL
+              AND a.acknowledged_by = (
+                  SELECT name FROM subscribers WHERE id = %s
+              )
+            ORDER BY a.acknowledged_at DESC
+            """,
+            (subscriber_id,),
+        )
+        return rows
+    except Exception as exc:
+        logger.error("get_acks_for_subscriber failed: %s", exc)
+        return []

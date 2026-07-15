@@ -8,8 +8,6 @@ on the same LAN.  No cloud service is involved.
 Extracted from the original sms_gateway.py — identical logic.
 """
 
-from __future__ import annotations
-
 import asyncio
 import logging
 
@@ -76,5 +74,5 @@ def send_sms(phone_number: str, message: str) -> bool:
 
 async def send_sms_async(phone_number: str, message: str) -> bool:
     """Async wrapper around send_sms() using a thread-pool executor."""
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, send_sms, phone_number, message)

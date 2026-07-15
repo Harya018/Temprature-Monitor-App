@@ -103,8 +103,12 @@ def get_database_stats() -> dict:
     }
 
     try:
-        rows = execute_read("SELECT COUNT(*) as cnt FROM readings")
-        stats["readings_count"] = rows[0]["cnt"] if rows else 0
+        # Use pg_class statistics for an instant estimate instead of COUNT(*) full scan.
+        # reltuples is updated by autovacuum and accurate to ~1-2% on large tables.
+        rows = execute_read(
+            "SELECT reltuples::bigint AS estimate FROM pg_class WHERE relname = 'readings'"
+        )
+        stats["readings_count"] = int(rows[0]["estimate"]) if rows else 0
     except Exception as exc:
         logger.error("stats: readings_count failed: %s", exc)
 
