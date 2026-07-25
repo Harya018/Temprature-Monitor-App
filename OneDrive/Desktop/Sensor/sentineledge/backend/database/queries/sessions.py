@@ -58,7 +58,7 @@ def get_session(token: str) -> Optional[dict]:
             SET    last_used_at = NOW()
             WHERE  token = %s
               AND  expires_at  > NOW()
-            RETURNING id, token, created_at, expires_at, last_used_at
+            RETURNING id, token, created_at, expires_at, last_used_at, admin_id
             """,
             (token,),
         )

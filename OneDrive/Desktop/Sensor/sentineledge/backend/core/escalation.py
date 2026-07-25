@@ -2,10 +2,10 @@
 """
 core/escalation.py — SentinelEdge alert delivery engine (simplified).
 
-DELIVERY RULE: When a threshold breach fires, ALL THREE channels
-(Email, SMS, In-App WebSocket) are sent to ALL active subscribers
-simultaneously using asyncio.gather(). Failure of one channel never
-blocks the others.
+DELIVERY RULE: When a threshold breach fires, ALL FOUR channels
+(Email, SMS, In-App WebSocket, Mobile Push) are sent to ALL active
+subscribers simultaneously using asyncio.gather(). Failure of one
+channel never blocks the others.
 
 ONE-SHOT DELIVERY: Alerts fire exactly once (level 1) and stop.
 No background re-alert timers. No level 2 or level 3.
@@ -36,6 +36,8 @@ from modules.email.smtp import send_alert_email_async, send_alert_email_to_all
 from modules.email.smtp import send_email_async  # kept for daily reports / legacy
 from modules.sms.sender import send_alert_sms_async, send_sms_to_all
 from modules.inapp.broadcaster import send_push_async
+from modules.mobilepush.expo_push import send_expo_push_async
+from modules.mobilepush.fcm_direct import send_fcm_direct_async
 from utils.formatter import format_alert_message   # used by _build_message (SMS body)
 from config import ALERT_COOLDOWN_SECONDS, RUNTIME_THRESHOLDS
 from models import BreachEvent
@@ -145,8 +147,46 @@ async def _notify_subscriber(
         if not ok:
             logger.warning("In-app push to sub %d failed", sub_id)
 
-    # Fire all three in parallel — failure of one never blocks others
-    await asyncio.gather(_email(), _sms(), _push(), return_exceptions=True)
+    # ── Channel 4: Mobile push (Expo → data-only, drives the client's full-screen alarm) ──
+    async def _mobile_push() -> None:
+        expo_token = subscriber.get("expo_push_token")
+        fcm_token  = subscriber.get("fcm_token")
+        err: Optional[str] = None
+        if not expo_token and not fcm_token:
+            database.insert_receipt(
+                alert_id, "mobile_push", sub_id, level, False, "no mobile push token"
+            )
+            return
+        try:
+            meta = alert_meta or {}
+            payload = {
+                "type":      "critical",
+                "value":     meta.get("value"),
+                "threshold": meta.get("threshold"),
+                "message":   message,
+                "timestamp": meta.get("timestamp"),
+                "alert_id":  alert_id,
+            }
+            tasks = []
+            if fcm_token:
+                tasks.append(send_fcm_direct_async(fcm_token, payload))
+            if expo_token:
+                tasks.append(send_expo_push_async(expo_token, payload))
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            ok = any(r is True for r in results)
+            errs = [str(r) for r in results if isinstance(r, Exception)]
+            if errs:
+                err = "; ".join(errs)
+        except Exception as exc:
+            ok = False
+            err = str(exc)
+        database.log_escalation(alert_id, level, sub_id, "mobile_push", ok)
+        database.insert_receipt(alert_id, "mobile_push", sub_id, level, ok, err)
+        if not ok:
+            logger.warning("Mobile push to sub %d failed (both paths): %s", sub_id, err)
+
+    # Fire all four in parallel — failure of one never blocks others
+    await asyncio.gather(_email(), _sms(), _push(), _mobile_push(), return_exceptions=True)
     logger.info(
         "All channels dispatched to %s (sub %d, alert_id=%d)",
         subscriber["name"], sub_id, alert_id,
@@ -273,11 +313,57 @@ async def _notify_all_subscribers(
 
     push_tasks = [_push_one(sub) for sub in active_subs]
 
-    # ── Fire email batch, SMS batch, and all WebSocket pushes simultaneously ──
+    # ── Channel 4 (Per-subscriber): Mobile push — direct FCM + Expo relay ─────
+    # Sent in parallel via BOTH paths when both tokens are known: direct FCM
+    # (bypasses Expo's relay, explicit high-priority AndroidConfig — added
+    # after confirming relay delivery reached FCM cleanly, per Expo's own
+    # receipts, but still proved unreliable waking a fully-killed app on an
+    # aggressive OEM device) and the Expo relay (kept as a second path — a
+    # duplicate notification is a far better failure mode than a missed one
+    # for a critical alert). Counted as delivered if EITHER path succeeds.
+    async def _mobile_push_one(sub: dict) -> None:
+        expo_token = sub.get("expo_push_token")
+        fcm_token  = sub.get("fcm_token")
+        sub_id = sub["id"]
+        if not expo_token and not fcm_token:
+            database.insert_receipt(alert_id, "mobile_push", sub_id, level, False, "no mobile push token")
+            return
+        payload = {
+            "type":      "critical",
+            "value":     value,
+            "threshold": threshold,
+            "message":   message,
+            "timestamp": timestamp_utc,
+            "alert_id":  alert_id,
+        }
+        err: Optional[str] = None
+        try:
+            tasks = []
+            if fcm_token:
+                tasks.append(send_fcm_direct_async(fcm_token, payload))
+            if expo_token:
+                tasks.append(send_expo_push_async(expo_token, payload))
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            ok = any(r is True for r in results)
+            errs = [str(r) for r in results if isinstance(r, Exception)]
+            if errs:
+                err = "; ".join(errs)
+        except Exception as exc:
+            ok  = False
+            err = str(exc)
+        database.log_escalation(alert_id, level, sub_id, "mobile_push", ok)
+        database.insert_receipt(alert_id, "mobile_push", sub_id, level, ok, err)
+        if not ok:
+            logger.warning("Mobile push to sub %d failed (both paths): %s", sub_id, err)
+
+    mobile_push_tasks = [_mobile_push_one(sub) for sub in active_subs]
+
+    # ── Fire email batch, SMS batch, WebSocket pushes, and mobile pushes simultaneously ──
     await asyncio.gather(
         _email_batch(),
         _sms_batch(),
         *push_tasks,
+        *mobile_push_tasks,
         return_exceptions=True,
     )
 
@@ -293,12 +379,18 @@ async def trigger_alert(reading: dict, breaches: list) -> list:
     """
     Process all breach events from a single sensor reading.
 
-    For each breach:
-      1. Persist alert in DB (threshold read from RUNTIME_THRESHOLDS)
-      2. Immediately notify ALL active subscribers on ALL channels
-      3. Stop. No background re-alert timers.
+    Persisting each alert (DB insert) is fast and happens here, synchronously,
+    so callers get real alert_ids back immediately — the WebSocket broadcast
+    loop needs these right away to include in the live payload (so the
+    mobile app can later call POST /api/alerts/{id}/acknowledge). Notification
+    delivery (email/SMS/push, which can take real time) is dispatched as a
+    background task so it never blocks the live broadcast.
+
+    Returns a list aligned 1:1 with *breaches* — each entry is the new
+    alert's id, or None if that particular insert failed.
     """
-    alert_ids = []
+    alert_ids: list = []
+    persisted = []  # (alert_id, breach, live_threshold) — only successful inserts
     now = datetime.now(timezone.utc)
     cooldown_until = (now + timedelta(seconds=ALERT_COOLDOWN_SECONDS)).isoformat()
 
@@ -322,23 +414,31 @@ async def trigger_alert(reading: dict, breaches: list) -> list:
         )
         if alert_id == -1:
             logger.error("Failed to insert alert for breach: %s", breach)
+            alert_ids.append(None)
             continue
 
         alert_ids.append(alert_id)
+        persisted.append((alert_id, breach, live_threshold))
         logger.info(
             "Alert %d created: %s=%s (threshold %s, dir=%s, severity=%s)",
             alert_id, breach.parameter, breach.value,
             live_threshold, breach.direction, severity,
         )
 
-        # Fire once to all subscribers on all channels — then stop
+    if persisted:
+        asyncio.create_task(_notify_all_for_persisted(persisted))
+
+    return alert_ids
+
+
+async def _notify_all_for_persisted(persisted: list) -> None:
+    """Background task: deliver notifications for already-persisted alerts."""
+    for alert_id, breach, live_threshold in persisted:
         await _notify_all_subscribers(
             alert_id,
             breach.parameter, breach.value,
             live_threshold, breach.direction,
         )
-
-    return alert_ids
 
 
 async def acknowledge(alert_id: int, acknowledged_by: str) -> bool:

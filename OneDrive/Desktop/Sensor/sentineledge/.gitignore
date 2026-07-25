@@ -20,3 +20,5 @@ database/sentineledge.db-shm
 database/sentineledge.db-wal
 database/backups/
 clear_alerts.py
+*firebase-adminsdk*.json
+backend/secrets/

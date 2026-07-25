@@ -68,6 +68,16 @@ VAPID_PUBLIC_KEY: str = os.getenv("VAPID_PUBLIC_KEY", "")
 VAPID_PRIVATE_KEY: str = os.getenv("VAPID_PRIVATE_KEY", "")
 VAPID_CLAIM_EMAIL: str = os.getenv("VAPID_CLAIM_EMAIL", "admin@sentineledge.local")
 
+# ── FCM (direct, mobile app alarm push) ────────────────────────────────────────
+# Service account key downloaded from Firebase Console → Project Settings →
+# Service Accounts. Same credential uploaded to EAS for build-time push
+# config — this is the server-side copy used to call FCM's HTTP v1 API
+# directly (bypassing Expo's push relay) for maximum delivery priority.
+FCM_SERVICE_ACCOUNT_PATH: str = os.getenv(
+    "FCM_SERVICE_ACCOUNT_PATH",
+    os.path.join(os.path.dirname(__file__), "secrets", "firebase-adminsdk.json"),
+)
+
 # ── Server ────────────────────────────────────────────────────────────────────
 SERVER_HOST: str = os.getenv("SERVER_HOST", "0.0.0.0")
 SERVER_PORT: int = int(os.getenv("SERVER_PORT", "5000"))

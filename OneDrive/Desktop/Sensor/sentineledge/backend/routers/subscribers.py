@@ -11,9 +11,34 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 
 import database
+from database.connection import execute_read
 from middleware.auth import require_admin
 from middleware.rate_limit import limiter
 from models import PushSubscriptionIn, SetPinIn, SubscriberIn, SubscriberOut, SubscriberUpdate
+from utils.activity_logger import log_activity
+
+
+def _caller_admin_id(request) -> int:
+    """Best-effort: extract admin id from Bearer session, fall back to super_admin id."""
+    auth = request.headers.get("authorization", "")
+    if auth.startswith("Bearer "):
+        token = auth[7:].strip()
+        try:
+            rows = execute_read(
+                """SELECT a.id FROM admins a
+                   JOIN admin_sessions s ON s.token = %s
+                   WHERE s.expires_at > NOW() LIMIT 1""",
+                (token,),
+            )
+            if rows:
+                return rows[0]["id"]
+        except Exception:
+            pass
+    try:
+        rows = execute_read("SELECT id FROM admins WHERE role = 'super_admin' LIMIT 1")
+        return rows[0]["id"] if rows else 0
+    except Exception:
+        return 0
 
 router = APIRouter(prefix="/api", tags=["Subscribers"])
 
@@ -71,6 +96,7 @@ async def add_subscriber(body: SubscriberIn, request: Request):
             detail="Escalation order already in use or database error",
         )
     row = database.get_subscriber_by_id(sub_id)
+    log_activity(_caller_admin_id(request), "add_subscriber", "subscriber", f"{body.name} ({body.phone})")
     return _row_to_out(row)
 
 
@@ -82,9 +108,12 @@ async def add_subscriber(body: SubscriberIn, request: Request):
 )
 @limiter.limit("30/minute")
 async def delete_subscriber(subscriber_id: int, request: Request):
+    existing = database.get_subscriber_by_id(subscriber_id)
     ok = database.delete_subscriber(subscriber_id)
     if not ok:
         raise HTTPException(status_code=404, detail="Subscriber not found")
+    name = existing.get("name", str(subscriber_id)) if existing else str(subscriber_id)
+    log_activity(_caller_admin_id(request), "remove_subscriber", "subscriber", name)
     return {"status": "deleted", "id": subscriber_id}
 
 
@@ -186,6 +215,8 @@ async def update_subscriber(subscriber_id: int, body: SubscriberUpdate, request:
     updated = database.update_subscriber(subscriber_id, fields)
     if not updated:
         raise HTTPException(status_code=500, detail="Update failed")
+    changed_fields = ", ".join(fields.keys())
+    log_activity(_caller_admin_id(request), "update_subscriber", "subscriber", f"{existing.get('name')} → fields: {changed_fields}")
     return _row_to_out(updated)
 
 

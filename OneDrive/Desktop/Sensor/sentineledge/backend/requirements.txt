@@ -6,6 +6,7 @@ python-dotenv==1.0.1
 requests==2.31.0
 aiofiles==23.2.1
 pydantic==2.7.0
+firebase-admin==6.5.0
 
 # ── PostgreSQL drivers ────────────────────────────────────────────────────────
 psycopg2-binary==2.9.9

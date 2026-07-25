@@ -73,11 +73,133 @@ from routers.history import router as history_router
 from routers.reports import router as reports_router
 from routers.receipts import router as receipts_router
 from routers.events import router as events_router
+from routers.workers import router as workers_router
+from routers.super_admin import router as super_admin_router
+from routers.notifications import router as notifications_router
+from routers.super_admin_v2 import router as super_admin_v2_router
+from routers.phase1_command import router as phase1_command_router
+from routers.phase2_admin_control import router as phase2_admin_control_router
+from routers.phase3_config import router as phase3_config_router
+from routers.phase4_analytics import router as phase4_analytics_router
+from routers.phase5_comms import router as phase5_comms_router
+from routers.phase6_billing import router as phase6_billing_router
+from routers.phase7_security import router as phase7_security_router
 
 from database.backup import schedule_daily_backup
 from database.retention import schedule_retention_cleanup
 
 logger = get_logger(__name__)
+
+
+# ─── Background tasks ────────────────────────────────────────────────────────
+
+async def _maintenance_expiry_task() -> None:
+    """Every 60 s: auto-clear maintenance mode for companies past their end time."""
+    while True:
+        await asyncio.sleep(60)
+        try:
+            from database.connection import execute_read, execute_write
+            from utils.activity_logger import log_activity
+            expired = execute_read(
+                """
+                SELECT id, name FROM companies
+                 WHERE maintenance_mode = 1
+                   AND maintenance_until IS NOT NULL
+                   AND maintenance_until < NOW()
+                """
+            )
+            for co in expired:
+                execute_write(
+                    """
+                    UPDATE companies
+                       SET maintenance_mode = 0,
+                           maintenance_until = NULL,
+                           maintenance_reason = NULL
+                     WHERE id = %s
+                    """,
+                    (co["id"],),
+                )
+                logger.info("Maintenance mode auto-expired for company %d (%s)", co["id"], co["name"])
+        except Exception as exc:
+            logger.warning("Maintenance expiry task error: %s", exc)
+
+
+async def _scheduled_broadcast_task() -> None:
+    """Every 60 s: publish any scheduled broadcasts whose time has arrived."""
+    while True:
+        await asyncio.sleep(60)
+        try:
+            from database.connection import execute_read, execute_write
+            due = execute_read(
+                """
+                SELECT id, title FROM broadcasts
+                 WHERE status = 'pending'
+                   AND scheduled_at IS NOT NULL
+                   AND scheduled_at <= NOW()
+                """
+            )
+            for b in due:
+                execute_write(
+                    "UPDATE broadcasts SET status = 'sent' WHERE id = %s",
+                    (b["id"],),
+                )
+                logger.info("Scheduled broadcast %d (%r) published", b["id"], b["title"])
+        except Exception as exc:
+            logger.warning("Scheduled broadcast task error: %s", exc)
+
+
+async def _monthly_snapshot_task() -> None:
+    """Every hour: ensure a usage snapshot exists for each company for the current month."""
+    while True:
+        await asyncio.sleep(3600)
+        try:
+            from database.connection import execute_read
+            from routers.phase6_billing import _capture_snapshot
+            companies = execute_read("SELECT id FROM companies WHERE is_active = 1")
+            import datetime as _dt
+            month = _dt.datetime.now(_dt.timezone.utc).strftime("%Y-%m")
+            for co in companies:
+                existing = execute_read(
+                    "SELECT id FROM usage_snapshots WHERE company_id = %s AND month = %s",
+                    (co["id"], month),
+                )
+                if not existing:
+                    _capture_snapshot(co["id"])
+                    logger.info("Auto-captured usage snapshot for company %d (%s)", co["id"], month)
+        except Exception as exc:
+            logger.warning("Monthly snapshot task error: %s", exc)
+
+
+async def _retention_policy_task() -> None:
+    """Every 6 hours: apply DB-driven retention policies from the retention_policies table."""
+    while True:
+        await asyncio.sleep(21600)
+        try:
+            from database.connection import execute_read, execute_write
+            policies = execute_read(
+                "SELECT entity, max_days FROM retention_policies WHERE enabled = 1"
+            )
+            for p in policies:
+                entity   = p["entity"]
+                max_days = p["max_days"]
+                if entity == "readings":
+                    execute_write(
+                        "DELETE FROM readings WHERE timestamp < NOW() - INTERVAL '%s days'",
+                        (max_days,),
+                    )
+                elif entity == "login_attempts":
+                    execute_write(
+                        "DELETE FROM login_attempts WHERE attempted_at < NOW() - INTERVAL '%s days'",
+                        (max_days,),
+                    )
+                elif entity == "admin_activity":
+                    execute_write(
+                        "DELETE FROM admin_activity WHERE created_at < NOW() - INTERVAL '%s days'",
+                        (max_days,),
+                    )
+                logger.info("Retention policy applied: entity=%s max_days=%d", entity, max_days)
+        except Exception as exc:
+            logger.warning("Retention policy task error: %s", exc)
 
 
 # ─── Startup / shutdown ───────────────────────────────────────────────────────
@@ -109,6 +231,10 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(schedule_daily_report(),      name="daily-report-scheduler")
     asyncio.create_task(schedule_daily_backup(),      name="daily-backup-scheduler")
     asyncio.create_task(schedule_retention_cleanup(), name="retention-cleanup-scheduler")
+    asyncio.create_task(_maintenance_expiry_task(),    name="maintenance-expiry")
+    asyncio.create_task(_scheduled_broadcast_task(),   name="scheduled-broadcast")
+    asyncio.create_task(_monthly_snapshot_task(),      name="monthly-snapshot")
+    asyncio.create_task(_retention_policy_task(),      name="retention-policy")
 
     try:
         lan_ip = socket.gethostbyname(socket.gethostname())
@@ -301,8 +427,12 @@ async def websocket_endpoint(ws: WebSocket):
 
             breaches = threshold.check_threshold(reading)
 
-            if breaches:
-                asyncio.create_task(escalation.trigger_alert(reading, breaches))
+            # Persisting alerts (DB insert) is fast — await it so the live
+            # broadcast below can include each breach's real alert_id (the
+            # mobile app needs this to POST /api/alerts/{id}/acknowledge).
+            # Notification delivery (email/SMS/push) still happens in the
+            # background inside trigger_alert() and is never awaited here.
+            alert_ids = await escalation.trigger_alert(reading, breaches) if breaches else []
 
             import routers.health as _health_mod
             _health_mod.last_reading = {
@@ -310,10 +440,16 @@ async def websocket_endpoint(ws: WebSocket):
                 "timestamp":   reading["timestamp"],
             }
 
+            breach_dicts = []
+            for b, aid in zip(breaches, alert_ids):
+                d = b.model_dump()
+                d["alert_id"] = aid
+                breach_dicts.append(d)
+
             payload = {
                 "temperature": reading["temperature"],
                 "timestamp":   reading["timestamp"],
-                "breaches":    [b.model_dump() for b in breaches],
+                "breaches":    breach_dicts,
                 "is_valid":    True,
             }
             await broadcast(payload)
@@ -407,6 +543,17 @@ app.include_router(history_router)
 app.include_router(reports_router)
 app.include_router(receipts_router)
 app.include_router(events_router)
+app.include_router(workers_router)
+app.include_router(super_admin_router)
+app.include_router(notifications_router)
+app.include_router(super_admin_v2_router)
+app.include_router(phase1_command_router)
+app.include_router(phase2_admin_control_router)
+app.include_router(phase3_config_router)
+app.include_router(phase4_analytics_router)
+app.include_router(phase5_comms_router)
+app.include_router(phase6_billing_router)
+app.include_router(phase7_security_router)
 
 # ─── Static files (built React app) ──────────────────────────────────────────
 _static_dir = os.path.join(os.path.dirname(__file__), "static")

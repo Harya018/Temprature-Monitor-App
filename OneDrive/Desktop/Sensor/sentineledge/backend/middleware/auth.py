@@ -47,6 +47,20 @@ def require_admin(
             from database.queries.sessions import get_session
             session = get_session(token)
             if session is not None:
+                # Phase 2: is_active check — only applies to sessions that have
+                # admin_id set (i.e. created after Migration 25). Legacy sessions
+                # with NULL admin_id pass through unchanged.
+                admin_id = session.get("admin_id")
+                if admin_id is not None:
+                    from database.connection import execute_read
+                    admin_rows = execute_read(
+                        "SELECT is_active FROM admins WHERE id = %s", (admin_id,)
+                    )
+                    if admin_rows and admin_rows[0].get("is_active") == 0:
+                        raise HTTPException(
+                            status_code=status.HTTP_401_UNAUTHORIZED,
+                            detail="Your account has been suspended. Contact your administrator.",
+                        )
                 return True
 
     # 3. Dev-mode bypass: if no ADMIN_PASSWORD configured, allow all

@@ -31,6 +31,8 @@ import AdminProfilePage from './pages/AdminProfilePage.jsx'
 import ManageAdminsPage from './pages/ManageAdminsPage.jsx'
 import SubscriberProfilesPage from './pages/SubscriberProfilesPage.jsx'
 import SubscriberDetailPage   from './pages/SubscriberDetailPage.jsx'
+import SuperAdmin            from './pages/SuperAdmin/index.jsx'
+import SuperAdminLogin       from './pages/SuperAdminLogin.jsx'
 
 // ── Shell wraps a single page in Layout + optional alarm banner ───────────────
 // Each protected route renders its own Shell so the page component
@@ -148,6 +150,10 @@ export default function App() {
         <Route path="/manage-admins"   element={protect(<ManageAdminsPage />)} />
         <Route path="/subscribers/profiles"     element={protect(<SubscriberProfilesPage />)} />
         <Route path="/subscribers/profiles/:id" element={protect(<SubscriberDetailPage />)} />
+
+        {/* Super Admin portal — login + dashboard */}
+        <Route path="/super-admin/login" element={<SuperAdminLogin />} />
+        <Route path="/super-admin"       element={<SuperAdmin />} />
 
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>

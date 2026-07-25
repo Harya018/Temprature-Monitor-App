@@ -54,12 +54,10 @@ async def _inject_reading(temperature: float, *, label: str = "") -> list:
     # 2. Threshold check
     breaches = threshold.check_threshold(reading)
 
-    # 3. Fire escalation (non-blocking background task)
-    if breaches:
-        asyncio.create_task(
-            escalation.trigger_alert(reading, breaches),
-            name=f"sim-breach-escalation-{label or temperature}",
-        )
+    # 3. Persist alerts (fast — awaited so the WS payload below can include
+    # each breach's real alert_id; notification delivery still happens in
+    # the background inside trigger_alert() and is never awaited here).
+    alert_ids = await escalation.trigger_alert(reading, breaches) if breaches else []
 
     # 4. Update health last_reading
     try:
@@ -72,10 +70,16 @@ async def _inject_reading(temperature: float, *, label: str = "") -> list:
         pass
 
     # 5. Broadcast to all WebSocket clients
+    breach_dicts = []
+    for b, aid in zip(breaches, alert_ids):
+        d = b.model_dump()
+        d["alert_id"] = aid
+        breach_dicts.append(d)
+
     payload = {
         "temperature": reading["temperature"],
         "timestamp":   reading["timestamp"],
-        "breaches":    [b.model_dump() for b in breaches],
+        "breaches":    breach_dicts,
         "is_valid":    True,
     }
     await broadcast(payload)

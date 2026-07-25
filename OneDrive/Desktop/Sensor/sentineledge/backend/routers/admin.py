@@ -26,6 +26,7 @@ from database.retention import get_database_stats
 from modules.email.smtp import send_alert_email
 from utils.logger import get_logger
 from utils.time import now_iso
+from utils.activity_logger import log_activity
 
 logger = get_logger(__name__)
 
@@ -234,6 +235,21 @@ async def admin_login(body: _AdminLoginIn, request: Request):
 
     # Persist session in PostgreSQL (survives server restarts)
     database.create_session(token, expires_at)
+
+    # Update last_login tracking and write activity log
+    client_ip = request.client.host if request.client else "unknown"
+    try:
+        from database.connection import execute_read, execute_write
+        admin_rows = execute_read("SELECT id, company_id FROM admins WHERE name = %s LIMIT 1", (actual_username,))
+        if admin_rows:
+            _aid = admin_rows[0]["id"]
+            execute_write(
+                "UPDATE admins SET last_login_at = NOW(), last_login_ip = %s WHERE id = %s",
+                (client_ip, _aid),
+            )
+            log_activity(_aid, "login", "admin", f"ip:{client_ip}", admin_rows[0].get("company_id"))
+    except Exception as _exc:
+        logger.warning("login tracking failed: %s", _exc)
 
     logger.info("Admin dashboard login: username=%s (session expires in 8h)", actual_username)
     return {"token": token, "username": actual_username}

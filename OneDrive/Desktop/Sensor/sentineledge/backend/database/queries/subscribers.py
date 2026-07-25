@@ -142,6 +142,32 @@ def update_push_subscription(subscriber_id: int, push_subscription_json: str) ->
         return False
 
 
+def update_expo_push_token(subscriber_id: int, expo_push_token: str) -> bool:
+    """Save or update the Expo push token for a subscriber's mobile device."""
+    try:
+        execute_write(
+            "UPDATE subscribers SET expo_push_token = %s WHERE id = %s",
+            (expo_push_token, subscriber_id),
+        )
+        return True
+    except Exception as exc:
+        logger.error("update_expo_push_token failed: %s", exc)
+        return False
+
+
+def update_fcm_token(subscriber_id: int, fcm_token: str) -> bool:
+    """Save or update the raw FCM registration token for a subscriber's device."""
+    try:
+        execute_write(
+            "UPDATE subscribers SET fcm_token = %s WHERE id = %s",
+            (fcm_token, subscriber_id),
+        )
+        return True
+    except Exception as exc:
+        logger.error("update_fcm_token failed: %s", exc)
+        return False
+
+
 def delete_subscriber(subscriber_id: int) -> bool:
     """Hard-delete a subscriber by id. Returns True on success."""
     try:

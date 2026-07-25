@@ -25,6 +25,8 @@ from database.queries.subscribers import (
     add_subscriber,
     set_subscriber_pin,
     update_push_subscription,
+    update_expo_push_token,
+    update_fcm_token,
     delete_subscriber,
     disable_subscriber,
     enable_subscriber,
@@ -67,7 +69,7 @@ __all__ = [
     # subscribers
     "get_subscribers_ordered", "get_subscriber_by_order", "get_subscriber_by_id",
     "get_subscriber_by_name_and_pin", "set_subscriber_pin",
-    "add_subscriber", "update_push_subscription", "delete_subscriber",
+    "add_subscriber", "update_push_subscription", "update_expo_push_token", "update_fcm_token", "delete_subscriber",
     "disable_subscriber", "enable_subscriber",
     "update_subscriber", "get_acks_for_subscriber",
     # escalation log

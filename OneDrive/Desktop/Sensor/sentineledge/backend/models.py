@@ -305,3 +305,55 @@ class SetPinIn(BaseModel):
         if not re.match(r"^[a-zA-Z0-9]+$", v):
             raise ValueError("pin must be alphanumeric only (letters and digits)")
         return v
+
+
+# ── Multi-tenancy models ───────────────────────────────────────────────────────
+
+class CompanyIn(BaseModel):
+    """Request body for creating a new company."""
+    name: str = Field(min_length=1, max_length=255)
+    slug: str = Field(min_length=1, max_length=100)
+
+    @field_validator("name", "slug", mode="before")
+    @classmethod
+    def strip_fields(cls, v: str) -> str:
+        return v.strip() if isinstance(v, str) else v
+
+    @field_validator("slug")
+    @classmethod
+    def validate_slug(cls, v: str) -> str:
+        import re as _re
+        if not _re.match(r"^[a-z0-9\-]+$", v):
+            raise ValueError("slug must be lowercase letters, numbers, and hyphens only")
+        return v
+
+
+class CompanyOut(BaseModel):
+    """Company record returned by the API."""
+    id: int
+    name: str
+    slug: str
+    is_active: bool
+    created_at: str
+    admin_count: int = 0
+    subscriber_count: int = 0
+
+
+class AssignAdminIn(BaseModel):
+    """Body for POST /super-admin/companies/{id}/assign-admin."""
+    admin_id: int
+
+
+# ── Push token models ──────────────────────────────────────────────────────────
+
+class PushTokenIn(BaseModel):
+    """Request body for registering a push token on behalf of the current subscriber."""
+    token: str = Field(min_length=1, max_length=512)
+    type: str = Field(default="expo")   # "expo" | "fcm"
+
+    @field_validator("type")
+    @classmethod
+    def validate_type(cls, v: str) -> str:
+        if v not in ("expo", "fcm"):
+            raise ValueError("type must be 'expo' or 'fcm'")
+        return v
