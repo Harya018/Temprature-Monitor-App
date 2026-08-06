@@ -60,6 +60,137 @@ function StatusMsg({ msg }) {
   )
 }
 
+// ── Add Parameter form — module-level so it has stable identity and its own
+// state; parent re-renders (e.g. from WebSocket ticks) never interfere. ────────
+function AddParameterForm({ onToast }) {
+  const [paramName, setParamName]             = useState('')
+  const [paramUnit, setParamUnit]             = useState('')
+  const [paramMin,  setParamMin]              = useState('')
+  const [paramMax,  setParamMax]              = useState('')
+  const [paramSubmitting, setParamSubmitting] = useState(false)
+  const [paramSaved, setParamSaved]           = useState(false)
+
+  async function handleSaveParam() {
+    if (!paramName.trim() || !paramUnit.trim()) {
+      onToast({ type: 'warning', message: 'Parameter Name and Unit are required.' })
+      return
+    }
+    setParamSubmitting(true)
+    try {
+      const token = sessionStorage.getItem('admin_token')
+      const res = await fetch('/api/admin/parameters', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          name:      paramName.trim(),
+          unit:      paramUnit.trim(),
+          min_value: paramMin !== '' ? Number(paramMin) : null,
+          max_value: paramMax !== '' ? Number(paramMax) : null,
+        }),
+      })
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}))
+        throw new Error(err.error || `Server error ${res.status}`)
+      }
+      onToast({ type: 'success', message: `"${paramName}" submitted for super admin approval.` })
+      setParamSaved(true)
+      setParamName(''); setParamUnit(''); setParamMin(''); setParamMax('')
+      setTimeout(() => setParamSaved(false), 3000)
+    } catch (err) {
+      onToast({ type: 'error', message: err.message || 'Failed to submit parameter.' })
+    } finally {
+      setParamSubmitting(false)
+    }
+  }
+
+  return (
+    <>
+      <p style={{ fontSize: 13, color: '#6B7280', marginBottom: 20, marginTop: -4 }}>
+        Define a new sensor metric to monitor. This will appear as a live card on the Dashboard.
+      </p>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
+        <div style={{ gridColumn: '1 / -1' }}>
+          <label style={{ display: 'block', fontSize: 12, fontWeight: 600, color: '#374151', marginBottom: 4 }}>
+            Parameter Name
+          </label>
+          <input
+            className="form-input"
+            value={paramName}
+            onChange={e => setParamName(e.target.value)}
+            placeholder="e.g. Pressure"
+          />
+        </div>
+        <div style={{ gridColumn: '1 / -1' }}>
+          <label style={{ display: 'block', fontSize: 12, fontWeight: 600, color: '#374151', marginBottom: 4 }}>
+            Unit
+          </label>
+          <input
+            className="form-input"
+            value={paramUnit}
+            onChange={e => setParamUnit(e.target.value)}
+            placeholder="e.g. bar, %, mm/s"
+          />
+        </div>
+        <div>
+          <label style={{ display: 'block', fontSize: 12, fontWeight: 600, color: '#374151', marginBottom: 4 }}>
+            Min Value
+          </label>
+          <input
+            className="form-input"
+            type="number"
+            value={paramMin}
+            onChange={e => setParamMin(e.target.value)}
+            placeholder="e.g. 0.0"
+          />
+        </div>
+        <div>
+          <label style={{ display: 'block', fontSize: 12, fontWeight: 600, color: '#374151', marginBottom: 4 }}>
+            Max Value
+          </label>
+          <input
+            className="form-input"
+            type="number"
+            value={paramMax}
+            onChange={e => setParamMax(e.target.value)}
+            placeholder="e.g. 10.0"
+          />
+        </div>
+      </div>
+      <div style={{ marginTop: 20, display: 'flex', alignItems: 'center', gap: 12 }}>
+        <button
+          onClick={handleSaveParam}
+          disabled={paramSubmitting}
+          style={{
+            display: 'inline-flex', alignItems: 'center', gap: 6,
+            padding: '9px 20px', borderRadius: 8, border: 'none',
+            background: paramSubmitting ? '#A78BFA' : '#7C3AED', color: '#fff',
+            fontSize: 13, fontWeight: 600,
+            cursor: paramSubmitting ? 'not-allowed' : 'pointer',
+            transition: 'background 0.15s',
+          }}
+        >
+          {paramSubmitting
+            ? <><RefreshCw size={14} className="animate-spin" /> Submitting…</>
+            : <><PlusCircle size={15} /> Request Parameter</>
+          }
+        </button>
+        {paramSaved && (
+          <span style={{ fontSize: 12, color: '#10B981', fontWeight: 600 }}>✓ Saved!</span>
+        )}
+      </div>
+      <div style={{
+        marginTop: 16, padding: '10px 14px', borderRadius: 8,
+        background: '#F0FDF4', border: '1px solid #BBF7D0', fontSize: 12, color: '#065F46',
+      }}>
+        💡 Submitted parameters go to the Super Admin for approval. Once approved they appear as live sensor cards on the Dashboard.
+      </div>
+    </>
+  )
+}
+
 export default function SettingsPage() {
   const { toasts, addToast, dismiss } = useToast()
 
@@ -86,13 +217,6 @@ export default function SettingsPage() {
   const [testSmsPhone, setTestSmsPhone] = useState('6385936224')
   const [testingSms, setTestingSms] = useState(false)
   const [testSmsMsg, setTestSmsMsg] = useState(null)
-
-  const [paramName, setParamName] = useState('')
-  const [paramUnit, setParamUnit] = useState('')
-  const [paramMin, setParamMin] = useState('')
-  const [paramMax, setParamMax] = useState('')
-  const [paramSaved, setParamSaved] = useState(false)
-  const [paramSubmitting, setParamSubmitting] = useState(false)
 
   const [pwdAction, setPwdAction] = useState(null)
   const [pwdError, setPwdError] = useState(null)
@@ -277,42 +401,6 @@ export default function SettingsPage() {
       setTestSmsMsg({ type: 'error', text: 'Failed: ' + err.message })
       addToast({ type: 'error', message: 'SMS test error: ' + err.message })
     } finally { setTestingSms(false) }
-  }
-
-  const handleSaveParam = async () => {
-    if (!paramName.trim() || !paramUnit.trim()) {
-      addToast({ type: 'warning', message: 'Parameter Name and Unit are required.' })
-      return
-    }
-    setParamSubmitting(true)
-    try {
-      const token = sessionStorage.getItem('admin_token')
-      const res = await fetch('/api/admin/parameters', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({
-          name:      paramName.trim(),
-          unit:      paramUnit.trim(),
-          min_value: paramMin !== '' ? Number(paramMin) : null,
-          max_value: paramMax !== '' ? Number(paramMax) : null,
-        }),
-      })
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}))
-        throw new Error(err.error || `Server error ${res.status}`)
-      }
-      addToast({ type: 'success', message: `"${paramName}" submitted for super admin approval.` })
-      setParamSaved(true)
-      setParamName(''); setParamUnit(''); setParamMin(''); setParamMax('')
-      setTimeout(() => setParamSaved(false), 3000)
-    } catch (err) {
-      addToast({ type: 'error', message: err.message || 'Failed to submit parameter.' })
-    } finally {
-      setParamSubmitting(false)
-    }
   }
 
   const isOverride = threshData?.source === 'runtime_override'
@@ -660,112 +748,7 @@ export default function SettingsPage() {
 
         {/* ── Section 5: Add Parameter ──────────────────────────────────────── */}
         <Section title="Add Parameter" icon={PlusCircle}>
-          <p style={{ fontSize: 13, color: '#6B7280', marginBottom: 20, marginTop: -4 }}>
-            Define a new sensor metric to monitor. This will appear as a live card on the Dashboard.
-          </p>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
-            <div style={{ gridColumn: '1 / -1' }}>
-              <label style={{ display: 'block', fontSize: 12, fontWeight: 600, color: '#374151', marginBottom: 4 }}>
-                Parameter Name
-              </label>
-              <input
-                id="param-name"
-                value={paramName}
-                onChange={e => setParamName(e.target.value)}
-                placeholder="e.g. Pressure"
-                style={{
-                  width: '100%', padding: '9px 12px', borderRadius: 8,
-                  border: '1.5px solid #E5E7EB', fontSize: 13, color: '#111827',
-                  outline: 'none', boxSizing: 'border-box',
-                }}
-              />
-            </div>
-            <div style={{ gridColumn: '1 / -1' }}>
-              <label style={{ display: 'block', fontSize: 12, fontWeight: 600, color: '#374151', marginBottom: 4 }}>
-                Unit
-              </label>
-              <input
-                id="param-unit"
-                value={paramUnit}
-                onChange={e => setParamUnit(e.target.value)}
-                placeholder="e.g. bar, %, mm/s"
-                style={{
-                  width: '100%', padding: '9px 12px', borderRadius: 8,
-                  border: '1.5px solid #E5E7EB', fontSize: 13, color: '#111827',
-                  outline: 'none', boxSizing: 'border-box',
-                }}
-              />
-            </div>
-            <div>
-              <label style={{ display: 'block', fontSize: 12, fontWeight: 600, color: '#374151', marginBottom: 4 }}>
-                Min Value
-              </label>
-              <input
-                id="param-min"
-                type="number"
-                value={paramMin}
-                onChange={e => setParamMin(e.target.value)}
-                placeholder="e.g. 0.0"
-                style={{
-                  width: '100%', padding: '9px 12px', borderRadius: 8,
-                  border: '1.5px solid #E5E7EB', fontSize: 13, color: '#111827',
-                  outline: 'none', boxSizing: 'border-box',
-                }}
-              />
-            </div>
-            <div>
-              <label style={{ display: 'block', fontSize: 12, fontWeight: 600, color: '#374151', marginBottom: 4 }}>
-                Max Value
-              </label>
-              <input
-                id="param-max"
-                type="number"
-                value={paramMax}
-                onChange={e => setParamMax(e.target.value)}
-                placeholder="e.g. 10.0"
-                style={{
-                  width: '100%', padding: '9px 12px', borderRadius: 8,
-                  border: '1.5px solid #E5E7EB', fontSize: 13, color: '#111827',
-                  outline: 'none', boxSizing: 'border-box',
-                }}
-              />
-            </div>
-          </div>
-
-          <div style={{ marginTop: 20, display: 'flex', alignItems: 'center', gap: 12 }}>
-            <button
-              id="save-parameter-btn"
-              onClick={handleSaveParam}
-              disabled={paramSubmitting}
-              style={{
-                display: 'inline-flex', alignItems: 'center', gap: 6,
-                padding: '9px 20px', borderRadius: 8, border: 'none',
-                background: paramSubmitting ? '#A78BFA' : '#7C3AED', color: '#fff',
-                fontSize: 13, fontWeight: 600,
-                cursor: paramSubmitting ? 'not-allowed' : 'pointer',
-                transition: 'background 0.15s',
-              }}
-            >
-              {paramSubmitting
-                ? <><RefreshCw size={14} className="animate-spin" /> Submitting…</>
-                : <><PlusCircle size={15} /> Request Parameter</>
-              }
-            </button>
-            {paramSaved && (
-              <span style={{ fontSize: 12, color: '#10B981', fontWeight: 600 }}>
-                ✓ Saved!
-              </span>
-            )}
-          </div>
-
-          <div
-            style={{
-              marginTop: 16, padding: '10px 14px', borderRadius: 8,
-              background: '#F0FDF4', border: '1px solid #BBF7D0', fontSize: 12, color: '#065F46',
-            }}
-          >
-            💡 Submitted parameters go to the Super Admin for approval. Once approved they appear as live sensor cards on the Dashboard.
-          </div>
+          <AddParameterForm onToast={addToast} />
         </Section>
 
         {/* ── Section 6: Admin Info ───────────────────────────────────────── */}
