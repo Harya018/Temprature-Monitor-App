@@ -308,3 +308,16 @@ body {
 .log-error    { color: #EF4444; }
 .log-critical { color: #EF4444; font-weight: 700; }
 
+/* ── Native <dialog> modal backdrop ── */
+dialog::backdrop {
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(3px);
+}
+dialog[open] {
+  animation: dialogFadeIn 0.15s ease-out;
+}
+@keyframes dialogFadeIn {
+  from { opacity: 0; transform: translateY(-8px) scale(0.98); }
+  to   { opacity: 1; transform: translateY(0) scale(1); }
+}
+

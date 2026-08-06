@@ -60,17 +60,32 @@ function StatusMsg({ msg }) {
   )
 }
 
-// ── Add Parameter form — memo + uncontrolled inputs.
-// memo: skips re-render when parent updates (addToast ref is stable).
-// uncontrolled: React never touches the DOM value so browser keeps the caret.
-// autoComplete="off": stops browser autofill from grabbing focus on click. ───────
+// ── Add Parameter form — uses native <dialog> with showModal().
+// showModal() puts the dialog in the browser top layer and TRAPS FOCUS INSIDE.
+// No React re-render (WebSocket ticks, parent state, etc.) can steal focus
+// from a native modal dialog — the browser enforces it at the OS level.
 const AddParameterForm = memo(function AddParameterForm({ onToast }) {
-  const nameRef = useRef(null)
-  const unitRef = useRef(null)
-  const minRef  = useRef(null)
-  const maxRef  = useRef(null)
+  const dialogRef = useRef(null)
+  const nameRef   = useRef(null)
+  const unitRef   = useRef(null)
+  const minRef    = useRef(null)
+  const maxRef    = useRef(null)
   const [paramSubmitting, setParamSubmitting] = useState(false)
-  const [paramSaved, setParamSaved]           = useState(false)
+  const [paramSaved,      setParamSaved]      = useState(false)
+
+  const openDialog = useCallback(() => {
+    dialogRef.current?.showModal()
+    setTimeout(() => nameRef.current?.focus(), 30)
+  }, [])
+
+  const closeDialog = useCallback(() => {
+    dialogRef.current?.close()
+  }, [])
+
+  // Close when clicking the backdrop (the dialog element itself, not its children)
+  const handleDialogClick = useCallback((e) => {
+    if (e.target === dialogRef.current) closeDialog()
+  }, [closeDialog])
 
   async function handleSaveParam() {
     const name = nameRef.current?.value?.trim() || ''
@@ -107,7 +122,8 @@ const AddParameterForm = memo(function AddParameterForm({ onToast }) {
       if (minRef.current)  minRef.current.value  = ''
       if (maxRef.current)  maxRef.current.value  = ''
       setParamSaved(true)
-      setTimeout(() => setParamSaved(false), 3000)
+      setTimeout(() => setParamSaved(false), 4000)
+      closeDialog()
     } catch (err) {
       onToast({ type: 'error', message: err.message || 'Failed to submit parameter.' })
     } finally {
@@ -117,93 +133,155 @@ const AddParameterForm = memo(function AddParameterForm({ onToast }) {
 
   return (
     <>
-      <p style={{ fontSize: 13, color: '#6B7280', marginBottom: 20, marginTop: -4 }}>
-        Define a new sensor metric to monitor. This will appear as a live card on the Dashboard.
+      <p style={{ fontSize: 13, color: '#6B7280', marginBottom: 16, marginTop: -4 }}>
+        Define a new sensor metric to monitor. Once approved by the Super Admin it appears as a live card on the Dashboard.
       </p>
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
-        <div style={{ gridColumn: '1 / -1' }}>
-          <label style={{ display: 'block', fontSize: 12, fontWeight: 600, color: '#374151', marginBottom: 4 }}>
-            Parameter Name
-          </label>
-          <input
-            ref={nameRef}
-            className="form-input"
-            defaultValue=""
-            autoComplete="off"
-            placeholder="e.g. pH"
-            style={{ caretColor: '#7C3AED' }}
-          />
-        </div>
-        <div style={{ gridColumn: '1 / -1' }}>
-          <label style={{ display: 'block', fontSize: 12, fontWeight: 600, color: '#374151', marginBottom: 4 }}>
-            Unit
-          </label>
-          <input
-            ref={unitRef}
-            className="form-input"
-            defaultValue=""
-            autoComplete="off"
-            placeholder="e.g. pH, bar, %"
-            style={{ caretColor: '#7C3AED' }}
-          />
-        </div>
-        <div>
-          <label style={{ display: 'block', fontSize: 12, fontWeight: 600, color: '#374151', marginBottom: 4 }}>
-            Min Value
-          </label>
-          <input
-            ref={minRef}
-            className="form-input"
-            type="number"
-            defaultValue=""
-            autoComplete="off"
-            placeholder="e.g. 6.5"
-            style={{ caretColor: '#7C3AED' }}
-          />
-        </div>
-        <div>
-          <label style={{ display: 'block', fontSize: 12, fontWeight: 600, color: '#374151', marginBottom: 4 }}>
-            Max Value
-          </label>
-          <input
-            ref={maxRef}
-            className="form-input"
-            type="number"
-            defaultValue=""
-            autoComplete="off"
-            placeholder="e.g. 10.0"
-            style={{ caretColor: '#7C3AED' }}
-          />
-        </div>
-      </div>
-      <div style={{ marginTop: 20, display: 'flex', alignItems: 'center', gap: 12 }}>
-        <button
-          onClick={handleSaveParam}
-          disabled={paramSubmitting}
-          style={{
-            display: 'inline-flex', alignItems: 'center', gap: 6,
-            padding: '9px 20px', borderRadius: 8, border: 'none',
-            background: paramSubmitting ? '#A78BFA' : '#7C3AED', color: '#fff',
-            fontSize: 13, fontWeight: 600,
-            cursor: paramSubmitting ? 'not-allowed' : 'pointer',
-            transition: 'background 0.15s',
-          }}
-        >
-          {paramSubmitting
-            ? <><RefreshCw size={14} className="animate-spin" /> Submitting…</>
-            : <><PlusCircle size={15} /> Request Parameter</>
-          }
-        </button>
-        {paramSaved && (
-          <span style={{ fontSize: 12, color: '#10B981', fontWeight: 600 }}>✓ Saved!</span>
-        )}
-      </div>
+
+      {paramSaved && (
+        <p style={{ fontSize: 12, color: '#10B981', fontWeight: 600, marginBottom: 12 }}>
+          ✓ Parameter submitted for approval!
+        </p>
+      )}
+
+      <button
+        onClick={openDialog}
+        style={{
+          display: 'inline-flex', alignItems: 'center', gap: 6,
+          padding: '9px 20px', borderRadius: 8, border: 'none',
+          background: '#7C3AED', color: '#fff',
+          fontSize: 13, fontWeight: 600, cursor: 'pointer',
+        }}
+      >
+        <PlusCircle size={15} /> Request Parameter
+      </button>
+
       <div style={{
         marginTop: 16, padding: '10px 14px', borderRadius: 8,
         background: '#F0FDF4', border: '1px solid #BBF7D0', fontSize: 12, color: '#065F46',
       }}>
         💡 Submitted parameters go to the Super Admin for approval. Once approved they appear as live sensor cards on the Dashboard.
       </div>
+
+      {/* Native <dialog> — browser top-layer, focus trapped inside by OS */}
+      <dialog
+        ref={dialogRef}
+        onClick={handleDialogClick}
+        style={{
+          border: 'none', borderRadius: 12, padding: 0,
+          boxShadow: '0 20px 60px rgba(0,0,0,0.35)',
+          width: '100%', maxWidth: 440,
+          background: '#fff',
+        }}
+      >
+        {/* Header */}
+        <div style={{ padding: '18px 24px', borderBottom: '1px solid #E5E7EB', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+          <div>
+            <h3 style={{ margin: 0, fontSize: 15, fontWeight: 700, color: '#111827' }}>
+              Request New Parameter
+            </h3>
+            <p style={{ margin: '3px 0 0', fontSize: 12, color: '#6B7280' }}>
+              Fill in the details for the new sensor metric.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={closeDialog}
+            style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#9CA3AF', fontSize: 20, lineHeight: 1, padding: 4 }}
+            aria-label="Close"
+          >
+            ×
+          </button>
+        </div>
+
+        {/* Body */}
+        <div style={{ padding: '20px 24px', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
+          <div style={{ gridColumn: '1 / -1' }}>
+            <label style={{ display: 'block', fontSize: 12, fontWeight: 600, color: '#374151', marginBottom: 4 }}>
+              Parameter Name
+            </label>
+            <input
+              ref={nameRef}
+              className="form-input"
+              defaultValue=""
+              autoComplete="off"
+              placeholder="e.g. pH"
+              style={{ caretColor: '#7C3AED' }}
+            />
+          </div>
+          <div style={{ gridColumn: '1 / -1' }}>
+            <label style={{ display: 'block', fontSize: 12, fontWeight: 600, color: '#374151', marginBottom: 4 }}>
+              Unit
+            </label>
+            <input
+              ref={unitRef}
+              className="form-input"
+              defaultValue=""
+              autoComplete="off"
+              placeholder="e.g. pH, bar, %"
+              style={{ caretColor: '#7C3AED' }}
+            />
+          </div>
+          <div>
+            <label style={{ display: 'block', fontSize: 12, fontWeight: 600, color: '#374151', marginBottom: 4 }}>
+              Min Value <span style={{ fontWeight: 400, color: '#9CA3AF' }}>(optional)</span>
+            </label>
+            <input
+              ref={minRef}
+              className="form-input"
+              type="number"
+              defaultValue=""
+              autoComplete="off"
+              placeholder="e.g. 6.5"
+              style={{ caretColor: '#7C3AED' }}
+            />
+          </div>
+          <div>
+            <label style={{ display: 'block', fontSize: 12, fontWeight: 600, color: '#374151', marginBottom: 4 }}>
+              Max Value <span style={{ fontWeight: 400, color: '#9CA3AF' }}>(optional)</span>
+            </label>
+            <input
+              ref={maxRef}
+              className="form-input"
+              type="number"
+              defaultValue=""
+              autoComplete="off"
+              placeholder="e.g. 10.0"
+              style={{ caretColor: '#7C3AED' }}
+            />
+          </div>
+        </div>
+
+        {/* Footer */}
+        <div style={{ padding: '14px 24px', borderTop: '1px solid #E5E7EB', display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: 10 }}>
+          <button
+            type="button"
+            onClick={closeDialog}
+            style={{
+              padding: '8px 18px', borderRadius: 8, border: '1px solid #D1D5DB',
+              background: '#fff', color: '#374151', fontSize: 13, fontWeight: 500, cursor: 'pointer',
+            }}
+          >
+            Cancel
+          </button>
+          <button
+            type="button"
+            onClick={handleSaveParam}
+            disabled={paramSubmitting}
+            style={{
+              display: 'inline-flex', alignItems: 'center', gap: 6,
+              padding: '8px 20px', borderRadius: 8, border: 'none',
+              background: paramSubmitting ? '#A78BFA' : '#7C3AED', color: '#fff',
+              fontSize: 13, fontWeight: 600,
+              cursor: paramSubmitting ? 'not-allowed' : 'pointer',
+            }}
+          >
+            {paramSubmitting
+              ? <><RefreshCw size={14} className="animate-spin" /> Submitting…</>
+              : <><PlusCircle size={15} /> Submit Parameter</>
+            }
+          </button>
+        </div>
+      </dialog>
     </>
   )
 })
