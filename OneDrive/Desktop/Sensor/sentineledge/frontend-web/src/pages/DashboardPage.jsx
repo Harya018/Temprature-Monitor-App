@@ -5,7 +5,7 @@
  */
 import { Component, useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { ArrowRight, Gauge, Droplets, Activity } from 'lucide-react'
+import { ArrowRight, Gauge, Droplets, Activity, Cpu } from 'lucide-react'
 import TemperatureCard  from '../components/dashboard/TemperatureCard.jsx'
 import StatusCard       from '../components/dashboard/StatusCard.jsx'
 import AlertsTodayCard  from '../components/dashboard/AlertsTodayCard.jsx'
@@ -53,6 +53,7 @@ export default function DashboardPage({ wsData, health, thresholds, onAlertCount
   const readings         = wsData?.readings         ?? []
   const isConnected      = wsData?.isConnected      ?? false
   const connectionStatus = wsData?.connectionStatus ?? 'CONNECTING'
+  const lastEvent        = wsData?.lastEvent        ?? null
 
   const navigate = useNavigate()
 
@@ -70,8 +71,51 @@ export default function DashboardPage({ wsData, health, thresholds, onAlertCount
     return () => clearInterval(id)
   }, [])
 
+  // ── Dynamic parameters from DB ───────────────────────────────────────────────
+  const [companyId,   setCompanyId]   = useState(null)
+  const [extraParams, setExtraParams] = useState([])
+  const [paramToast,  setParamToast]  = useState('')
+
+  useEffect(() => {
+    const token = sessionStorage.getItem('admin_token')
+    if (!token) return
+    const headers = { Authorization: `Bearer ${token}` }
+    fetch('/api/admin/me', { headers })
+      .then(r => r.ok ? r.json() : null)
+      .then(me => {
+        if (!me?.company_id) return
+        setCompanyId(me.company_id)
+        return fetch('/api/admin/parameters', { headers })
+          .then(r => r.ok ? r.json() : [])
+          .then(params => setExtraParams(Array.isArray(params) ? params : []))
+      })
+      .catch(() => {})
+  }, [])
+
+  useEffect(() => {
+    if (!lastEvent || lastEvent.type !== 'parameter_added') return
+    if (companyId && lastEvent.company_id !== companyId) return
+    const p = lastEvent.parameter
+    if (!p?.name) return
+    setExtraParams(prev => {
+      if (prev.some(ep => ep.name === p.name)) return prev
+      return [...prev, { name: p.name, unit: p.unit, min_value: p.min_value, max_value: p.max_value }]
+    })
+    setParamToast(`New parameter added: ${p.name}`)
+    setTimeout(() => setParamToast(''), 4000)
+  }, [lastEvent, companyId])
+
   return (
     <ErrorBoundary>
+      {paramToast && (
+        <div style={{
+          position: 'fixed', top: 20, right: 20, zIndex: 2000,
+          background: '#D1FAE5', color: '#065F46',
+          padding: '10px 18px', borderRadius: 8, fontWeight: 600, fontSize: 13,
+        }}>
+          {paramToast}
+        </div>
+      )}
       <div className="space-y-5">
 
         {/* Row 1 — Stat cards (4 columns) */}
@@ -113,10 +157,41 @@ export default function DashboardPage({ wsData, health, thresholds, onAlertCount
           />
         </div>
 
-        {/* Row 3 — Live chart */}
+        {/* Row 3 — Dynamic parameter cards (from approved company_parameters) */}
+        {extraParams.length > 0 && (
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+            {extraParams.map(p => {
+              const liveValue = lastReading?.extra_params?.[p.name] ?? null
+              const mn = p.min_value != null ? Number(p.min_value) : null
+              const mx = p.max_value != null ? Number(p.max_value) : null
+              const inRange = liveValue != null && mn != null && mx != null
+                ? liveValue >= mn && liveValue <= mx
+                : null
+              const subtitle = liveValue != null && inRange != null
+                ? inRange ? 'Within normal range' : 'Out of range!'
+                : (mn != null && mx != null ? `Range: ${mn} – ${mx}` : undefined)
+              return (
+                <SensorCard
+                  key={p.name}
+                  icon={Cpu}
+                  iconColor={
+                    liveValue != null && inRange === false ? '#EF4444' : '#7C3AED'
+                  }
+                  label={p.name}
+                  value={liveValue}
+                  unit={p.unit || ''}
+                  subtitle={subtitle}
+                  footer={p.unit ? `Live ${p.name} reading (${p.unit})` : `Live ${p.name} reading`}
+                />
+              )
+            })}
+          </div>
+        )}
+
+        {/* Row 4 — Live chart */}
         <LiveChart readings={readings} thresholds={thresholds} />
 
-        {/* Row 4 — Mini alert preview */}
+        {/* Row 5 — Mini alert preview */}
         <div className="card">
           <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100">
             <div>

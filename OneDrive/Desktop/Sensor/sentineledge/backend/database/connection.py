@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import os
 import threading
+import time
 from typing import Optional
 
 import psycopg2
@@ -42,6 +43,10 @@ DATABASE_URL: str = os.getenv(
 _pool: Optional[psycopg2.pool.ThreadedConnectionPool] = None
 _pool_lock = threading.Lock()
 
+_DB_RECONNECT_ATTEMPTS = 10
+_DB_RECONNECT_DELAY    = 5
+_DB_HEALTH_INTERVAL    = 60
+
 
 class _WriteResult:
     """
@@ -60,20 +65,50 @@ class _WriteResult:
         self.lastrowid = lastrowid
 
 
-def get_db_pool() -> psycopg2.pool.ThreadedConnectionPool:
-    """Return the shared connection pool, initialising it on first call."""
+def get_db_pool() -> Optional[psycopg2.pool.ThreadedConnectionPool]:
+    """
+    Return the shared connection pool, initialising it on first call.
+
+    On failure, retries up to _DB_RECONNECT_ATTEMPTS times with
+    _DB_RECONNECT_DELAY seconds between each attempt.  After all attempts
+    fail, logs CRITICAL and returns None.  Callers must handle None.
+    """
     global _pool
-    if _pool is None:
-        with _pool_lock:
-            if _pool is None:
-                logger.info("Initialising PostgreSQL connection pool ...")
-                _pool = psycopg2.pool.ThreadedConnectionPool(
+    if _pool is not None:
+        return _pool
+    with _pool_lock:
+        if _pool is not None:
+            return _pool
+        for attempt in range(1, _DB_RECONNECT_ATTEMPTS + 1):
+            try:
+                logger.info("DB reconnect attempt %d/%d...", attempt, _DB_RECONNECT_ATTEMPTS)
+                new_pool = psycopg2.pool.ThreadedConnectionPool(
                     minconn=2,
                     maxconn=20,
                     dsn=DATABASE_URL,
                 )
-                logger.info("PostgreSQL connection pool ready (min=2, max=20, dsn=%s)", DATABASE_URL)
-    return _pool
+                _pool = new_pool
+                MODULE_STATUS["database"] = "ok"
+                logger.info(
+                    "DB reconnected successfully (pool ready, min=2, max=20, dsn=%s)",
+                    DATABASE_URL,
+                )
+                return _pool
+            except Exception as exc:
+                logger.warning(
+                    "DB reconnect attempt %d/%d failed: %s",
+                    attempt, _DB_RECONNECT_ATTEMPTS, exc,
+                )
+                if attempt < _DB_RECONNECT_ATTEMPTS:
+                    time.sleep(_DB_RECONNECT_DELAY)
+
+        logger.critical(
+            "DB: all %d reconnect attempts failed — "
+            "server will keep running but DB queries will fail.",
+            _DB_RECONNECT_ATTEMPTS,
+        )
+        MODULE_STATUS["database"] = "error: connection failed after max retries"
+        return None
 
 
 def close_db_pool() -> None:
@@ -85,6 +120,59 @@ def close_db_pool() -> None:
         logger.info("PostgreSQL connection pool closed.")
 
 
+def _invalidate_pool() -> None:
+    """
+    Discard the current broken pool so the next call to get_db_pool()
+    triggers a fresh connection attempt.
+    """
+    global _pool
+    with _pool_lock:
+        if _pool is not None:
+            try:
+                _pool.closeall()
+            except Exception:
+                pass
+            _pool = None
+            logger.warning("DB pool invalidated — will reconnect on next query")
+
+
+def _db_health_ping_loop() -> None:
+    """Background thread: ping DB every _DB_HEALTH_INTERVAL seconds."""
+    while True:
+        time.sleep(_DB_HEALTH_INTERVAL)
+        pool = get_db_pool()
+        if pool is None:
+            continue   # already in failed state; get_db_pool() will retry on next query
+        conn = None
+        try:
+            conn = pool.getconn()
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1")
+            conn.commit()
+            if MODULE_STATUS.get("database") != "ok":
+                MODULE_STATUS["database"] = "ok"
+                logger.info("DB health ping: connection restored")
+        except Exception as exc:
+            logger.warning("DB health ping failed: %s — invalidating pool", exc)
+            MODULE_STATUS["database"] = "error: ping failed"
+            _invalidate_pool()
+        finally:
+            if conn is not None and pool is not None:
+                try:
+                    pool.putconn(conn)
+                except Exception:
+                    pass
+
+
+# Start background health-ping thread at import time.
+_db_health_thread = threading.Thread(
+    target=_db_health_ping_loop,
+    daemon=True,
+    name="db-health-ping",
+)
+_db_health_thread.start()
+
+
 def execute_write(sql: str, params: tuple = ()) -> _WriteResult:
     """
     Execute an INSERT, UPDATE, or DELETE inside a transaction.
@@ -94,8 +182,12 @@ def execute_write(sql: str, params: tuple = ()) -> _WriteResult:
 
     Returns a _WriteResult with `.lastrowid` and `.rowcount`.
     Rolls back automatically on any exception.
+    Returns a zero-result WriteResult if the pool is unavailable.
     """
     pool = get_db_pool()
+    if pool is None:
+        logger.error("execute_write: DB pool unavailable — query skipped: %.80s", sql)
+        return _WriteResult(rowcount=0, lastrowid=None)
     conn = pool.getconn()
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
@@ -110,6 +202,11 @@ def execute_write(sql: str, params: tuple = ()) -> _WriteResult:
                     lastrowid = row_dict.get("id") or next(iter(row_dict.values()), None)
             conn.commit()
         return _WriteResult(rowcount=rowcount, lastrowid=lastrowid)
+    except psycopg2.OperationalError as exc:
+        conn.rollback()
+        logger.warning("execute_write: OperationalError — invalidating pool: %s", exc)
+        _invalidate_pool()
+        raise
     except Exception:
         conn.rollback()
         raise
@@ -121,13 +218,31 @@ def execute_read(sql: str, params: tuple = ()) -> list[dict]:
     """
     Execute a SELECT (or UPDATE ... RETURNING) and return all rows as
     a list of plain dicts.
+
+    Always commits (harmless for pure SELECTs; required for UPDATE RETURNING)
+    and rolls back on error so the pooled connection is always returned in a
+    clean, ready-to-use state.
+    Returns an empty list if the pool is unavailable.
     """
     pool = get_db_pool()
+    if pool is None:
+        logger.error("execute_read: DB pool unavailable — returning []: %.80s", sql)
+        return []
     conn = pool.getconn()
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(sql, params)
-            return [dict(row) for row in cur.fetchall()]
+            rows = [dict(row) for row in cur.fetchall()]
+        conn.commit()
+        return rows
+    except psycopg2.OperationalError as exc:
+        conn.rollback()
+        logger.warning("execute_read: OperationalError — invalidating pool: %s", exc)
+        _invalidate_pool()
+        raise
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         pool.putconn(conn)
 
@@ -798,6 +913,265 @@ def _run_migrations(pool: psycopg2.pool.ThreadedConnectionPool) -> None:
                     "ALTER TABLE admin_sessions ADD COLUMN two_fa_verified INTEGER DEFAULT 0"
                 )
                 logger.info("Migration 29g: added two_fa_verified to admin_sessions")
+
+            # Migration 30: csv_sensor_history — imported historical CSV data
+            if not table_exists("csv_sensor_history"):
+                cur.execute("""
+                    CREATE TABLE csv_sensor_history (
+                        id          SERIAL PRIMARY KEY,
+                        recorded_at TIMESTAMPTZ NOT NULL,
+                        date_only   DATE,
+                        hour        INTEGER,
+                        week_number INTEGER,
+                        temperature NUMERIC(8,2),
+                        pressure    NUMERIC(10,4),
+                        source      TEXT DEFAULT 'csv',
+                        imported_at TIMESTAMPTZ DEFAULT NOW()
+                    )
+                """)
+                cur.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_csv_history_recorded_at ON csv_sensor_history(recorded_at)"
+                )
+                cur.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_csv_history_date_only ON csv_sensor_history(date_only)"
+                )
+                logger.info("Migration 30: created csv_sensor_history table")
+
+            # Migration 31: seed SRM as the default company and assign all
+            # existing data to it.  Guarded by slug='srm' so it is fully
+            # idempotent — safe to run on every restart.
+            cur.execute("SELECT COUNT(*) FROM companies WHERE slug = 'srm'")
+            if cur.fetchone()[0] == 0:
+                cur.execute("""
+                    INSERT INTO companies (name, slug, description, is_active)
+                    VALUES ('SRM Institute of Science and Technology',
+                            'srm',
+                            'SRM Institute — Chennai Campus IoT Monitoring',
+                            1)
+                    RETURNING id
+                """)
+                srm_id = cur.fetchone()[0]
+
+                # Assign all existing non-super-admin admins to SRM
+                cur.execute("""
+                    UPDATE admins
+                       SET company_id = %s
+                     WHERE company_id IS NULL
+                       AND role != 'super_admin'
+                """, (srm_id,))
+
+                # Assign all existing subscribers to SRM
+                cur.execute("""
+                    UPDATE subscribers
+                       SET company_id = %s
+                     WHERE company_id IS NULL
+                """, (srm_id,))
+
+                # Assign all existing alerts to SRM
+                cur.execute("""
+                    UPDATE alerts
+                       SET company_id = %s
+                     WHERE company_id IS NULL
+                """, (srm_id,))
+
+                logger.info(
+                    "Migration 31: seeded SRM company (id=%s) and assigned "
+                    "all existing admins, subscribers, and alerts to it",
+                    srm_id,
+                )
+
+            # Migration 32: severity_routing — per-company channel routing rules
+            if not table_exists("severity_routing"):
+                cur.execute("""
+                    CREATE TABLE severity_routing (
+                        id             SERIAL PRIMARY KEY,
+                        company_id     INTEGER REFERENCES companies(id) ON DELETE CASCADE,
+                        severity       TEXT NOT NULL,
+                        use_email      INTEGER DEFAULT 1,
+                        use_sms        INTEGER DEFAULT 1,
+                        use_push       INTEGER DEFAULT 1,
+                        use_escalation INTEGER DEFAULT 0,
+                        created_at     TIMESTAMPTZ DEFAULT NOW(),
+                        UNIQUE(company_id, severity)
+                    )
+                """)
+                # Seed default routing for every existing company
+                # WARNING: email + push only (no SMS — LOW-urgency, no wake-up calls)
+                # CRITICAL: all channels + escalation
+                # EMERGENCY: all channels + escalation
+                for _sev, _email, _sms, _push, _esc in [
+                    ("WARNING",   1, 0, 1, 0),
+                    ("CRITICAL",  1, 1, 1, 1),
+                    ("EMERGENCY", 1, 1, 1, 1),
+                ]:
+                    cur.execute("""
+                        INSERT INTO severity_routing
+                            (company_id, severity, use_email, use_sms, use_push, use_escalation)
+                        SELECT id, %s, %s, %s, %s, %s FROM companies
+                        ON CONFLICT DO NOTHING
+                    """, (_sev, _email, _sms, _push, _esc))
+                logger.info("Migration 32: created severity_routing table with default rules")
+
+            # Migration 33: escalation_policy — per-company re-notification rules
+            if not table_exists("escalation_policy"):
+                cur.execute("""
+                    CREATE TABLE escalation_policy (
+                        id                      SERIAL PRIMARY KEY,
+                        company_id              INTEGER REFERENCES companies(id) ON DELETE CASCADE,
+                        enabled                 INTEGER DEFAULT 1,
+                        initial_wait_minutes    INTEGER DEFAULT 5,
+                        repeat_interval_minutes INTEGER DEFAULT 10,
+                        max_escalations         INTEGER DEFAULT 3,
+                        notify_super_admin      INTEGER DEFAULT 0,
+                        created_at              TIMESTAMPTZ DEFAULT NOW(),
+                        UNIQUE(company_id)
+                    )
+                """)
+                cur.execute("""
+                    INSERT INTO escalation_policy
+                        (company_id, enabled, initial_wait_minutes,
+                         repeat_interval_minutes, max_escalations)
+                    SELECT id, 1, 5, 10, 3 FROM companies
+                    ON CONFLICT DO NOTHING
+                """)
+                logger.info("Migration 33: created escalation_policy table with default policies")
+
+            # Migration 34: policy_escalation_log — re-notification events
+            # Named separately from the existing escalation_log table (different schema/purpose)
+            if not table_exists("policy_escalation_log"):
+                cur.execute("""
+                    CREATE TABLE policy_escalation_log (
+                        id               SERIAL PRIMARY KEY,
+                        alert_id         INTEGER REFERENCES alerts(id) ON DELETE CASCADE,
+                        subscriber_id    INTEGER REFERENCES subscribers(id) ON DELETE SET NULL,
+                        escalation_level INTEGER DEFAULT 1,
+                        notified_at      TIMESTAMPTZ DEFAULT NOW(),
+                        acknowledged     INTEGER DEFAULT 0,
+                        acknowledged_at  TIMESTAMPTZ
+                    )
+                """)
+                cur.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_pel_alert ON policy_escalation_log(alert_id)"
+                )
+                logger.info("Migration 34: created policy_escalation_log table")
+
+            # Migration 35: anomaly_log — background anomaly detection results
+            if not table_exists("anomaly_log"):
+                cur.execute("""
+                    CREATE TABLE anomaly_log (
+                        id            SERIAL PRIMARY KEY,
+                        company_id    INTEGER REFERENCES companies(id) ON DELETE CASCADE,
+                        anomaly_type  TEXT    NOT NULL,
+                        severity      TEXT    NOT NULL DEFAULT 'medium',
+                        description   TEXT,
+                        detected_at   TIMESTAMPTZ DEFAULT NOW(),
+                        is_resolved   INTEGER     DEFAULT 0,
+                        resolved_at   TIMESTAMPTZ
+                    )
+                """)
+                cur.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_anomaly_company ON anomaly_log(company_id)"
+                )
+                cur.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_anomaly_resolved ON anomaly_log(is_resolved)"
+                )
+                logger.info("Migration 35: created anomaly_log table")
+
+            # Migration 36: subscription_tiers quota columns + companies usage tracking
+            cur.execute("ALTER TABLE subscription_tiers ADD COLUMN IF NOT EXISTS monthly_sms_quota INTEGER DEFAULT 100")
+            cur.execute("ALTER TABLE subscription_tiers ADD COLUMN IF NOT EXISTS monthly_email_quota INTEGER DEFAULT 500")
+            cur.execute("ALTER TABLE subscription_tiers ADD COLUMN IF NOT EXISTS max_parameters INTEGER DEFAULT 5")
+            cur.execute("ALTER TABLE subscription_tiers ADD COLUMN IF NOT EXISTS price_inr INTEGER DEFAULT 0")
+            cur.execute("ALTER TABLE companies ADD COLUMN IF NOT EXISTS tier_id INTEGER REFERENCES subscription_tiers(id) DEFAULT 1")
+            cur.execute("ALTER TABLE companies ADD COLUMN IF NOT EXISTS sms_used_this_month INTEGER DEFAULT 0")
+            cur.execute("ALTER TABLE companies ADD COLUMN IF NOT EXISTS email_used_this_month INTEGER DEFAULT 0")
+            cur.execute("ALTER TABLE companies ADD COLUMN IF NOT EXISTS push_used_this_month INTEGER DEFAULT 0")
+            cur.execute("UPDATE companies SET tier_id = 2 WHERE slug = 'srm' AND tier_id IS DISTINCT FROM 2")
+            logger.info("Migration 36: extended subscription_tiers and companies with quota tracking")
+
+            # Migration 37: onboarding wizard step columns on company_onboarding
+            cur.execute("ALTER TABLE company_onboarding ADD COLUMN IF NOT EXISTS step_index INTEGER DEFAULT 0")
+            cur.execute("ALTER TABLE company_onboarding ADD COLUMN IF NOT EXISTS step_title TEXT")
+            cur.execute("ALTER TABLE company_onboarding ADD COLUMN IF NOT EXISTS step_status TEXT DEFAULT 'pending'")
+            cur.execute("ALTER TABLE company_onboarding ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ")
+            logger.info("Migration 37: added wizard step columns to company_onboarding")
+
+            # Migration 38: audit_log — security-grade event log with IP, severity, old/new values
+            if not table_exists("audit_log"):
+                cur.execute("""
+                    CREATE TABLE audit_log (
+                        id          SERIAL PRIMARY KEY,
+                        admin_id    INTEGER REFERENCES admins(id) ON DELETE SET NULL,
+                        company_id  INTEGER REFERENCES companies(id) ON DELETE SET NULL,
+                        category    TEXT NOT NULL DEFAULT 'general',
+                        action      TEXT NOT NULL,
+                        entity_type TEXT,
+                        entity_id   INTEGER,
+                        old_value   TEXT,
+                        new_value   TEXT,
+                        ip_address  TEXT,
+                        severity    TEXT NOT NULL DEFAULT 'info',
+                        created_at  TIMESTAMPTZ DEFAULT NOW()
+                    )
+                """)
+                cur.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_audit_log_admin ON audit_log(admin_id)"
+                )
+                cur.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_audit_log_company ON audit_log(company_id)"
+                )
+                cur.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_audit_log_created ON audit_log(created_at DESC)"
+                )
+                cur.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_audit_log_category ON audit_log(category)"
+                )
+                logger.info("Migration 38: created audit_log table")
+
+            # Migration 39: totp_secrets — TOTP 2FA for admins
+            if not table_exists("totp_secrets"):
+                cur.execute("""
+                    CREATE TABLE totp_secrets (
+                        admin_id    INTEGER PRIMARY KEY REFERENCES admins(id) ON DELETE CASCADE,
+                        secret      TEXT NOT NULL,
+                        enabled     INTEGER DEFAULT 0,
+                        enforced    INTEGER DEFAULT 0,
+                        created_at  TIMESTAMPTZ DEFAULT NOW()
+                    )
+                """)
+                logger.info("Migration 39: created totp_secrets table")
+
+            # Migration 40: company_parameters — per-company custom sensor parameters
+            if not table_exists("company_parameters"):
+                cur.execute("""
+                    CREATE TABLE company_parameters (
+                        id          SERIAL PRIMARY KEY,
+                        company_id  INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+                        name        VARCHAR(100) NOT NULL,
+                        unit        VARCHAR(50),
+                        min_value   NUMERIC,
+                        max_value   NUMERIC,
+                        is_active   BOOLEAN DEFAULT TRUE,
+                        created_at  TIMESTAMPTZ DEFAULT NOW(),
+                        updated_at  TIMESTAMPTZ DEFAULT NOW(),
+                        UNIQUE(company_id, name)
+                    )
+                """)
+                cur.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_company_parameters_company_id "
+                    "ON company_parameters(company_id)"
+                )
+                logger.info("Migration 40: created company_parameters table")
+
+            # Migration 41: backfill alerts.company_id — set NULL rows to first company
+            cur.execute("""
+                UPDATE alerts
+                   SET company_id = (SELECT id FROM companies ORDER BY id LIMIT 1)
+                 WHERE company_id IS NULL
+                   AND EXISTS (SELECT 1 FROM companies)
+            """)
+            if cur.rowcount > 0:
+                logger.info("Migration 41: backfilled company_id on %d alerts", cur.rowcount)
 
         conn.commit()
     except Exception as exc:

@@ -5,6 +5,9 @@ import { useState, useEffect, useCallback } from 'react'
 import { ClipboardList, RefreshCw, Download } from 'lucide-react'
 import { fetchEvents } from '../services/api.js'
 import { utcToIST, timeAgo } from '../utils/time.js'
+import { SkeletonTable } from '../components/Skeleton'
+import ErrorState from '../components/ErrorState'
+import EmptyState from '../components/EmptyState'
 
 const TYPE_CONFIG = {
   config:   { dot: '#7C3AED', icon: '🔵', label: 'Config Change' },
@@ -14,14 +17,16 @@ const TYPE_CONFIG = {
 }
 
 export default function EventsPage() {
-  const [events,  setEvents]  = useState([])
-  const [loading, setLoading] = useState(false)
-  const [filter,  setFilter]  = useState('all')
+  const [events,     setEvents]     = useState([])
+  const [loading,    setLoading]    = useState(false)
+  const [fetchError, setFetchError] = useState(null)
+  const [filter,     setFilter]     = useState('all')
 
   const load = useCallback(async () => {
     setLoading(true)
+    setFetchError(null)
     try { setEvents(await fetchEvents(200, filter === 'all' ? 'all' : filter)) }
-    catch { /* silent */ }
+    catch (err) { setFetchError(err?.message || 'Could not load events') }
     finally { setLoading(false) }
   }, [filter])
 
@@ -75,11 +80,12 @@ export default function EventsPage() {
 
       {/* Timeline */}
       <div className="card p-5">
-        {events.length === 0 ? (
-          <div className="text-center py-12 text-gray-400">
-            <ClipboardList size={32} className="mx-auto mb-2 text-gray-300" />
-            <p>No events recorded yet</p>
-          </div>
+        {fetchError && !loading ? (
+          <ErrorState message={fetchError} onRetry={load} />
+        ) : loading && events.length === 0 ? (
+          <SkeletonTable />
+        ) : events.length === 0 ? (
+          <EmptyState icon={ClipboardList} title="No events recorded yet" />
         ) : (
           <div className="relative">
             {/* Vertical line */}

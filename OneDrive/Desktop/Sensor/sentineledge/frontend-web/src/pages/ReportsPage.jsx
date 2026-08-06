@@ -5,6 +5,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import { BarChart2, RefreshCw, ChevronDown, ChevronUp } from 'lucide-react'
 import { fetchDailyReports } from '../services/api.js'
+import { SkeletonTable } from '../components/Skeleton'
 
 export default function ReportsPage() {
   const [reports,    setReports]    = useState([])
@@ -41,7 +42,7 @@ export default function ReportsPage() {
       </div>
 
       {loading && reports.length === 0 ? (
-        <div className="text-center py-12 text-gray-400">Loading reports…</div>
+        <div className="card overflow-hidden"><SkeletonTable rows={5} /></div>
       ) : (
         <div className="space-y-2">
           {reports.map(r => (

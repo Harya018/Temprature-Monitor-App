@@ -13,8 +13,13 @@ import {
   Activity, Megaphone, KeyRound, LogOut, ShieldCheck,
   Radio, Wrench, CheckCircle, RefreshCw, ClipboardList,
   Lock, Unlock, UserCheck, Copy, BarChart2, CreditCard,
-  ShieldAlert, Download,
+  ShieldAlert, Download, BookOpen, ScrollText, Layers,
 } from 'lucide-react'
+import {
+  LineChart, Line, BarChart, Bar, XAxis, YAxis,
+  CartesianGrid, Tooltip, ResponsiveContainer, Cell, PieChart, Pie, Legend,
+} from 'recharts'
+import { rangeToDates, withDates, RANGE_OPTIONS } from '../../utils/dateRangeHelper.js'
 import './SuperAdmin.css'
 
 // ─── API layer ────────────────────────────────────────────────────────────────
@@ -36,7 +41,17 @@ async function api(method, path, body) {
     body: body !== undefined ? JSON.stringify(body) : undefined,
     credentials: 'include',
   })
-  if (res.status === 401 || res.status === 403) {
+  if (res.status === 401) {
+    // Session expired or invalidated — wipe local state and go back to login.
+    sessionStorage.removeItem('admin_token')
+    sessionStorage.removeItem('admin_username')
+    sessionStorage.removeItem('authenticated')
+    sessionStorage.removeItem('adminPassword')
+    sessionStorage.removeItem('login_time')
+    window.location.replace('/super-admin/login')
+    return
+  }
+  if (res.status === 403) {
     const err = new Error(`HTTP ${res.status}`)
     err.status = res.status
     throw err
@@ -1116,6 +1131,128 @@ function AdminsTab({ onViewDetail }) {
   )
 }
 
+// ─── Company Parameters tab ───────────────────────────────────────────────────
+
+function CompanyParametersTab() {
+  const [data,    setData]    = useState([])
+  const [loading, setLoading] = useState(true)
+  const [error,   setError]   = useState('')
+
+  const load = useCallback(async () => {
+    setLoading(true); setError('')
+    try { setData(await get(`${SA}/company-parameters`)) }
+    catch (e) { setError(e.message) }
+    finally { setLoading(false) }
+  }, [])
+
+  useEffect(() => { load() }, [load])
+
+  const BUILTIN_COLOR  = '#EEF2FF'
+  const BUILTIN_TEXT   = '#4338CA'
+  const CUSTOM_COLOR   = '#F0FDF4'
+  const CUSTOM_TEXT    = '#065F46'
+
+  return (
+    <div className="sa-card">
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 }}>
+        <div>
+          <h2 className="sa-card-title" style={{ margin: 0 }}>Company Parameters</h2>
+          <p style={{ fontSize: 13, color: '#6B7280', marginTop: 4 }}>
+            All monitored parameters per company — Temperature is built-in; custom parameters are approved by Super Admin.
+          </p>
+        </div>
+        <button className="sa-btn sm secondary" onClick={load}><RefreshCw size={13} /> Refresh</button>
+      </div>
+
+      {error && <Err msg={error} />}
+
+      {loading ? (
+        <div style={{ textAlign: 'center', padding: 40 }}><Spinner /></div>
+      ) : data.length === 0 ? (
+        <div style={{ textAlign: 'center', padding: 40, color: '#9CA3AF' }}>No companies found.</div>
+      ) : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+          {data.map(co => (
+            <div key={co.company_id} style={{
+              border: '1px solid #E5E7EB', borderRadius: 10, overflow: 'hidden',
+            }}>
+              {/* Company header */}
+              <div style={{
+                display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                padding: '12px 18px', background: '#F9FAFB', borderBottom: '1px solid #E5E7EB',
+              }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+                  <div style={{
+                    width: 32, height: 32, borderRadius: 8,
+                    background: '#EEF2FF', display: 'flex', alignItems: 'center', justifyContent: 'center',
+                  }}>
+                    <Building2 size={15} color="#4338CA" />
+                  </div>
+                  <div>
+                    <div style={{ fontWeight: 700, fontSize: 14, color: '#111827' }}>{co.company_name}</div>
+                    <div style={{ fontSize: 12, color: '#6B7280' }}>
+                      {co.parameters.length} parameter{co.parameters.length !== 1 ? 's' : ''}
+                      {' '}·{' '}
+                      <span style={{ color: co.is_active ? '#059669' : '#DC2626', fontWeight: 600 }}>
+                        {co.is_active ? 'Active' : 'Inactive'}
+                      </span>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Parameters table */}
+              <div style={{ overflowX: 'auto' }}>
+                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+                  <thead>
+                    <tr style={{ background: '#F3F4F6' }}>
+                      {['Parameter', 'Unit', 'Min', 'Max', 'Type'].map(h => (
+                        <th key={h} style={{
+                          padding: '8px 14px', textAlign: 'left',
+                          fontWeight: 600, fontSize: 11, textTransform: 'uppercase',
+                          color: '#6B7280', letterSpacing: '0.05em', borderBottom: '1px solid #E5E7EB',
+                        }}>{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {co.parameters.map((p, i) => (
+                      <tr key={p.name} style={{ background: i % 2 === 0 ? '#fff' : '#FAFAFA' }}>
+                        <td style={{ padding: '10px 14px', fontWeight: 600, color: '#111827' }}>
+                          {p.name}
+                        </td>
+                        <td style={{ padding: '10px 14px', color: '#374151' }}>
+                          {p.unit || <span style={{ color: '#9CA3AF' }}>—</span>}
+                        </td>
+                        <td style={{ padding: '10px 14px', color: '#374151', fontFamily: 'monospace' }}>
+                          {p.min_value != null ? p.min_value : <span style={{ color: '#9CA3AF' }}>—</span>}
+                        </td>
+                        <td style={{ padding: '10px 14px', color: '#374151', fontFamily: 'monospace' }}>
+                          {p.max_value != null ? p.max_value : <span style={{ color: '#9CA3AF' }}>—</span>}
+                        </td>
+                        <td style={{ padding: '10px 14px' }}>
+                          <span style={{
+                            background: p.builtin ? BUILTIN_COLOR : CUSTOM_COLOR,
+                            color: p.builtin ? BUILTIN_TEXT : CUSTOM_TEXT,
+                            padding: '2px 10px', borderRadius: 20, fontSize: 11, fontWeight: 700,
+                          }}>
+                            {p.builtin ? 'Built-in' : 'Custom'}
+                          </span>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+
 // ─── Global Alerts tab ────────────────────────────────────────────────────────
 
 function AlertsTab() {
@@ -1503,6 +1640,17 @@ function ConfigTab() {
   const [ccValue,  setCcValue]  = useState('')
   const [ccLocked, setCcLocked] = useState(false)
 
+  // Alert routing
+  const [rtCompany, setRtCompany] = useState('')
+  const [rtData,    setRtData]    = useState({})
+  const [rtLoading, setRtLoading] = useState(false)
+
+  // Escalation policy
+  const [epCompany,  setEpCompany]  = useState('')
+  const [epPolicy,   setEpPolicy]   = useState(null)
+  const [epLoading,  setEpLoading]  = useState(false)
+  const [epSaving,   setEpSaving]   = useState(false)
+
   const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(''), 3000) }
 
   const loadThresholds = useCallback(() =>
@@ -1598,10 +1746,63 @@ function ConfigTab() {
     } catch (e) { setError(e.message) }
   }
 
+  const loadRouting = useCallback((cid) => {
+    if (!cid) { setRtData({}); return }
+    setRtLoading(true)
+    get(`${SA}/config/routing/${cid}`)
+      .then(rows => {
+        const map = {}
+        rows.forEach(r => { map[r.severity] = r })
+        setRtData(map)
+      })
+      .catch(() => {})
+      .finally(() => setRtLoading(false))
+  }, [])
+
+  const saveRouting = async (severity, row) => {
+    if (!rtCompany) return
+    try {
+      await patch(`${SA}/config/routing/${rtCompany}/${severity}`, {
+        use_email:      row.use_email,
+        use_sms:        row.use_sms,
+        use_push:       row.use_push,
+        use_escalation: row.use_escalation ?? 0,
+      })
+      showToast(`${severity} routing saved`)
+    } catch (e) { setError(e.message) }
+  }
+
+  const loadPolicy = useCallback((cid) => {
+    if (!cid) { setEpPolicy(null); return }
+    setEpLoading(true)
+    get(`${SA}/escalation/policy/${cid}`)
+      .then(d => setEpPolicy({
+        enabled:                 d.enabled                 ?? 1,
+        initial_wait_minutes:    d.initial_wait_minutes    ?? 5,
+        repeat_interval_minutes: d.repeat_interval_minutes ?? 10,
+        max_escalations:         d.max_escalations         ?? 3,
+        notify_super_admin:      d.notify_super_admin      ?? 0,
+      }))
+      .catch(e => setError(e.message))
+      .finally(() => setEpLoading(false))
+  }, [])
+
+  const savePolicy = async () => {
+    if (!epCompany || !epPolicy) return
+    setEpSaving(true)
+    try {
+      await patch(`${SA}/escalation/policy/${epCompany}`, epPolicy)
+      showToast('Escalation policy saved')
+    } catch (e) { setError(e.message) }
+    finally { setEpSaving(false) }
+  }
+
   const SUB_TABS = [
-    { id: 'thresholds', label: 'Global Thresholds' },
-    { id: 'templates',  label: 'Templates'          },
-    { id: 'company',    label: 'Company Config'     },
+    { id: 'thresholds', label: 'Global Thresholds'   },
+    { id: 'templates',  label: 'Templates'            },
+    { id: 'company',    label: 'Company Config'       },
+    { id: 'routing',    label: 'Alert Routing'        },
+    { id: 'escalation', label: 'Escalation Policy'   },
   ]
 
   return (
@@ -1733,6 +1934,173 @@ function ConfigTab() {
         </div>
       )}
 
+      {/* ── Escalation Policy ──────────────────────────────────────── */}
+      {subTab === 'escalation' && (
+        <div className="sa-cfg-grid">
+          <div className="sa-card">
+            <h2 className="sa-card-title">Escalation Policy</h2>
+            <p style={{ fontSize: 13, color: '#6B7280', marginBottom: 16 }}>
+              If an alert is not acknowledged within the initial wait time,
+              subscribers will be re-notified at the configured interval.
+            </p>
+            <div className="sa-form-group">
+              <label>Company</label>
+              <select className="sa-input" value={epCompany}
+                onChange={e => { setEpCompany(e.target.value); loadPolicy(e.target.value) }}>
+                <option value="">— select company —</option>
+                {companies.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+              </select>
+            </div>
+
+            {!epCompany ? (
+              <p style={{ color: '#9CA3AF', fontSize: 13 }}>Select a company to configure its escalation policy.</p>
+            ) : epLoading ? (
+              <p style={{ color: '#9CA3AF', fontSize: 13 }}>Loading…</p>
+            ) : epPolicy && (
+              <>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 14, marginBottom: 20 }}>
+
+                  <label style={{ display: 'flex', alignItems: 'center', gap: 10, fontSize: 13, color: '#374151' }}>
+                    <input type="checkbox" checked={!!epPolicy.enabled}
+                      onChange={e => setEpPolicy(p => ({ ...p, enabled: e.target.checked ? 1 : 0 }))} />
+                    <span><strong>Enabled</strong> — re-notify unacknowledged alerts</span>
+                  </label>
+
+                  <div className="sa-cfg-row" style={{ gap: 12 }}>
+                    <div className="sa-form-group" style={{ flex: 1 }}>
+                      <label>Initial wait (minutes)</label>
+                      <input type="number" className="sa-input" min={1} max={1440}
+                        value={epPolicy.initial_wait_minutes}
+                        onChange={e => setEpPolicy(p => ({ ...p, initial_wait_minutes: Number(e.target.value) }))} />
+                      <span style={{ fontSize: 11, color: '#9CA3AF' }}>
+                        How long to wait before first re-notification
+                      </span>
+                    </div>
+                    <div className="sa-form-group" style={{ flex: 1 }}>
+                      <label>Repeat every (minutes)</label>
+                      <input type="number" className="sa-input" min={1} max={1440}
+                        value={epPolicy.repeat_interval_minutes}
+                        onChange={e => setEpPolicy(p => ({ ...p, repeat_interval_minutes: Number(e.target.value) }))} />
+                      <span style={{ fontSize: 11, color: '#9CA3AF' }}>
+                        Interval between subsequent re-notifications
+                      </span>
+                    </div>
+                    <div className="sa-form-group" style={{ flex: 1 }}>
+                      <label>Max escalations</label>
+                      <input type="number" className="sa-input" min={1} max={10}
+                        value={epPolicy.max_escalations}
+                        onChange={e => setEpPolicy(p => ({ ...p, max_escalations: Number(e.target.value) }))} />
+                      <span style={{ fontSize: 11, color: '#9CA3AF' }}>
+                        Stop re-notifying after this many attempts
+                      </span>
+                    </div>
+                  </div>
+
+                  <label style={{ display: 'flex', alignItems: 'center', gap: 10, fontSize: 13, color: '#374151' }}>
+                    <input type="checkbox" checked={!!epPolicy.notify_super_admin}
+                      onChange={e => setEpPolicy(p => ({ ...p, notify_super_admin: e.target.checked ? 1 : 0 }))} />
+                    <span><strong>Notify super admin</strong> on final escalation (requires super admin email configured)</span>
+                  </label>
+                </div>
+
+                <div style={{ padding: '10px 14px', background: '#F3F4F6', borderRadius: 6, fontSize: 12, color: '#6B7280', marginBottom: 16 }}>
+                  With these settings: re-notify after <strong>{epPolicy.initial_wait_minutes} min</strong>,
+                  then every <strong>{epPolicy.repeat_interval_minutes} min</strong>,
+                  up to <strong>{epPolicy.max_escalations}</strong> time(s).
+                </div>
+
+                <button className="sa-btn primary" onClick={savePolicy} disabled={epSaving}>
+                  {epSaving ? 'Saving…' : 'Save Policy'}
+                </button>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ── Alert Routing ──────────────────────────────────────────── */}
+      {subTab === 'routing' && (
+        <div className="sa-cfg-grid">
+          <div className="sa-card">
+            <h2 className="sa-card-title">Alert Channel Routing</h2>
+            <p style={{ fontSize: 13, color: '#6B7280', marginBottom: 16 }}>
+              Control which channels fire for each severity level. Changes take effect on the next alert.
+            </p>
+            <div className="sa-form-group">
+              <label>Company</label>
+              <select className="sa-input" value={rtCompany}
+                onChange={e => { setRtCompany(e.target.value); loadRouting(e.target.value) }}>
+                <option value="">— select company —</option>
+                {companies.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+              </select>
+            </div>
+
+            {!rtCompany ? (
+              <p style={{ color: '#9CA3AF', fontSize: 13 }}>Select a company to view its routing rules.</p>
+            ) : rtLoading ? (
+              <p style={{ color: '#9CA3AF', fontSize: 13 }}>Loading…</p>
+            ) : (
+              <div className="sa-table-wrap">
+                <table className="sa-table">
+                  <thead>
+                    <tr>
+                      <th>Severity</th>
+                      <th style={{ textAlign: 'center' }}>Email</th>
+                      <th style={{ textAlign: 'center' }}>SMS</th>
+                      <th style={{ textAlign: 'center' }}>Push</th>
+                      <th></th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {['WARNING', 'CRITICAL', 'EMERGENCY'].map(sev => {
+                      const defaults = { use_email: 1, use_sms: sev !== 'WARNING' ? 1 : 0, use_push: 1, use_escalation: 0 }
+                      const row = rtData[sev] ?? defaults
+                      const sevColor = sev === 'EMERGENCY' ? '#EF4444' : sev === 'CRITICAL' ? '#F59E0B' : '#6366F1'
+                      return (
+                        <tr key={sev}>
+                          <td>
+                            <span style={{ fontWeight: 600, fontSize: 12, color: sevColor }}>
+                              {sev}
+                            </span>
+                          </td>
+                          <td style={{ textAlign: 'center' }}>
+                            <input type="checkbox" checked={!!row.use_email}
+                              onChange={e => setRtData(prev => ({
+                                ...prev,
+                                [sev]: { ...(prev[sev] ?? defaults), use_email: e.target.checked ? 1 : 0 },
+                              }))} />
+                          </td>
+                          <td style={{ textAlign: 'center' }}>
+                            <input type="checkbox" checked={!!row.use_sms}
+                              onChange={e => setRtData(prev => ({
+                                ...prev,
+                                [sev]: { ...(prev[sev] ?? defaults), use_sms: e.target.checked ? 1 : 0 },
+                              }))} />
+                          </td>
+                          <td style={{ textAlign: 'center' }}>
+                            <input type="checkbox" checked={!!row.use_push}
+                              onChange={e => setRtData(prev => ({
+                                ...prev,
+                                [sev]: { ...(prev[sev] ?? defaults), use_push: e.target.checked ? 1 : 0 },
+                              }))} />
+                          </td>
+                          <td>
+                            <button className="sa-btn sm primary"
+                              onClick={() => saveRouting(sev, row)}>
+                              Save
+                            </button>
+                          </td>
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* ── Company Config ─────────────────────────────────────────── */}
       {subTab === 'company' && (
         <div className="sa-cfg-grid">
@@ -1846,15 +2214,81 @@ function MiniSparkline({ values }) {
   )
 }
 
+function AlertHeatmapSA({ grid, days }) {
+  const max = Math.max(...grid.flatMap(r => r), 1)
+  const heat = (v) => {
+    if (v === 0) return '#F3F4F6'
+    const t = v / max
+    if (t < 0.25) return '#FEF9C3'
+    if (t < 0.5)  return '#FDE047'
+    if (t < 0.75) return '#F97316'
+    return '#DC2626'
+  }
+  const DAY_LABELS = days || ['Sun','Mon','Tue','Wed','Thu','Fri','Sat']
+  return (
+    <div style={{ overflowX: 'auto' }}>
+      <div style={{ display: 'flex', gap: 3, paddingTop: 8, minWidth: 'max-content' }}>
+        {/* Hour labels */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 2, paddingTop: 20, marginRight: 4 }}>
+          {Array.from({ length: 24 }, (_, h) => (
+            <div key={h} style={{ height: 14, fontSize: 9, color: '#9CA3AF', textAlign: 'right', lineHeight: '14px', minWidth: 22 }}>
+              {h}h
+            </div>
+          ))}
+        </div>
+        {/* Day columns */}
+        {DAY_LABELS.map((day, di) => (
+          <div key={day} style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+            <div style={{ height: 18, fontSize: 10, color: '#6B7280', fontWeight: 600, textAlign: 'center', lineHeight: '18px' }}>{day}</div>
+            {grid.map((hourRow, hi) => (
+              <div key={hi}
+                title={`${day} ${hi}h: ${hourRow[di]} alerts`}
+                style={{
+                  width: 22, height: 14,
+                  borderRadius: 2,
+                  background: heat(hourRow[di]),
+                  cursor: 'default',
+                }}
+              />
+            ))}
+          </div>
+        ))}
+      </div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 4, marginTop: 8, fontSize: 10, color: '#6B7280' }}>
+        <span>Low</span>
+        {['#F3F4F6','#FEF9C3','#FDE047','#F97316','#DC2626'].map((c, i) => (
+          <div key={i} style={{ width: 14, height: 10, borderRadius: 2, background: c }} />
+        ))}
+        <span>High</span>
+      </div>
+    </div>
+  )
+}
+
 function AnalyticsTab() {
   const [subTab,    setSubTab]    = useState('summary')
   const [summary,   setSummary]   = useState(null)
   const [health,    setHealth]    = useState([])
   const [compare,   setCompare]   = useState([])
-  const [anomalies, setAnomalies] = useState(null)
-  const [trends,    setTrends]    = useState(null)
-  const [loading,   setLoading]   = useState(false)
-  const [error,     setError]     = useState('')
+  const [anomalies,  setAnomalies]  = useState(null)
+  const [trends,     setTrends]     = useState(null)
+  const [anomalyLog, setAnomalyLog] = useState([])
+  const [loading,    setLoading]    = useState(false)
+  const [error,      setError]      = useState('')
+
+  // ── Company Analytics state ──────────────────────────────────────────────
+  const [companies,     setCompanies]     = useState([])
+  const [selCompany,    setSelCompany]    = useState('')
+  const [coRange,       setCoRange]       = useState('30d')
+  const [coLoading,     setCoLoading]     = useState(false)
+  const [coError,       setCoError]       = useState('')
+  const [coCharts,      setCoCharts]      = useState({})
+
+  // ── Fleet Comparison state ───────────────────────────────────────────────
+  const [fleetRange,    setFleetRange]    = useState('30d')
+  const [fleetLoading,  setFleetLoading]  = useState(false)
+  const [fleetError,    setFleetError]    = useState('')
+  const [fleetData,     setFleetData]     = useState({})
 
   const load = useCallback(async (st) => {
     setLoading(true); setError('')
@@ -1871,21 +2305,80 @@ function AnalyticsTab() {
       } else if (st === 'trends') {
         const d = await get(`${ANL}/trends`)
         setTrends(d)
+      } else if (st === 'anomaly-log') {
+        const d = await get(`${SA}/anomalies`)
+        setAnomalyLog(Array.isArray(d) ? d : [])
+      } else if (st === 'company-analytics') {
+        const list = await get(`${ANL}/companies/health`)
+        setCompanies(list.map(c => ({ id: c.company_id, name: c.company_name })))
+      } else if (st === 'fleet-comparison') {
+        await loadFleet(fleetRange)
       }
     } catch (e) { setError(e.message) }
     finally { setLoading(false) }
+  }, [fleetRange]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  const loadCoCharts = useCallback(async (companyId, range) => {
+    if (!companyId) return
+    setCoLoading(true); setCoError('')
+    const { from, to } = rangeToDates(range)
+    const base = `${ANL}/companies/${companyId}`
+    try {
+      const [breach, heatmap, subResp, delivery, summary, sevDist, daily, hourly, weekly, ackTime] = await Promise.all([
+        get(withDates(`${base}/charts/breach-frequency`, from, to)),
+        get(withDates(`${base}/charts/alert-heatmap`,    from, to)),
+        get(withDates(`${base}/charts/subscriber-response`, from, to)),
+        get(withDates(`${base}/charts/delivery-rates`,   from, to)),
+        get(withDates(`${base}/charts/summary-stats`,    from, to)),
+        get(withDates(`${base}/charts/severity-dist`,    from, to)),
+        get(withDates(`${base}/charts/daily-trend`,      from, to)),
+        get(withDates(`${base}/charts/hourly-pattern`,   from, to)),
+        get(withDates(`${base}/charts/weekly-avg`,       from, to)),
+        get(withDates(`${base}/charts/ack-time`,         from, to)),
+      ])
+      setCoCharts({ breach, heatmap, subResp, delivery, summary, sevDist, daily, hourly, weekly, ackTime })
+    } catch (e) { setCoError(e.message) }
+    finally { setCoLoading(false) }
+  }, [])
+
+  const loadFleet = useCallback(async (range) => {
+    setFleetLoading(true); setFleetError('')
+    const { from, to } = rangeToDates(range)
+    try {
+      const [param, dailyTrend, breachCounts, benchmarks, healthScores] = await Promise.all([
+        get(withDates(`${ANL}/compare/parameter`,    from, to)),
+        get(withDates(`${ANL}/compare/daily-trend`,  from, to)),
+        get(withDates(`${ANL}/compare/breach-counts`, from, to)),
+        get(`${ANL}/benchmarks`),
+        get(`${ANL}/health-scores`),
+      ])
+      setFleetData({ param, dailyTrend, breachCounts, benchmarks, healthScores })
+    } catch (e) { setFleetError(e.message) }
+    finally { setFleetLoading(false) }
   }, [])
 
   useEffect(() => { load(subTab) }, [subTab, load])
 
+  useEffect(() => {
+    if (subTab === 'company-analytics' && selCompany) loadCoCharts(selCompany, coRange)
+  }, [selCompany, coRange, subTab, loadCoCharts])
+
+  useEffect(() => {
+    if (subTab === 'fleet-comparison') loadFleet(fleetRange)
+  }, [fleetRange, subTab, loadFleet])
+
   const SUB_TABS = [
-    { id: 'summary',   label: 'Summary & Health' },
-    { id: 'compare',   label: 'Compare Companies' },
-    { id: 'anomalies', label: 'Anomaly Detection' },
-    { id: 'trends',    label: 'Trend Forecast'    },
+    { id: 'summary',           label: 'Summary & Health'   },
+    { id: 'compare',           label: 'Compare Companies'  },
+    { id: 'anomalies',         label: 'Anomaly Detection'  },
+    { id: 'anomaly-log',       label: 'Anomaly Log'        },
+    { id: 'trends',            label: 'Trend Forecast'     },
+    { id: 'company-analytics', label: 'Company Analytics'  },
+    { id: 'fleet-comparison',  label: 'Fleet Comparison'   },
   ]
 
   const statusColor = (s) => s === 'healthy' ? '#22C55E' : s === 'warning' ? '#F59E0B' : s === 'critical' ? '#EF4444' : '#7F1D1D'
+  const gradeColor  = (g) => ({ A:'#22C55E', B:'#84CC16', C:'#F59E0B', D:'#EF4444', F:'#7F1D1D' })[g] || '#6B7280'
 
   return (
     <>
@@ -2065,6 +2558,75 @@ function AnalyticsTab() {
         </div>
       )}
 
+      {/* ── Anomaly Log ───────────────────────────────────────────── */}
+      {!loading && subTab === 'anomaly-log' && (
+        <div className="sa-card">
+          <h2 className="sa-card-title" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            Anomaly Log — Unresolved
+            {anomalyLog.length > 0 && (
+              <span style={{ background: '#EF4444', color: '#fff', borderRadius: 12, padding: '1px 8px', fontSize: 12 }}>
+                {anomalyLog.length}
+              </span>
+            )}
+          </h2>
+          {anomalyLog.length === 0 ? (
+            <p style={{ color: '#22C55E', fontSize: 13, padding: '12px 0' }}>No unresolved anomalies detected.</p>
+          ) : (
+            <div className="sa-table-wrap">
+              <table className="sa-table">
+                <thead>
+                  <tr>
+                    <th>Type</th>
+                    <th>Company</th>
+                    <th>Description</th>
+                    <th>Severity</th>
+                    <th>Detected</th>
+                    <th>Action</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {anomalyLog.map(a => (
+                    <tr key={a.id}>
+                      <td style={{ fontWeight: 600, textTransform: 'capitalize', whiteSpace: 'nowrap' }}>
+                        {a.anomaly_type.replace(/_/g, ' ')}
+                      </td>
+                      <td style={{ fontSize: 12 }}>{a.company_name}</td>
+                      <td style={{ fontSize: 12, maxWidth: 320 }}>{a.description}</td>
+                      <td>
+                        <span style={{
+                          padding: '2px 8px', borderRadius: 10, fontSize: 11, fontWeight: 600,
+                          background: a.severity === 'critical' ? '#FEE2E2' : a.severity === 'high' ? '#FEF3C7' : '#F3F4F6',
+                          color:      a.severity === 'critical' ? '#991B1B' : a.severity === 'high' ? '#92400E' : '#374151',
+                        }}>
+                          {a.severity.toUpperCase()}
+                        </span>
+                      </td>
+                      <td style={{ fontSize: 11, color: '#6B7280', whiteSpace: 'nowrap' }}>
+                        {a.detected_at ? new Date(a.detected_at).toLocaleString() : '—'}
+                      </td>
+                      <td>
+                        <button
+                          className="sa-btn secondary"
+                          style={{ padding: '3px 10px', fontSize: 12 }}
+                          onClick={async () => {
+                            try {
+                              await patch(`${SA}/anomalies/${a.id}/resolve`)
+                              setAnomalyLog(prev => prev.filter(x => x.id !== a.id))
+                            } catch (e) { /* silent */ }
+                          }}
+                        >
+                          Resolve
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
+
       {/* ── Trend Forecast ─────────────────────────────────────────── */}
       {!loading && subTab === 'trends' && trends && !trends.error && (
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 20 }}>
@@ -2126,6 +2688,414 @@ function AnalyticsTab() {
         </div>
       )}
       {!loading && subTab === 'trends' && trends?.error && <Err msg={trends.error} />}
+
+      {/* ── Company Analytics ──────────────────────────────────────── */}
+      {subTab === 'company-analytics' && (
+        <div>
+          {/* Controls */}
+          <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap', marginBottom: 20 }}>
+            <select className="sa-select" value={selCompany} onChange={e => setSelCompany(e.target.value)}>
+              <option value="">— Select company —</option>
+              {companies.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+            </select>
+            <select className="sa-select" value={coRange} onChange={e => setCoRange(e.target.value)}>
+              {RANGE_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+            </select>
+            {selCompany && (
+              <button className="sa-btn secondary" onClick={() => loadCoCharts(selCompany, coRange)} disabled={coLoading}>
+                {coLoading ? '…' : '↺ Refresh'}
+              </button>
+            )}
+          </div>
+
+          {!selCompany && (
+            <div className="sa-card" style={{ textAlign: 'center', color: '#6B7280', padding: 48 }}>
+              Select a company above to view its analytics.
+            </div>
+          )}
+
+          {coError && <Err msg={coError} />}
+
+          {coLoading && <div style={{ textAlign: 'center', padding: 40 }}><Spinner /></div>}
+
+          {selCompany && !coLoading && Object.keys(coCharts).length > 0 && (() => {
+            const { breach, heatmap, subResp, delivery, summary: sum, sevDist, daily, hourly, weekly, ackTime } = coCharts
+            const COLORS = ['#7C3AED', '#EF4444', '#F59E0B', '#3B82F6', '#10B981']
+            const tip = <Tooltip contentStyle={{ fontSize: 12, borderRadius: 8 }} />
+
+            return (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+
+                {/* Summary stat bar */}
+                {sum && (
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(130px,1fr))', gap: 12 }}>
+                    {[
+                      { label: 'Total Alerts',  val: sum.total_alerts,    color: '#6366F1' },
+                      { label: 'Open',          val: sum.open,            color: sum.open > 0 ? '#EF4444' : '#22C55E' },
+                      { label: 'Acked',         val: sum.acked,           color: '#22C55E' },
+                      { label: 'Ack Rate',      val: `${sum.ack_rate_pct}%`, color: sum.ack_rate_pct >= 80 ? '#22C55E' : '#F59E0B' },
+                      { label: 'Emergency',     val: sum.emergency_count, color: sum.emergency_count > 0 ? '#7F1D1D' : '#6B7280' },
+                      { label: 'Critical',      val: sum.critical_count,  color: sum.critical_count  > 0 ? '#EF4444' : '#6B7280' },
+                    ].map(k => (
+                      <div key={k.label} className="sa-cfg-stat">
+                        <span className="sa-cfg-stat-label">{k.label}</span>
+                        <span className="sa-cfg-stat-val" style={{ color: k.color, fontSize: 20 }}>{k.val}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 20 }}>
+                  {/* Breach frequency */}
+                  <div className="sa-card">
+                    <h2 className="sa-card-title">Daily Breach Frequency</h2>
+                    {breach?.length > 0
+                      ? <ResponsiveContainer width="100%" height={200}>
+                          <BarChart data={breach}>
+                            <CartesianGrid strokeDasharray="3 3" stroke="#F3F4F6" />
+                            <XAxis dataKey="date" tick={{ fontSize: 10 }} />
+                            <YAxis tick={{ fontSize: 10 }} />
+                            {tip}
+                            <Bar dataKey="breaches" fill="#EF4444" radius={[3,3,0,0]} />
+                          </BarChart>
+                        </ResponsiveContainer>
+                      : <p style={{ color: '#9CA3AF', fontSize: 13 }}>No breach data.</p>
+                    }
+                  </div>
+
+                  {/* Severity distribution */}
+                  <div className="sa-card">
+                    <h2 className="sa-card-title">Alert Severity Distribution</h2>
+                    {sevDist?.length > 0
+                      ? <ResponsiveContainer width="100%" height={200}>
+                          <PieChart>
+                            <Pie data={sevDist} dataKey="count" nameKey="severity" cx="50%" cy="50%" outerRadius={75} label={({ severity, percent }) => `${severity} ${(percent*100).toFixed(0)}%`} labelLine={false}>
+                              {sevDist.map((_, i) => <Cell key={i} fill={['#7F1D1D','#EF4444','#F59E0B','#3B82F6'][i % 4]} />)}
+                            </Pie>
+                            <Tooltip />
+                          </PieChart>
+                        </ResponsiveContainer>
+                      : <p style={{ color: '#9CA3AF', fontSize: 13 }}>No alert data.</p>
+                    }
+                  </div>
+
+                  {/* Daily trend (open vs acked) */}
+                  <div className="sa-card">
+                    <h2 className="sa-card-title">Daily Alert Trend (Open vs Acked)</h2>
+                    {daily?.length > 0
+                      ? <ResponsiveContainer width="100%" height={200}>
+                          <LineChart data={daily}>
+                            <CartesianGrid strokeDasharray="3 3" stroke="#F3F4F6" />
+                            <XAxis dataKey="date" tick={{ fontSize: 10 }} />
+                            <YAxis tick={{ fontSize: 10 }} />
+                            {tip}
+                            <Legend />
+                            <Line type="monotone" dataKey="open"  stroke="#EF4444" dot={false} strokeWidth={2} />
+                            <Line type="monotone" dataKey="acked" stroke="#22C55E" dot={false} strokeWidth={2} />
+                          </LineChart>
+                        </ResponsiveContainer>
+                      : <p style={{ color: '#9CA3AF', fontSize: 13 }}>No daily data.</p>
+                    }
+                  </div>
+
+                  {/* Hourly pattern */}
+                  <div className="sa-card">
+                    <h2 className="sa-card-title">Hourly Alert Pattern</h2>
+                    {hourly?.length > 0
+                      ? <ResponsiveContainer width="100%" height={200}>
+                          <BarChart data={hourly}>
+                            <CartesianGrid strokeDasharray="3 3" stroke="#F3F4F6" />
+                            <XAxis dataKey="hour" tick={{ fontSize: 10 }} tickFormatter={h => `${h}h`} />
+                            <YAxis tick={{ fontSize: 10 }} />
+                            {tip}
+                            <Bar dataKey="count" fill="#7C3AED" radius={[2,2,0,0]} />
+                          </BarChart>
+                        </ResponsiveContainer>
+                      : <p style={{ color: '#9CA3AF', fontSize: 13 }}>No data.</p>
+                    }
+                  </div>
+
+                  {/* Weekly average */}
+                  <div className="sa-card">
+                    <h2 className="sa-card-title">Weekly Alert Volume</h2>
+                    {weekly?.length > 0
+                      ? <ResponsiveContainer width="100%" height={200}>
+                          <BarChart data={weekly}>
+                            <CartesianGrid strokeDasharray="3 3" stroke="#F3F4F6" />
+                            <XAxis dataKey="week" tick={{ fontSize: 9 }} />
+                            <YAxis tick={{ fontSize: 10 }} />
+                            {tip}
+                            <Bar dataKey="alerts" fill="#6366F1" radius={[3,3,0,0]} />
+                          </BarChart>
+                        </ResponsiveContainer>
+                      : <p style={{ color: '#9CA3AF', fontSize: 13 }}>No weekly data.</p>
+                    }
+                  </div>
+
+                  {/* Ack time distribution */}
+                  <div className="sa-card">
+                    <h2 className="sa-card-title">Alert-to-Ack Time</h2>
+                    {ackTime?.length > 0
+                      ? <ResponsiveContainer width="100%" height={200}>
+                          <BarChart data={ackTime}>
+                            <CartesianGrid strokeDasharray="3 3" stroke="#F3F4F6" />
+                            <XAxis dataKey="bucket" tick={{ fontSize: 10 }} />
+                            <YAxis tick={{ fontSize: 10 }} />
+                            {tip}
+                            <Bar dataKey="count" radius={[3,3,0,0]}>
+                              {ackTime.map((_, i) => <Cell key={i} fill={COLORS[i % COLORS.length]} />)}
+                            </Bar>
+                          </BarChart>
+                        </ResponsiveContainer>
+                      : <p style={{ color: '#9CA3AF', fontSize: 13 }}>No ack-time data.</p>
+                    }
+                  </div>
+                </div>
+
+                {/* Alert heatmap */}
+                <div className="sa-card">
+                  <h2 className="sa-card-title">Alert Heatmap (Hour × Day)</h2>
+                  {heatmap?.grid
+                    ? <AlertHeatmapSA grid={heatmap.grid} days={heatmap.days} />
+                    : <p style={{ color: '#9CA3AF', fontSize: 13 }}>No heatmap data.</p>
+                  }
+                </div>
+
+                {/* Subscriber response */}
+                <div className="sa-card">
+                  <h2 className="sa-card-title">Subscriber Response Rates</h2>
+                  {subResp?.length > 0
+                    ? <div style={{ overflowX: 'auto' }}>
+                        <table className="sa-table">
+                          <thead><tr>
+                            <th>Subscriber</th><th>Channel</th>
+                            <th>Total Alerts</th><th>Acked</th>
+                            <th>Ack Rate</th><th>Avg Ack (min)</th>
+                          </tr></thead>
+                          <tbody>
+                            {subResp.map((r, i) => (
+                              <tr key={i}>
+                                <td style={{ fontWeight: 600 }}>{r.name}</td>
+                                <td>{r.channel}</td>
+                                <td>{r.total_alerts}</td>
+                                <td>{r.acked}</td>
+                                <td>
+                                  <span style={{
+                                    fontWeight: 700,
+                                    color: r.ack_rate_pct >= 80 ? '#22C55E' : r.ack_rate_pct >= 50 ? '#F59E0B' : '#EF4444',
+                                  }}>
+                                    {r.ack_rate_pct ?? '—'}%
+                                  </span>
+                                </td>
+                                <td style={{ color: '#6B7280' }}>{r.avg_ack_minutes ?? '—'}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    : <p style={{ color: '#9CA3AF', fontSize: 13 }}>No subscriber data.</p>
+                  }
+                </div>
+
+                {/* Delivery rates */}
+                <div className="sa-card">
+                  <h2 className="sa-card-title">Channel Delivery Rates</h2>
+                  {delivery?.available === false
+                    ? <p style={{ color: '#9CA3AF', fontSize: 13 }}>No delivery receipt data.</p>
+                    : delivery?.channels?.length > 0
+                      ? <div style={{ display: 'flex', gap: 24, flexWrap: 'wrap', paddingTop: 8 }}>
+                          {delivery.channels.map((ch, i) => (
+                            <div key={i} style={{ textAlign: 'center', minWidth: 90 }}>
+                              <div style={{
+                                fontSize: 28, fontWeight: 800,
+                                color: ch.success_rate >= 90 ? '#22C55E' : ch.success_rate >= 70 ? '#F59E0B' : '#EF4444',
+                              }}>{ch.success_rate}%</div>
+                              <div style={{ fontSize: 12, fontWeight: 600, color: '#374151' }}>{ch.channel}</div>
+                              <div style={{ fontSize: 11, color: '#9CA3AF' }}>{ch.delivered}/{ch.total} sent</div>
+                            </div>
+                          ))}
+                        </div>
+                      : <p style={{ color: '#9CA3AF', fontSize: 13 }}>No delivery data.</p>
+                  }
+                </div>
+
+              </div>
+            )
+          })()}
+        </div>
+      )}
+
+      {/* ── Fleet Comparison ────────────────────────────────────────── */}
+      {subTab === 'fleet-comparison' && (
+        <div>
+          {/* Controls */}
+          <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap', marginBottom: 20 }}>
+            <select className="sa-select" value={fleetRange} onChange={e => setFleetRange(e.target.value)}>
+              {RANGE_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+            </select>
+            <button className="sa-btn secondary" onClick={() => loadFleet(fleetRange)} disabled={fleetLoading}>
+              {fleetLoading ? '…' : '↺ Refresh'}
+            </button>
+          </div>
+
+          {fleetError && <Err msg={fleetError} />}
+          {fleetLoading && <div style={{ textAlign: 'center', padding: 40 }}><Spinner /></div>}
+
+          {!fleetLoading && Object.keys(fleetData).length > 0 && (() => {
+            const { param, dailyTrend, breachCounts, benchmarks: bm, healthScores } = fleetData
+            const tip = <Tooltip contentStyle={{ fontSize: 12, borderRadius: 8 }} />
+
+            // Group dailyTrend by company name for multi-line chart
+            const companies = [...new Set((dailyTrend || []).map(r => r.company))]
+            const COLORS = ['#7C3AED','#EF4444','#F59E0B','#3B82F6','#10B981','#EC4899','#8B5CF6']
+
+            const dailyByDate = {}
+            ;(dailyTrend || []).forEach(r => {
+              if (!dailyByDate[r.date]) dailyByDate[r.date] = { date: r.date }
+              dailyByDate[r.date][r.company] = r.alerts
+            })
+            const dailyChartData = Object.values(dailyByDate).sort((a, b) => a.date.localeCompare(b.date))
+
+            return (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+
+                {/* Benchmarks strip */}
+                {bm && (
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(140px,1fr))', gap: 12 }}>
+                    {[
+                      { label: 'Fleet Companies',    val: bm.companies,              color: '#6366F1' },
+                      { label: 'Total Alerts',        val: bm.fleet_total_alerts,    color: '#374151' },
+                      { label: 'Fleet Ack Rate',      val: `${bm.fleet_ack_rate_pct}%`, color: bm.fleet_ack_rate_pct >= 75 ? '#22C55E' : '#F59E0B' },
+                      { label: 'Delivery Rate',       val: `${bm.fleet_delivery_rate}%`, color: '#3B82F6' },
+                      { label: 'Alerts / Company',    val: bm.avg_alerts_per_company, color: '#6B7280' },
+                      { label: 'Last 24 h Alerts',    val: bm.alerts_last_24h,       color: bm.alerts_last_24h > 0 ? '#EF4444' : '#22C55E' },
+                    ].map(k => (
+                      <div key={k.label} className="sa-cfg-stat">
+                        <span className="sa-cfg-stat-label">{k.label}</span>
+                        <span className="sa-cfg-stat-val" style={{ color: k.color, fontSize: 18 }}>{k.val}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 20 }}>
+                  {/* Total breaches by company */}
+                  <div className="sa-card">
+                    <h2 className="sa-card-title">Total Breaches by Company</h2>
+                    {breachCounts?.length > 0
+                      ? <ResponsiveContainer width="100%" height={220}>
+                          <BarChart data={breachCounts} layout="vertical">
+                            <CartesianGrid strokeDasharray="3 3" stroke="#F3F4F6" />
+                            <XAxis type="number" tick={{ fontSize: 10 }} />
+                            <YAxis type="category" dataKey="name" width={90} tick={{ fontSize: 10 }} />
+                            {tip}
+                            <Bar dataKey="breaches" radius={[0,3,3,0]}>
+                              {breachCounts.map((_, i) => <Cell key={i} fill={COLORS[i % COLORS.length]} />)}
+                            </Bar>
+                          </BarChart>
+                        </ResponsiveContainer>
+                      : <p style={{ color: '#9CA3AF', fontSize: 13 }}>No breach data.</p>
+                    }
+                  </div>
+
+                  {/* Alert comparison table */}
+                  <div className="sa-card">
+                    <h2 className="sa-card-title">Company Alert Comparison</h2>
+                    {param?.length > 0
+                      ? <div style={{ overflowX: 'auto' }}>
+                          <table className="sa-table">
+                            <thead><tr>
+                              <th>Company</th><th>Total</th>
+                              <th>Emergency</th><th>Critical</th><th>Warning</th><th>Ack Rate</th>
+                            </tr></thead>
+                            <tbody>
+                              {param.map((r, i) => (
+                                <tr key={i}>
+                                  <td style={{ fontWeight: 600 }}>{r.name}</td>
+                                  <td>{r.total_alerts}</td>
+                                  <td style={{ color: r.emergency > 0 ? '#7F1D1D' : '#6B7280', fontWeight: r.emergency > 0 ? 700 : 400 }}>{r.emergency}</td>
+                                  <td style={{ color: r.critical  > 0 ? '#EF4444' : '#6B7280' }}>{r.critical}</td>
+                                  <td style={{ color: r.warning   > 0 ? '#F59E0B' : '#6B7280' }}>{r.warning}</td>
+                                  <td style={{ fontWeight: 700, color: r.ack_rate_pct >= 80 ? '#22C55E' : r.ack_rate_pct >= 50 ? '#F59E0B' : '#EF4444' }}>
+                                    {r.ack_rate_pct}%
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      : <p style={{ color: '#9CA3AF', fontSize: 13 }}>No comparison data.</p>
+                    }
+                  </div>
+                </div>
+
+                {/* Cross-company daily trend */}
+                <div className="sa-card">
+                  <h2 className="sa-card-title">Daily Alert Trend — All Companies</h2>
+                  {dailyChartData.length > 0
+                    ? <ResponsiveContainer width="100%" height={240}>
+                        <LineChart data={dailyChartData}>
+                          <CartesianGrid strokeDasharray="3 3" stroke="#F3F4F6" />
+                          <XAxis dataKey="date" tick={{ fontSize: 9 }} />
+                          <YAxis tick={{ fontSize: 10 }} />
+                          {tip}
+                          <Legend />
+                          {companies.map((co, i) => (
+                            <Line key={co} type="monotone" dataKey={co} stroke={COLORS[i % COLORS.length]}
+                              dot={false} strokeWidth={2} />
+                          ))}
+                        </LineChart>
+                      </ResponsiveContainer>
+                    : <p style={{ color: '#9CA3AF', fontSize: 13 }}>No trend data.</p>
+                  }
+                </div>
+
+                {/* Health scores v2 */}
+                <div className="sa-card">
+                  <h2 className="sa-card-title">Company Health Scores (Grade A–F)</h2>
+                  {healthScores?.length > 0
+                    ? <div className="sa-table-wrap">
+                        <table className="sa-table">
+                          <thead><tr>
+                            <th>Company</th><th>Grade</th><th>Score</th>
+                            <th>Breach</th><th>Ack</th><th>Delivery</th><th>Uptime</th>
+                            <th>Open Emergency</th>
+                          </tr></thead>
+                          <tbody>
+                            {healthScores.map(r => (
+                              <tr key={r.company_id}>
+                                <td style={{ fontWeight: 600 }}>{r.company_name}</td>
+                                <td>
+                                  <span style={{
+                                    fontWeight: 800, fontSize: 16,
+                                    color: gradeColor(r.grade),
+                                  }}>{r.grade}</span>
+                                </td>
+                                <td>
+                                  <ScoreBar score={r.composite} />
+                                  <span style={{ fontSize: 11, color: '#6B7280' }}>{r.composite}</span>
+                                </td>
+                                <td style={{ fontSize: 12 }}>{r.breach_score}</td>
+                                <td style={{ fontSize: 12 }}>{r.ack_score}%</td>
+                                <td style={{ fontSize: 12 }}>{r.delivery_score}%</td>
+                                <td style={{ fontSize: 12 }}>{r.uptime_score}</td>
+                                <td style={{ color: r.open_emergency > 0 ? '#7F1D1D' : '#22C55E', fontWeight: 700 }}>
+                                  {r.open_emergency}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    : <p style={{ color: '#9CA3AF', fontSize: 13 }}>No health score data.</p>
+                  }
+                </div>
+
+              </div>
+            )
+          })()}
+        </div>
+      )}
     </>
   )
 }
@@ -2606,6 +3576,19 @@ function BillingTab() {
   const [qMaxD, setQMaxD] = useState('')
   const [qChan, setQChan] = useState('')
 
+  // Usage dashboard
+  const [usageData,    setUsageData]    = useState([])
+  const [grantModal,   setGrantModal]   = useState(null)  // { company_id, company_name }
+  const [grantChannel, setGrantChannel] = useState('sms')
+  const [grantAmount,  setGrantAmount]  = useState('')
+
+  // Task 3: month/year-parameterized monthly report
+  const now = new Date()
+  const [reportMonth,   setReportMonth]   = useState(String(now.getMonth() + 1))
+  const [reportYear,    setReportYear]    = useState(String(now.getFullYear()))
+  const [monthlyReport, setMonthlyReport] = useState(null)
+  const [reportLoading, setReportLoading] = useState(false)
+
   const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(''), 3000) }
 
   const loadOverview = useCallback(() =>
@@ -2635,13 +3618,37 @@ function BillingTab() {
       .finally(() => setLoading(false))
   }, [selCo])
 
+  const loadUsage = useCallback(() => {
+    get(`${BIL}/usage`)
+      .then(d => setUsageData(Array.isArray(d) ? d : []))
+      .catch(e => setError(e.message))
+  }, [])
+
+  const loadMonthlyReport = useCallback(() => {
+    if (!selCo) return
+    setReportLoading(true)
+    setMonthlyReport(null)
+    get(`${BIL}/companies/${selCo}/report?month=${reportMonth}&year=${reportYear}`)
+      .then(setMonthlyReport)
+      .catch(e => setError(e.message))
+      .finally(() => setReportLoading(false))
+  }, [selCo, reportMonth, reportYear])
+
   useEffect(() => { loadCompanies(); loadTiers() }, [loadCompanies, loadTiers])
   useEffect(() => {
     setError('')
     if (subTab === 'overview')      loadOverview()
     if (subTab === 'subscription')  loadSubData()
     if (subTab === 'report')        loadReport()
-  }, [subTab, selCo, loadOverview, loadSubData, loadReport])
+    if (subTab === 'usage')         loadUsage()
+  }, [subTab, selCo, loadOverview, loadSubData, loadReport, loadUsage])
+
+  // Auto-refresh usage dashboard every 5 minutes
+  useEffect(() => {
+    if (subTab !== 'usage') return
+    const t = setInterval(loadUsage, 300_000)
+    return () => clearInterval(t)
+  }, [subTab, loadUsage])
 
   const handleCreateTier = async (e) => {
     e.preventDefault(); setError('')
@@ -2714,10 +3721,11 @@ function BillingTab() {
   )
 
   const SUB_TABS = [
-    { id: 'overview',      label: 'Overview'       },
-    { id: 'tiers',         label: 'Tiers'          },
-    { id: 'subscription',  label: 'Subscription'   },
-    { id: 'report',        label: 'Monthly Report' },
+    { id: 'overview',      label: 'Overview'        },
+    { id: 'tiers',         label: 'Tiers'           },
+    { id: 'subscription',  label: 'Subscription'    },
+    { id: 'report',        label: 'Monthly Report'  },
+    { id: 'usage',         label: 'Usage Dashboard' },
   ]
 
   return (
@@ -2992,6 +4000,168 @@ function BillingTab() {
           </div>
         </div>
       )}
+      {/* ── Parameterized Monthly Usage (Task 3) ───────────────── */}
+      {subTab === 'report' && selCo && (
+        <div className="sa-card" style={{ marginTop: 16 }}>
+          <div style={{ display:'flex', alignItems:'center', gap:12, marginBottom:16, flexWrap:'wrap' }}>
+            <h2 className="sa-card-title" style={{ margin:0 }}>Usage for Specific Month</h2>
+            <div style={{ display:'flex', gap:8, alignItems:'center' }}>
+              <select value={reportMonth} onChange={e => setReportMonth(e.target.value)}
+                style={{ padding:'4px 8px', borderRadius:6, border:'1px solid #D1D5DB', fontSize:13 }}>
+                {['1','2','3','4','5','6','7','8','9','10','11','12'].map(m => (
+                  <option key={m} value={m}>{new Date(2000, parseInt(m)-1).toLocaleString('default',{month:'long'})}</option>
+                ))}
+              </select>
+              <select value={reportYear} onChange={e => setReportYear(e.target.value)}
+                style={{ padding:'4px 8px', borderRadius:6, border:'1px solid #D1D5DB', fontSize:13 }}>
+                {[...Array(5)].map((_,i) => {
+                  const yr = new Date().getFullYear() - i
+                  return <option key={yr} value={String(yr)}>{yr}</option>
+                })}
+              </select>
+              <button className="sa-btn primary" onClick={loadMonthlyReport} disabled={reportLoading}>
+                {reportLoading ? 'Loading…' : 'Generate'}
+              </button>
+            </div>
+          </div>
+
+          {monthlyReport && (
+            <div>
+              <div className="sa-anl-kpi-strip" style={{ gridTemplateColumns:'repeat(4,1fr)', marginBottom:16 }}>
+                {[
+                  { label:'Total Alerts',        val: monthlyReport.alerts?.total ?? 0,          color:'#6366F1' },
+                  { label:'Critical',             val: monthlyReport.alerts?.critical ?? 0,        color:'#EF4444' },
+                  { label:'Acknowledged',         val: monthlyReport.alerts?.acknowledged ?? 0,    color:'#22C55E' },
+                  { label:'Notifications Sent',   val: monthlyReport.notifications_sent ?? 0,      color:'#F59E0B' },
+                ].map(k => (
+                  <div key={k.label} className="sa-anl-kpi">
+                    <span className="sa-anl-kpi-val" style={{ color:k.color, fontSize:22 }}>{k.val}</span>
+                    <span className="sa-anl-kpi-label">{k.label}</span>
+                  </div>
+                ))}
+              </div>
+
+              <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:16, fontSize:13 }}>
+                <div>
+                  <h3 style={{ fontWeight:700, color:'#374151', marginBottom:8 }}>Quota Usage</h3>
+                  {[
+                    { label:'SMS',   used: monthlyReport.quota?.sms_used,   limit: monthlyReport.quota?.sms_limit   },
+                    { label:'Email', used: monthlyReport.quota?.email_used, limit: monthlyReport.quota?.email_limit },
+                  ].map(q => {
+                    const pct = q.limit > 0 ? Math.round(q.used / q.limit * 100) : 0
+                    const bar = pct >= 95 ? '#EF4444' : pct >= 80 ? '#F59E0B' : '#22C55E'
+                    return (
+                      <div key={q.label} style={{ marginBottom:10 }}>
+                        <div style={{ display:'flex', justifyContent:'space-between', marginBottom:3 }}>
+                          <span>{q.label}</span>
+                          <span style={{ color: bar, fontWeight:600 }}>{q.used}/{q.limit} ({pct}%)</span>
+                        </div>
+                        <div style={{ background:'#F3F4F6', borderRadius:4, height:6 }}>
+                          <div style={{ width:`${Math.min(pct,100)}%`, background: bar, borderRadius:4, height:6 }} />
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
+                <div>
+                  <h3 style={{ fontWeight:700, color:'#374151', marginBottom:8 }}>Company Info</h3>
+                  <div style={{ color:'#6B7280', lineHeight:'2em' }}>
+                    <div><b>Tier:</b> {monthlyReport.tier}</div>
+                    <div><b>Active Subscribers:</b> {monthlyReport.subscribers?.active}</div>
+                    <div><b>Period:</b> {new Date(monthlyReport.period?.start).toLocaleDateString()} – {new Date(monthlyReport.period?.end).toLocaleDateString()}</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── Usage Dashboard ─────────────────────────────────────── */}
+      {subTab === 'usage' && (
+        <div className="sa-card">
+          <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:16 }}>
+            <h2 className="sa-card-title" style={{ margin:0 }}>Monthly Quota Usage</h2>
+            <button className="sa-btn secondary" onClick={loadUsage}>↻ Refresh</button>
+          </div>
+          {usageData.length === 0
+            ? <p style={{ color:'#6B7280', fontSize:13 }}><Spinner /></p>
+            : (
+              <div className="sa-table-wrap">
+                <table className="sa-table">
+                  <thead><tr>
+                    <th>Company</th><th>Tier</th>
+                    <th>Subscribers</th><th>SMS</th><th>Email</th>
+                    <th></th>
+                  </tr></thead>
+                  <tbody>
+                    {usageData.map(r => {
+                      const uColor = (pct) =>
+                        pct >= 95 ? '#EF4444' : pct >= 80 ? '#F59E0B' : '#22C55E'
+                      return (
+                        <tr key={r.company_id}>
+                          <td style={{ fontWeight:600 }}>{r.company_name}</td>
+                          <td><TierBadge name={r.tier_name} /></td>
+                          <td style={{ color: uColor(r.subscribers?.percent ?? 0), fontWeight:600 }}>
+                            {r.subscribers?.used ?? '—'} / {r.subscribers?.limit ?? '—'}
+                            {r.subscribers?.limit > 0 && <span style={{ color:'#9CA3AF', fontWeight:400 }}> ({r.subscribers.percent}%)</span>}
+                          </td>
+                          <td style={{ color: uColor(r.sms?.percent ?? 0), fontWeight:600 }}>
+                            {r.sms?.used ?? '—'} / {r.sms?.limit ?? '—'}
+                            {r.sms?.limit > 0 && <span style={{ color:'#9CA3AF', fontWeight:400 }}> ({r.sms.percent}%)</span>}
+                          </td>
+                          <td style={{ color: uColor(r.email?.percent ?? 0), fontWeight:600 }}>
+                            {r.email?.used ?? '—'} / {r.email?.limit ?? '—'}
+                            {r.email?.limit > 0 && <span style={{ color:'#9CA3AF', fontWeight:400 }}> ({r.email.percent}%)</span>}
+                          </td>
+                          <td>
+                            <button className="sa-btn secondary" style={{ fontSize:11, padding:'3px 10px' }}
+                              onClick={() => { setGrantModal({ company_id: r.company_id, company_name: r.company_name }); setGrantChannel('sms'); setGrantAmount('') }}>
+                              Grant Quota
+                            </button>
+                          </td>
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            )
+          }
+        </div>
+      )}
+
+      {/* ── Grant Quota modal ──────────────────────────────────── */}
+      {grantModal && (
+        <Modal title={`Grant Quota — ${grantModal.company_name}`} onClose={() => setGrantModal(null)}
+          footer={
+            <button className="sa-btn primary" onClick={async () => {
+              if (!grantAmount || isNaN(parseInt(grantAmount))) { setError('Enter a valid amount'); return }
+              try {
+                await post(`${BIL}/companies/${grantModal.company_id}/grant-quota`,
+                  { channel: grantChannel, extra_amount: parseInt(grantAmount) })
+                setGrantModal(null)
+                loadUsage()
+                showToast(`Granted ${grantAmount} ${grantChannel} quota`)
+              } catch (e) { setError(e.message) }
+            }}>Confirm Grant</button>
+          }
+        >
+          <div className="sa-form-group">
+            <label>Channel</label>
+            <select className="sa-input" value={grantChannel} onChange={e => setGrantChannel(e.target.value)}>
+              <option value="sms">SMS</option>
+              <option value="email">Email</option>
+              <option value="push">Push</option>
+            </select>
+          </div>
+          <div className="sa-form-group">
+            <label>Amount to grant (decrements current usage by this number)</label>
+            <input className="sa-input" type="number" min="1" value={grantAmount}
+              onChange={e => setGrantAmount(e.target.value)} placeholder="e.g. 50" />
+          </div>
+        </Modal>
+      )}
     </>
   )
 }
@@ -3019,7 +4189,7 @@ function SecurityTab() {
       'Audit Log':      `${SEC}/audit?limit=200`,
       'Retention':      `${SEC}/retention`,
       'Incidents':      `${SEC}/incidents`,
-      '2FA Mgmt':       `${SEC}/2fa/status`,
+      '2FA Mgmt':       `${SA}/2fa/status-all`,
     }
     get(map[subTab])
       .then(d => setData(Array.isArray(d) ? d : []))
@@ -3062,18 +4232,16 @@ function SecurityTab() {
       .catch(e => setErr(e.message))
   }
 
-  const handleSetup2FA = () => {
-    if (!form.admin_id || !form.email) return
-    post(`${SEC}/2fa/setup`, { admin_id: parseInt(form.admin_id), email: form.email, enabled: 1 })
-      .then(() => { setMsg('2FA configured'); setForm({}); load(sub) })
+  const handleEnforce2FA = (adminId, currentEnforced) => {
+    post('/api/auth/admin/2fa/enforce', { admin_id: adminId, enforced: !currentEnforced })
+      .then(() => { setMsg(currentEnforced ? '2FA enforcement removed' : '2FA enforced'); load('2FA Mgmt') })
       .catch(e => setErr(e.message))
   }
 
   const handleDisable2FA = (adminId) => {
-    const target = data.find(r => r.id === adminId)
-    if (!target?.email) { setErr('No email set — run setup first'); return }
-    post(`${SEC}/2fa/setup`, { admin_id: adminId, email: target.email, enabled: 0 })
-      .then(() => { setMsg('2FA disabled'); load(sub) })
+    if (!window.confirm(`Disable 2FA for admin #${adminId}?`)) return
+    post('/api/auth/admin/2fa/disable', { admin_id: adminId, enforced: false })
+      .then(() => { setMsg('2FA disabled'); load('2FA Mgmt') })
       .catch(e => setErr(e.message))
   }
 
@@ -3275,26 +4443,51 @@ function SecurityTab() {
       {/* ── 2FA Management ── */}
       {sub === '2FA Mgmt' && (
         <div>
-          <div className="sa-cfg-row" style={{ marginBottom: 16 }}>
-            <input style={inpStyle} placeholder="Admin ID" type="number" value={form.admin_id || ''} onChange={e => setForm(f => ({ ...f, admin_id: e.target.value }))} />
-            <input style={inpStyle} placeholder="Email for OTP" value={form.email || ''} onChange={e => setForm(f => ({ ...f, email: e.target.value }))} />
-            <button className="sa-btn primary" onClick={handleSetup2FA}>Enable 2FA</button>
-          </div>
+          <p style={{ fontSize: 12, color: 'var(--sa-text-muted)', marginBottom: 12 }}>
+            Enforce 2FA on any admin — they must scan their QR code on next login.
+            Super admin can set up their own 2FA via the QR Setup panel in their profile.
+          </p>
           {busy ? <Spinner /> : (
             <table className="sa-table">
-              <thead><tr><th>ID</th><th>Admin</th><th>Email</th><th>2FA</th><th></th></tr></thead>
+              <thead>
+                <tr><th>ID</th><th>Admin</th><th>Role</th><th>Company</th><th>2FA Active</th><th>Enforced</th><th></th></tr>
+              </thead>
               <tbody>
                 {data.map(r => (
                   <tr key={r.id}>
                     <td style={{ fontSize: 11 }}>{r.id}</td>
-                    <td style={{ fontSize: 12 }}>{r.name}</td>
-                    <td style={{ fontSize: 12 }}>{r.email || <span style={{ color: 'var(--sa-text-muted)' }}>—</span>}</td>
-                    <td><Badge label={r.requires_2fa ? 'Enabled' : 'Off'} type={r.requires_2fa ? 'active' : 'inactive'} /></td>
+                    <td style={{ fontSize: 12, fontWeight: 600 }}>{r.name}</td>
+                    <td><Badge label={r.role} type={r.role === 'super_admin' ? 'CRITICAL' : 'sub'} /></td>
+                    <td style={{ fontSize: 12 }}>{r.company_name || '—'}</td>
                     <td>
-                      {r.requires_2fa
-                        ? <button className="sa-btn danger" onClick={() => handleDisable2FA(r.id)}>Disable</button>
-                        : null
-                      }
+                      <Badge
+                        label={r.totp_enabled ? 'Active' : 'Off'}
+                        type={r.totp_enabled ? 'active' : 'inactive'}
+                      />
+                    </td>
+                    <td>
+                      <Badge
+                        label={r.totp_enforced ? 'Enforced' : 'Optional'}
+                        type={r.totp_enforced ? 'WARNING' : 'inactive'}
+                      />
+                    </td>
+                    <td style={{ display: 'flex', gap: 4 }}>
+                      <button
+                        className="sa-btn secondary"
+                        style={{ fontSize: 11, padding: '3px 8px' }}
+                        onClick={() => handleEnforce2FA(r.id, r.totp_enforced)}
+                      >
+                        {r.totp_enforced ? 'Un-enforce' : 'Enforce'}
+                      </button>
+                      {r.totp_enabled && (
+                        <button
+                          className="sa-btn danger"
+                          style={{ fontSize: 11, padding: '3px 8px' }}
+                          onClick={() => handleDisable2FA(r.id)}
+                        >
+                          Disable
+                        </button>
+                      )}
                     </td>
                   </tr>
                 ))}
@@ -3303,6 +4496,401 @@ function SecurityTab() {
           )}
         </div>
       )}
+    </div>
+  )
+}
+
+// ─── Onboarding Wizard Tab ────────────────────────────────────────────────────
+
+const OB = '/api/super-admin/onboarding'
+
+const STEP_COLORS = {
+  done:    { bg: '#D1FAE5', border: '#6EE7B7', icon: '✓', text: '#065F46' },
+  pending: { bg: '#F3F4F6', border: '#D1D5DB', icon: '○', text: '#6B7280' },
+  skipped: { bg: '#FEF3C7', border: '#FCD34D', icon: '⤼', text: '#92400E' },
+}
+
+function OnboardingTab() {
+  const [companies,   setCompanies]   = useState([])
+  const [selCo,       setSelCo]       = useState('')
+  const [progress,    setProgress]    = useState(null)
+  const [loading,     setLoading]     = useState(false)
+  const [error,       setError]       = useState('')
+  const [toast,       setToast]       = useState('')
+  const [simLoading,  setSimLoading]  = useState(false)
+
+  const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(''), 3500) }
+
+  useEffect(() => {
+    get(`${SA}/companies`).then(setCompanies).catch(() => {})
+  }, [])
+
+  const loadProgress = useCallback(() => {
+    if (!selCo) return
+    setLoading(true)
+    setError('')
+    get(`${OB}/${selCo}`)
+      .then(setProgress)
+      .catch(e => setError(e.message))
+      .finally(() => setLoading(false))
+  }, [selCo])
+
+  useEffect(() => { loadProgress() }, [loadProgress])
+
+  const handleInit = async () => {
+    setLoading(true)
+    try {
+      await post(`${OB}/${selCo}/init`, {})
+      showToast('Onboarding initialised')
+      loadProgress()
+    } catch (e) { setError(e.message) }
+    finally { setLoading(false) }
+  }
+
+  const handleStepToggle = async (stepIndex, currentStatus) => {
+    const newStatus = currentStatus === 'done' ? 'pending' : 'done'
+    try {
+      await patch(`${OB}/${selCo}/step/${stepIndex}?status=${newStatus}`, {})
+      loadProgress()
+    } catch (e) { setError(e.message) }
+  }
+
+  const handleTestBreach = async () => {
+    setSimLoading(true)
+    try {
+      await post('/api/simulate/breach', {})
+      showToast('Breach simulation triggered — check alerts')
+      await patch(`${OB}/${selCo}/step/3?status=done`, {})
+      loadProgress()
+    } catch (e) { setError('Simulation failed: ' + e.message) }
+    finally { setSimLoading(false) }
+  }
+
+  const pct = progress ? Math.round(progress.done_steps / progress.total_steps * 100) : 0
+  const barColor = pct === 100 ? '#22C55E' : pct >= 60 ? '#3B82F6' : '#F59E0B'
+
+  return (
+    <div style={{ maxWidth: 800 }}>
+      {toast && (
+        <div style={{ position:'fixed', top:20, right:20, background:'#D1FAE5', color:'#065F46',
+          padding:'10px 18px', borderRadius:8, fontWeight:600, fontSize:13, zIndex:2000 }}>{toast}</div>
+      )}
+
+      <div className="sa-card" style={{ marginBottom: 20 }}>
+        <h2 className="sa-card-title">Onboarding Wizard</h2>
+        <p style={{ color:'#6B7280', fontSize:13, marginBottom:16 }}>
+          Track setup progress for each company through the 5-step onboarding checklist.
+        </p>
+        <div style={{ display:'flex', gap:10, alignItems:'center', flexWrap:'wrap' }}>
+          <select value={selCo} onChange={e => { setSelCo(e.target.value); setProgress(null) }}
+            className="sa-input" style={{ width:260 }}>
+            <option value="">— Select company —</option>
+            {companies.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+          </select>
+          {selCo && !progress && (
+            <button className="sa-btn primary" onClick={handleInit} disabled={loading}>
+              {loading ? 'Initialising…' : 'Initialise Onboarding'}
+            </button>
+          )}
+          {selCo && progress && (
+            <button className="sa-btn secondary" onClick={loadProgress}>↻ Refresh</button>
+          )}
+        </div>
+        {error && <p style={{ color:'#EF4444', fontSize:13, marginTop:8 }}>{error}</p>}
+      </div>
+
+      {progress && (
+        <div className="sa-card">
+          <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:12 }}>
+            <div>
+              <h3 style={{ fontWeight:700, color:'#111827', margin:0 }}>{progress.company_name}</h3>
+              <p style={{ color:'#6B7280', fontSize:13, margin:'4px 0 0' }}>
+                {progress.done_steps} of {progress.total_steps} steps complete
+                {progress.complete && ' — '}
+                {progress.complete && <span style={{ color:'#22C55E', fontWeight:700 }}>LIVE</span>}
+              </p>
+            </div>
+            <div style={{ textAlign:'right' }}>
+              <span style={{ fontSize:24, fontWeight:800, color: barColor }}>{pct}%</span>
+            </div>
+          </div>
+
+          {/* Progress bar */}
+          <div style={{ background:'#F3F4F6', borderRadius:6, height:10, marginBottom:24 }}>
+            <div style={{ width:`${pct}%`, background: barColor, borderRadius:6, height:10,
+              transition:'width 0.4s ease' }} />
+          </div>
+
+          {/* Steps */}
+          <div style={{ display:'flex', flexDirection:'column', gap:12 }}>
+            {progress.steps.map(step => {
+              const sc = STEP_COLORS[step.step_status] || STEP_COLORS.pending
+              const isStep3 = step.step_index === 3
+              return (
+                <div key={step.step_index} style={{
+                  display:'flex', alignItems:'flex-start', gap:14, padding:14,
+                  background: sc.bg, borderRadius:10, border:`1.5px solid ${sc.border}`,
+                }}>
+                  <div style={{ fontSize:20, color: sc.text, minWidth:24, textAlign:'center',
+                    fontWeight:700, marginTop:2 }}>{sc.icon}</div>
+                  <div style={{ flex:1 }}>
+                    <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center' }}>
+                      <span style={{ fontWeight:700, color:'#111827', fontSize:14 }}>
+                        Step {step.step_index + 1}: {step.step_title}
+                      </span>
+                      <div style={{ display:'flex', gap:8 }}>
+                        {isStep3 && step.step_status !== 'done' && (
+                          <button className="sa-btn primary" style={{ fontSize:12, padding:'4px 10px' }}
+                            onClick={handleTestBreach} disabled={simLoading}>
+                            {simLoading ? 'Sending…' : '⚡ Trigger Test Breach'}
+                          </button>
+                        )}
+                        <button
+                          className={`sa-btn ${step.step_status === 'done' ? 'secondary' : 'primary'}`}
+                          style={{ fontSize:12, padding:'4px 10px' }}
+                          onClick={() => handleStepToggle(step.step_index, step.step_status)}>
+                          {step.step_status === 'done' ? 'Mark Pending' : 'Mark Done'}
+                        </button>
+                      </div>
+                    </div>
+                    <p style={{ color:'#6B7280', fontSize:12, margin:'4px 0 0' }}>{step.description}</p>
+                    {step.completed_at && (
+                      <p style={{ color:'#6EE7B7', fontSize:11, margin:'4px 0 0' }}>
+                        Completed {new Date(step.completed_at).toLocaleString()}
+                      </p>
+                    )}
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ─── Audit Log Tab ────────────────────────────────────────────────────────────
+
+const AUDIT_SA = '/api/super-admin'
+
+const SEV_COLORS = {
+  info:     { bg: '#EFF6FF', text: '#1D4ED8', label: 'info' },
+  warning:  { bg: '#FFFBEB', text: '#B45309', label: 'warn' },
+  critical: { bg: '#FEF2F2', text: '#B91C1C', label: 'CRIT' },
+}
+const CAT_COLORS = {
+  auth:     '#6366F1',
+  config:   '#F59E0B',
+  data:     '#3B82F6',
+  security: '#EF4444',
+  admin:    '#8B5CF6',
+  general:  '#6B7280',
+}
+
+function AuditTab() {
+  const [rows,       setRows]       = useState([])
+  const [summary,    setSummary]    = useState(null)
+  const [total,      setTotal]      = useState(0)
+  const [loading,    setLoading]    = useState(false)
+  const [error,      setError]      = useState('')
+  const [days,       setDays]       = useState('7')
+  const [category,   setCategory]   = useState('')
+  const [severity,   setSeverity]   = useState('')
+  const [pageOffset, setPageOffset] = useState(0)
+  const PAGE_SIZE = 50
+
+  const loadSummary = useCallback(() => {
+    get(`${AUDIT_SA}/audit-log/summary?days=${days}`)
+      .then(setSummary)
+      .catch(() => {})
+  }, [days])
+
+  const loadRows = useCallback(() => {
+    setLoading(true)
+    setError('')
+    const params = new URLSearchParams({
+      days, limit: PAGE_SIZE, offset: pageOffset,
+      ...(category && { category }),
+      ...(severity && { severity }),
+    })
+    get(`${AUDIT_SA}/audit-log?${params}`)
+      .then(d => { setRows(d.rows || []); setTotal(d.total || 0) })
+      .catch(e => setError(e.message))
+      .finally(() => setLoading(false))
+  }, [days, category, severity, pageOffset])
+
+  useEffect(() => { loadSummary(); loadRows() }, [loadSummary, loadRows])
+
+  const totalPages = Math.ceil(total / PAGE_SIZE)
+  const currentPage = Math.floor(pageOffset / PAGE_SIZE) + 1
+
+  return (
+    <div>
+      {/* Summary strip */}
+      {summary && (
+        <div style={{ display:'grid', gridTemplateColumns:'repeat(3,1fr)', gap:12, marginBottom:20 }}>
+          <div className="sa-card" style={{ padding:14 }}>
+            <h3 style={{ fontSize:12, fontWeight:700, color:'#6B7280', textTransform:'uppercase', marginBottom:10 }}>
+              By Category ({days}d)
+            </h3>
+            {summary.by_category.length === 0
+              ? <p style={{ color:'#9CA3AF', fontSize:12 }}>No data</p>
+              : summary.by_category.map(r => (
+                  <div key={r.category} style={{ display:'flex', justifyContent:'space-between',
+                    fontSize:13, padding:'4px 0', borderBottom:'1px solid #F3F4F6' }}>
+                    <span style={{ color: CAT_COLORS[r.category] || '#6B7280', fontWeight:600 }}>
+                      {r.category}
+                    </span>
+                    <span style={{ fontWeight:700 }}>{r.cnt}</span>
+                  </div>
+                ))
+            }
+          </div>
+
+          <div className="sa-card" style={{ padding:14 }}>
+            <h3 style={{ fontSize:12, fontWeight:700, color:'#6B7280', textTransform:'uppercase', marginBottom:10 }}>
+              By Severity ({days}d)
+            </h3>
+            {summary.by_severity.length === 0
+              ? <p style={{ color:'#9CA3AF', fontSize:12 }}>No data</p>
+              : summary.by_severity.map(r => {
+                  const sc = SEV_COLORS[r.severity] || SEV_COLORS.info
+                  return (
+                    <div key={r.severity} style={{ display:'flex', justifyContent:'space-between',
+                      fontSize:13, padding:'4px 0', borderBottom:'1px solid #F3F4F6' }}>
+                      <span style={{ background: sc.bg, color: sc.text, padding:'1px 7px',
+                        borderRadius:10, fontSize:11, fontWeight:700 }}>{r.severity}</span>
+                      <span style={{ fontWeight:700 }}>{r.cnt}</span>
+                    </div>
+                  )
+                })
+            }
+          </div>
+
+          <div className="sa-card" style={{ padding:14 }}>
+            <h3 style={{ fontSize:12, fontWeight:700, color:'#6B7280', textTransform:'uppercase', marginBottom:10 }}>
+              Recent Critical
+            </h3>
+            {summary.critical_recent.length === 0
+              ? <p style={{ color:'#9CA3AF', fontSize:12 }}>None — all clear</p>
+              : summary.critical_recent.slice(0, 5).map((r, i) => (
+                  <div key={i} style={{ fontSize:12, padding:'4px 0', borderBottom:'1px solid #F3F4F6',
+                    color:'#B91C1C' }}>
+                    <span style={{ fontWeight:700 }}>{r.action}</span>
+                    {r.admin_name && <span style={{ color:'#6B7280' }}> ({r.admin_name})</span>}
+                    {r.ip_address && <span style={{ color:'#9CA3AF' }}> {r.ip_address}</span>}
+                  </div>
+                ))
+            }
+          </div>
+        </div>
+      )}
+
+      {/* Filters + table */}
+      <div className="sa-card">
+        <div style={{ display:'flex', gap:10, alignItems:'center', flexWrap:'wrap', marginBottom:16 }}>
+          <h2 className="sa-card-title" style={{ margin:0, flex:1 }}>
+            Audit Log {total > 0 && <span style={{ color:'#6B7280', fontWeight:400, fontSize:13 }}>({total} entries)</span>}
+          </h2>
+          <select value={days} onChange={e => { setDays(e.target.value); setPageOffset(0) }}
+            style={{ padding:'4px 8px', borderRadius:6, border:'1px solid #D1D5DB', fontSize:13 }}>
+            {[['1','24h'],['7','7d'],['14','14d'],['30','30d'],['90','90d']].map(([v,l]) =>
+              <option key={v} value={v}>{l}</option>)}
+          </select>
+          <select value={category} onChange={e => { setCategory(e.target.value); setPageOffset(0) }}
+            style={{ padding:'4px 8px', borderRadius:6, border:'1px solid #D1D5DB', fontSize:13 }}>
+            <option value="">All categories</option>
+            {['auth','config','data','security','admin','general'].map(c =>
+              <option key={c} value={c}>{c}</option>)}
+          </select>
+          <select value={severity} onChange={e => { setSeverity(e.target.value); setPageOffset(0) }}
+            style={{ padding:'4px 8px', borderRadius:6, border:'1px solid #D1D5DB', fontSize:13 }}>
+            <option value="">All severities</option>
+            {['info','warning','critical'].map(s =>
+              <option key={s} value={s}>{s}</option>)}
+          </select>
+          <button className="sa-btn secondary" onClick={() => { loadSummary(); loadRows() }}>
+            ↻ Refresh
+          </button>
+        </div>
+
+        {error && <p style={{ color:'#EF4444', fontSize:13, marginBottom:8 }}>{error}</p>}
+
+        {loading
+          ? <div style={{ textAlign:'center', padding:40 }}><Spinner /></div>
+          : (
+            <div className="sa-table-wrap">
+              <table className="sa-table">
+                <thead>
+                  <tr>
+                    <th>Time</th>
+                    <th>Sev</th>
+                    <th>Cat</th>
+                    <th>Action</th>
+                    <th>Admin</th>
+                    <th>IP</th>
+                    <th>Entity</th>
+                    <th>Change</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {rows.length === 0
+                    ? <tr><td colSpan={8} style={{ textAlign:'center', color:'#9CA3AF', padding:24 }}>
+                        No entries for this filter
+                      </td></tr>
+                    : rows.map(r => {
+                        const sc = SEV_COLORS[r.severity] || SEV_COLORS.info
+                        const catColor = CAT_COLORS[r.category] || '#6B7280'
+                        const ts = r.created_at
+                          ? new Date(r.created_at).toLocaleString('en-IN', { hour12: false })
+                          : '—'
+                        return (
+                          <tr key={r.id}>
+                            <td style={{ fontFamily:'monospace', fontSize:11, whiteSpace:'nowrap' }}>{ts}</td>
+                            <td>
+                              <span style={{ background: sc.bg, color: sc.text, padding:'1px 6px',
+                                borderRadius:8, fontSize:10, fontWeight:700 }}>{sc.label}</span>
+                            </td>
+                            <td>
+                              <span style={{ color: catColor, fontWeight:600, fontSize:12 }}>{r.category}</span>
+                            </td>
+                            <td style={{ fontFamily:'monospace', fontSize:12 }}>{r.action}</td>
+                            <td style={{ fontSize:12 }}>{r.admin_name || '—'}</td>
+                            <td style={{ fontFamily:'monospace', fontSize:11, color:'#6B7280' }}>{r.ip_address || '—'}</td>
+                            <td style={{ fontSize:12 }}>
+                              {r.entity_type
+                                ? `${r.entity_type}${r.entity_id ? ` #${r.entity_id}` : ''}`
+                                : '—'}
+                            </td>
+                            <td style={{ fontSize:11, maxWidth:180, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>
+                              {r.old_value || r.new_value
+                                ? <span title={`${r.old_value || ''} → ${r.new_value || ''}`}>
+                                    {r.old_value ? `${r.old_value} → ` : ''}{r.new_value || ''}
+                                  </span>
+                                : '—'}
+                            </td>
+                          </tr>
+                        )
+                      })
+                  }
+                </tbody>
+              </table>
+            </div>
+          )
+        }
+
+        {/* Pagination */}
+        {totalPages > 1 && (
+          <div style={{ display:'flex', gap:8, justifyContent:'center', marginTop:16, alignItems:'center', fontSize:13 }}>
+            <button className="sa-btn secondary" disabled={pageOffset === 0}
+              onClick={() => setPageOffset(Math.max(0, pageOffset - PAGE_SIZE))}>← Prev</button>
+            <span style={{ color:'#6B7280' }}>Page {currentPage} of {totalPages}</span>
+            <button className="sa-btn secondary" disabled={currentPage >= totalPages}
+              onClick={() => setPageOffset(pageOffset + PAGE_SIZE)}>Next →</button>
+          </div>
+        )}
+      </div>
     </div>
   )
 }
@@ -3320,10 +4908,13 @@ const TABS = [
   { id: 'comms',      label: 'Communications', Icon: Megaphone       },
   { id: 'billing',    label: 'Billing',        Icon: CreditCard      },
   { id: 'security',   label: 'Security',       Icon: ShieldAlert     },
+  { id: 'parameters', label: 'Parameters',     Icon: Layers          },
   { id: 'alerts',     label: 'Alerts',         Icon: AlertTriangle   },
   { id: 'live',       label: 'Live Feed',      Icon: Activity        },
   { id: 'broadcast',  label: 'Broadcast',      Icon: Megaphone       },
   { id: 'sessions',   label: 'Sessions',       Icon: KeyRound        },
+  { id: 'onboarding', label: 'Onboarding',     Icon: BookOpen        },
+  { id: 'audit',      label: 'Audit Log',      Icon: ScrollText      },
 ]
 
 export default function SuperAdmin() {
@@ -3331,7 +4922,8 @@ export default function SuperAdmin() {
   const [tab,          setTab]          = useState('overview')
   const [adminDetail,  setAdminDetail]  = useState(null)
   const [viewAdmins,   setViewAdmins]   = useState(null)
-  const [pendingCount, setPendingCount] = useState(0)
+  const [pendingCount,  setPendingCount]  = useState(0)
+  const [anomalyCount,  setAnomalyCount]  = useState(0)
 
   const username = sessionStorage.getItem('admin_username') || 'superadmin'
 
@@ -3343,6 +4935,17 @@ export default function SuperAdmin() {
         .catch(() => {})
     fetchPending()
     const t = setInterval(fetchPending, 30000)
+    return () => clearInterval(t)
+  }, [])
+
+  // Poll unresolved anomaly count every 2 min for the sidebar badge
+  useEffect(() => {
+    const fetchAnomalies = () =>
+      get(`${SA}/anomalies`)
+        .then(d => setAnomalyCount(Array.isArray(d) ? d.length : 0))
+        .catch(() => {})
+    fetchAnomalies()
+    const t = setInterval(fetchAnomalies, 120000)
     return () => clearInterval(t)
   }, [])
 
@@ -3386,10 +4989,13 @@ export default function SuperAdmin() {
       case 'billing':    return <BillingTab />
       case 'security':   return <SecurityTab />
       case 'admins':     return <AdminsTab onViewDetail={(id) => setAdminDetail(id)} />
+      case 'parameters': return <CompanyParametersTab />
       case 'alerts':    return <AlertsTab />
       case 'live':      return <LiveFeedTab />
       case 'broadcast': return <BroadcastTab />
       case 'sessions':  return <SessionsTab />
+      case 'onboarding': return <OnboardingTab />
+      case 'audit':      return <AuditTab />
       default:          return null
     }
   }
@@ -3423,6 +5029,9 @@ export default function SuperAdmin() {
               {label}
               {id === 'approvals' && pendingCount > 0 && (
                 <span className="sa-sidebar-badge">{pendingCount}</span>
+              )}
+              {id === 'analytics' && anomalyCount > 0 && (
+                <span className="sa-sidebar-badge" style={{ background: '#EF4444' }}>{anomalyCount}</span>
               )}
             </button>
           ))}

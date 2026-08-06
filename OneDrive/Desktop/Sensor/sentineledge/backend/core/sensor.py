@@ -21,8 +21,9 @@ import asyncio
 import threading
 import time
 from pathlib import Path
+from typing import Optional
 
-from config import MODULE_STATUS, DEMO_MODE, SENSOR_PORT, SENSOR_BAUD
+from config import MODULE_STATUS, SENSOR_PORT, SENSOR_BAUD
 from utils.time import now_iso
 
 # ─── Data directory ───────────────────────────────────────────────────────────
@@ -139,67 +140,210 @@ class CSVSensorPlayer:
 
 # ─── Serial Sensor Reader ─────────────────────────────────────────────────────
 
-class SerialSensorReader:
+# Manufacturer/description keywords that suggest a USB temperature sensor
+# (distinct from SIM7600 modem keywords used in sim7600_sender.py).
+_SENSOR_KEYWORDS = (
+    "usb serial", "usb-serial", "ch340", "cp210", "ft232",
+    "arduino", "ftdi", "prolific", "silicon labs",
+)
+_SENSOR_CANDIDATE_BLACKLIST = (
+    "sim7600", "sim76", "simcom", "qualcomm hs-usb", "at command",
+    "audio", "microphone", "headset",
+)
+
+# Module-level confirmed sensor port cache — shared with health.py if needed.
+_confirmed_sensor_port: Optional[str] = None
+
+
+def _scan_sensor_port(baud: int, timeout: float = 2.0) -> Optional[str]:
     """
-    Reads live temperature data from a USB sensor via COM port.
-    Uses a background thread to read from serial continuously to avoid blocking.
+    Scan all COM ports for a USB temperature sensor.
+
+    For each candidate:
+      1. Open port at the configured baud rate.
+      2. Read one line within *timeout* seconds.
+      3. If the line parses as a float in the realistic range [0, 200], confirm.
+
+    Returns the device string (e.g. 'COM3') or None if nothing found.
+    Never raises.
     """
+    global _confirmed_sensor_port
+
+    try:
+        import serial                          # type: ignore
+        import serial.tools.list_ports        # type: ignore
+    except ImportError:
+        return None
+
+    try:
+        all_ports = list(serial.tools.list_ports.comports())
+    except Exception:
+        return None
+
+    # Check configured port first (if SENSOR_PORT is set explicitly)
+    configured = (SENSOR_PORT or "").strip()
+    if configured:
+        print(f"Sensor: trying configured port {configured}")
+        candidates = [p for p in all_ports if p.device == configured]
+        candidates += [p for p in all_ports if p.device != configured]
+    else:
+        # Sort: prefer ports whose description matches sensor keywords
+        def _rank(p):
+            desc = (p.description or "").lower()
+            if any(kw in desc for kw in _SENSOR_KEYWORDS):
+                return 0
+            if any(kw in desc for kw in _SENSOR_CANDIDATE_BLACKLIST):
+                return 99
+            return 1
+        candidates = sorted(all_ports, key=_rank)
+
+    for p in candidates:
+        desc = (p.description or "").lower()
+        if any(kw in desc for kw in _SENSOR_CANDIDATE_BLACKLIST):
+            continue  # skip modem/audio ports
+
+        ser = None
+        try:
+            ser = serial.Serial(port=p.device, baudrate=baud, timeout=timeout)
+            ser.reset_input_buffer()
+            raw = ser.readline()
+            if not raw:
+                continue
+            line_str = raw.decode("utf-8", errors="ignore").strip()
+            temp = float(line_str)
+            # 15.0 lower bound: excludes pH readings (0–14) and unrealistic ambient temps
+            if 15.0 <= temp <= 200.0:
+                print(f"Sensor: auto-detected on {p.device} ({p.description}) — reading {temp}°C")
+                _confirmed_sensor_port = p.device
+                return p.device
+        except Exception:
+            pass
+        finally:
+            if ser is not None and getattr(ser, "is_open", False):
+                try:
+                    ser.close()
+                except Exception:
+                    pass
+
+    return None
+
+
+class AdaptiveSensorReader:
+    """
+    Always-on sensor adapter — no DEMO_MODE flag required.
+
+    • Starts immediately with CSV playback (no hardware needed).
+    • Background thread scans all COM ports every 10 seconds.
+    • When a USB temperature sensor is detected the reader switches
+      seamlessly to live serial data — no server restart needed.
+    • If the sensor disconnects, falls back to CSV and resumes scanning.
+
+    get_reading() stamps every result with is_live=True (real sensor)
+    or is_live=False (CSV fallback) so callers can gate alert logic.
+    """
+
+    _SCAN_INTERVAL = 10  # seconds between port scans when no sensor found
 
     def __init__(self) -> None:
-        self.demo_mode:  bool = False
-        self.demo_speed: int  = 1
-        
-        self._latest_temp: float = 65.0
-        self._running: bool = True
-        
-        self._thread = threading.Thread(target=self._read_loop, daemon=True, name="serial-sensor")
+        self._csv            = CSVSensorPlayer()
+        self._live_temp: Optional[float] = None   # None → use CSV
+        self._running        = True
+        self._baud: int      = SENSOR_BAUD
+
+        self._thread = threading.Thread(
+            target=self._scan_loop, daemon=True, name="adaptive-sensor"
+        )
         self._thread.start()
 
-    def _read_loop(self) -> None:
-        """Background thread loop to continuously read from the COM port."""
-        import serial  # type: ignore
-        while self._running:
-            try:
-                with serial.Serial(SENSOR_PORT, SENSOR_BAUD, timeout=1.0) as ser:
-                    print(f"Sensor: Connected to USB sensor on {SENSOR_PORT}")
-                    while self._running:
-                        line = ser.readline()
-                        if not line:
-                            continue
-                        line_str = line.decode('utf-8', errors='ignore').strip()
-                        if not line_str:
-                            continue
-                        try:
-                            temp = float(line_str)
-                            self._latest_temp = temp
-                        except ValueError:
-                            # Malformed/non-numeric data line -> skip silently
-                            pass
-            except serial.SerialException as exc:
-                print(f"Sensor: Serial error on {SENSOR_PORT}: {exc}. Retrying in 5 seconds...")
-                time.sleep(5)
-            except Exception as exc:
-                print(f"Sensor: Unexpected error: {exc}. Retrying in 5 seconds...")
-                time.sleep(5)
+    # ── Public properties (API-compatible with CSVSensorPlayer) ──────────────
+
+    @property
+    def is_live(self) -> bool:
+        """True while a real USB sensor is actively connected and reading."""
+        return self._live_temp is not None
+
+    @property
+    def demo_mode(self) -> bool:
+        return self._csv.demo_mode
+
+    @property
+    def demo_speed(self) -> int:
+        return self._csv.demo_speed
+
+    @property
+    def readings(self) -> list:
+        return self._csv.readings
+
+    # ── Reading ───────────────────────────────────────────────────────────────
 
     def get_reading(self) -> dict:
-        """Return the latest available temperature reading."""
-        return {"temperature": self._latest_temp, "timestamp": now_iso()}
+        if self._live_temp is not None:
+            return {"temperature": self._live_temp, "timestamp": now_iso(), "is_live": True}
+        reading = self._csv.get_reading()
+        reading["is_live"] = False
+        return reading
+
+    # ── Controls (delegated to CSV player) ────────────────────────────────────
 
     def activate_demo(self, speed: int = 30) -> None:
-        """Demo mode has no effect on real serial sensor."""
-        print("Sensor: activate_demo ignored (live USB mode active).")
-        
+        self._csv.activate_demo(speed)
+
     def reset(self) -> None:
-        """Reset has no effect on real serial sensor."""
-        print("Sensor: reset ignored (live USB mode active).")
+        self._csv.reset()
+
+    # ── Background scan + read loop ───────────────────────────────────────────
+
+    def _scan_loop(self) -> None:
+        global _confirmed_sensor_port
+
+        while self._running:
+            # Phase 1 — scan for a sensor (blocks up to timeout per port)
+            port = _scan_sensor_port(self._baud)
+            if port is None:
+                time.sleep(self._SCAN_INTERVAL)
+                continue
+
+            # Phase 2 — sensor found: read continuously until it errors/disconnects
+            _confirmed_sensor_port = port
+            print(f"Sensor: switching to LIVE mode on {port}")
+            self._read_serial(port)
+
+            # Phase 3 — sensor gone: reset and resume scanning
+            self._live_temp        = None
+            _confirmed_sensor_port = None
+            print("Sensor: disconnected — resuming CSV fallback, scanning every 10 s")
+
+    def _read_serial(self, port: str) -> None:
+        """Read from the confirmed serial port until it errors or disconnects."""
+        try:
+            import serial  # type: ignore
+        except ImportError:
+            return
+
+        try:
+            with serial.Serial(port, self._baud, timeout=1.0) as ser:
+                while self._running:
+                    line = ser.readline()
+                    if not line:
+                        continue
+                    line_str = line.decode("utf-8", errors="ignore").strip()
+                    if not line_str:
+                        continue
+                    try:
+                        temp = float(line_str)
+                        if 15.0 <= temp <= 200.0:
+                            self._live_temp = temp
+                    except ValueError:
+                        pass
+        except Exception as exc:
+            print(f"Sensor: serial error on {port}: {exc}")
 
 
 # ─── Singleton instance ───────────────────────────────────────────────────────
-if DEMO_MODE:
-    player = CSVSensorPlayer()
-else:
-    player = SerialSensorReader()
+# AdaptiveSensorReader always starts with CSV fallback and auto-detects
+# a real USB sensor every 10 seconds — no DEMO_MODE flag required.
+player = AdaptiveSensorReader()
+
 
 
 # ─── Breach override (for /api/simulate/breach) ───────────────────────────────
@@ -258,5 +402,7 @@ async def stream_readings():
         yield get_reading()
         # Normal: 1 second per reading (real machine speed)
         # Demo:   1/speed seconds per reading (compressed)
-        delay = 1.0 / player.demo_speed if player.demo_mode else 1.0
+        # Live sensor: always 1 s (hardware rate).
+        # CSV + demo mode: accelerated. CSV + normal: 1 s.
+        delay = (1.0 / player.demo_speed) if (player.demo_mode and not player.is_live) else 1.0
         await asyncio.sleep(delay)

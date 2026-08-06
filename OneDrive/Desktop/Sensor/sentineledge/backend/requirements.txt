@@ -20,6 +20,10 @@ limits==3.13.0
 # ── Security / password hashing ───────────────────────────────────────────────
 bcrypt==4.2.1
 
+# ── TOTP two-factor authentication ────────────────────────────────────────────
+pyotp==2.9.0
+qrcode==7.4.2
+
 # ── USB temperature sensor ────────────────────────────────────────────────────
 pyserial==3.5
 

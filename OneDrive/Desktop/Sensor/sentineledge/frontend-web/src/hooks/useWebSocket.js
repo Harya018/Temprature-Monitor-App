@@ -26,6 +26,7 @@ export default function useWebSocket({ onBreach } = {}) {
   const [readings,         setReadings]         = useState([])
   const [isConnected,      setIsConnected]      = useState(false)
   const [connectionStatus, setConnectionStatus] = useState('CONNECTING')
+  const [lastEvent,        setLastEvent]        = useState(null)
 
   const wsRef      = useRef(null)
   const retryDelay = useRef(1000)
@@ -55,15 +56,25 @@ export default function useWebSocket({ onBreach } = {}) {
           const msg = JSON.parse(e.data)
           if (msg.type === 'server_shutdown') return
 
-          setLastReading(msg)
-          setReadings(prev => {
-            const next = [...prev, msg]
-            return next.length > MAX_READINGS ? next.slice(-MAX_READINGS) : next
-          })
-
-          if (msg.breaches && msg.breaches.length > 0 && onBreachRef.current) {
-            msg.breaches.forEach(b => onBreachRef.current(b))
+          if (msg.type === 'parameter_added') {
+            setLastEvent(msg)
+            return
           }
+
+          // Temperature readings have no type field — detect by presence of 'temperature'
+          if ('temperature' in msg) {
+            setLastReading(msg)
+            setReadings(prev => {
+              const next = [...prev, msg]
+              return next.length > MAX_READINGS ? next.slice(-MAX_READINGS) : next
+            })
+            if (msg.breaches && msg.breaches.length > 0 && onBreachRef.current) {
+              msg.breaches.forEach(b => onBreachRef.current(b))
+            }
+            return
+          }
+
+          // All other types (pong, config_update, alert, unacknowledged): ignored
         } catch (_) { /* ignore parse errors */ }
       }
 
@@ -97,5 +108,5 @@ export default function useWebSocket({ onBreach } = {}) {
     }
   }, [connect])
 
-  return { lastReading, readings, isConnected, connectionStatus }
+  return { lastReading, readings, isConnected, connectionStatus, lastEvent }
 }

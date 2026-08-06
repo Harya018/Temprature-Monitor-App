@@ -21,6 +21,8 @@ import { useFocusEffect } from '@react-navigation/native';
 import { useWebSocket } from '../hooks/useWebSocket';
 import ConnectionBanner from '../components/ConnectionBanner';
 import AlertOverlay from '../components/AlertOverlay';
+import { DashboardSkeleton } from '../components/ScreenSkeleton';
+import ErrorState from '../components/ErrorState';
 import { getAlerts, getCurrentReading } from '../services/api';
 
 // ── Temperature thresholds ───────────────────
@@ -51,6 +53,8 @@ const DashboardScreen = () => {
   const [refreshing, setRefreshing] = useState(false);
   const [activeAlert, setActiveAlert] = useState(null);
   const [secondsAgo, setSecondsAgo] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [fetchError, setFetchError] = useState(null);
 
   const pulseAnim = useRef(new Animated.Value(1)).current;
   const secondsTimerRef = useRef(null);
@@ -97,6 +101,7 @@ const DashboardScreen = () => {
 
   // ── Fetch initial data when screen is focused
   const fetchData = useCallback(async () => {
+    setFetchError(null);
     try {
       const [currentData, alertsData] = await Promise.allSettled([
         getCurrentReading(),
@@ -118,8 +123,15 @@ const DashboardScreen = () => {
         ).length;
         setTodayAlertCount(todayCount);
       }
+
+      if (currentData.status === 'rejected' && alertsData.status === 'rejected') {
+        setFetchError('Could not reach server. Check your connection.');
+      }
     } catch (err) {
       console.warn('[Dashboard] Fetch error:', err);
+      setFetchError('Could not reach server. Check your connection.');
+    } finally {
+      setLoading(false);
     }
   }, []);
 
@@ -146,6 +158,32 @@ const DashboardScreen = () => {
     secondsAgo === null ? 'Never' :
     secondsAgo < 60 ? `${secondsAgo}s ago` :
     `${Math.floor(secondsAgo / 60)}m ago`;
+
+  // ── Loading skeleton (initial fetch only, not shown during pull-to-refresh)
+  if (loading && displayTemp === null) {
+    return (
+      <View style={styles.flex}>
+        <StatusBar barStyle="light-content" backgroundColor="#0F0C29" />
+        <LinearGradient colors={['#111827', '#1F2937', '#374151']} style={styles.flex}>
+          <ConnectionBanner connected={connected} />
+          <DashboardSkeleton />
+        </LinearGradient>
+      </View>
+    );
+  }
+
+  // ── Error state (HTTP failed and WS has no data yet either)
+  if (fetchError && displayTemp === null) {
+    return (
+      <View style={styles.flex}>
+        <StatusBar barStyle="light-content" backgroundColor="#0F0C29" />
+        <LinearGradient colors={['#111827', '#1F2937', '#374151']} style={styles.flex}>
+          <ConnectionBanner connected={connected} />
+          <ErrorState message={fetchError} onRetry={fetchData} />
+        </LinearGradient>
+      </View>
+    );
+  }
 
   return (
     <View style={styles.flex}>

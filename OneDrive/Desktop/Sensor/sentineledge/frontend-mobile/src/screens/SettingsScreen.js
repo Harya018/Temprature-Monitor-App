@@ -18,6 +18,7 @@ import { useFocusEffect } from '@react-navigation/native';
 
 import { API_BASE, WS_URL } from '../config/config';
 import { clearSession, getSession } from '../services/auth';
+import { deregisterPushToken } from '../services/pushTokenService';
 import { useWebSocket } from '../hooks/useWebSocket';
 
 const SettingsRow = ({ icon, label, value, valueColor, iconColor = '#818CF8' }) => (
@@ -55,6 +56,10 @@ const SettingsScreen = ({ navigation }) => {
           text: 'Sign Out',
           style: 'destructive',
           onPress: async () => {
+            const session = await getSession();
+            if (session?.token) {
+              deregisterPushToken(session.token, API_BASE.replace('/api', '')).catch(() => {});
+            }
             await clearSession();
             navigation.replace('Login');
           },

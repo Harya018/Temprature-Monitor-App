@@ -1,7 +1,10 @@
-.env.development
-.env.production
+.env
+.env.*
+*.env
 database/sentineledge.db
-logs/
+logs/*.log
+logs/*.log.*
+logs/*.gz
 venv/
 __pycache__/
 *.pyc
@@ -22,3 +25,8 @@ database/backups/
 clear_alerts.py
 *firebase-adminsdk*.json
 backend/secrets/
+*.pem
+*.key
+*.crt
+firebase-service-account.json
+*firebase-service-account*.json

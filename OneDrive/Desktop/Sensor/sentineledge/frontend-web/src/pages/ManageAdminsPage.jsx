@@ -6,6 +6,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import { Plus, Trash2, KeyRound, ShieldCheck, ShieldAlert, Eye, EyeOff, RefreshCw } from 'lucide-react'
 import ConfirmModal from '../components/shared/ConfirmModal'
+import { SkeletonTable } from '../components/Skeleton'
 
 function adminHeaders() {
   return {
@@ -187,7 +188,7 @@ export default function ManageAdminsPage() {
           <h3 className="text-sm font-semibold text-gray-800">All Admin Accounts</h3>
         </div>
         {loading ? (
-          <div className="p-8 text-center text-sm text-gray-400">Loading…</div>
+          <SkeletonTable />
         ) : admins.length === 0 ? (
           <div className="p-8 text-center text-sm text-gray-500">No admin accounts found</div>
         ) : (

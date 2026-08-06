@@ -46,23 +46,31 @@ def get_session(token: str) -> Optional[dict]:
     """
     Look up a valid (non-expired) session by token.
 
-    Also updates last_used_at = NOW() on successful lookup so we can
-    track active sessions in the admin dashboard.
-
+    Touches last_used_at so the admin sessions view stays fresh.
     Returns the session dict or None if not found / expired.
     """
     try:
+        # Read first — a pure SELECT is safe on any pool connection.
         rows = execute_read(
             """
-            UPDATE admin_sessions
-            SET    last_used_at = NOW()
-            WHERE  token = %s
-              AND  expires_at  > NOW()
-            RETURNING id, token, created_at, expires_at, last_used_at, admin_id
+            SELECT id, token, created_at, expires_at, last_used_at, admin_id
+              FROM admin_sessions
+             WHERE token = %s
+               AND expires_at > NOW()
             """,
             (token,),
         )
-        return rows[0] if rows else None
+        if not rows:
+            return None
+        # Fire-and-forget touch (execute_write commits).
+        try:
+            execute_write(
+                "UPDATE admin_sessions SET last_used_at = NOW() WHERE token = %s",
+                (token,),
+            )
+        except Exception as touch_exc:
+            logger.warning("get_session: last_used_at update failed: %s", touch_exc)
+        return rows[0]
     except Exception as exc:
         logger.error("get_session failed: %s", exc)
         return None

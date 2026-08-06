@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field, field_validator
 from typing import Optional
 
 import database
+import config as _cfg
 from config import ADMIN_PASSWORD, SMTP_USER
 from middleware.auth import require_admin
 from middleware.rate_limit import limiter
@@ -27,6 +28,7 @@ from modules.email.smtp import send_alert_email
 from utils.logger import get_logger
 from utils.time import now_iso
 from utils.activity_logger import log_activity
+from utils.rate_limiter import check_rate_limit, record_attempt, clear_failed_attempts, remaining_attempts
 
 logger = get_logger(__name__)
 
@@ -189,8 +191,9 @@ async def update_admin_profile(body: _ProfileUpdateIn, request: Request):
 # ─── Username + PIN Login (DB-backed sessions) ────────────────────────────────
 
 class _AdminLoginIn(BaseModel):
-    username: str = Field(min_length=1, max_length=50)
-    pin: str = Field(min_length=4, max_length=20)
+    username:  str = Field(min_length=1, max_length=50)
+    pin:       str = Field(min_length=4, max_length=20)
+    totp_code: str | None = None          # 6-digit TOTP; required when 2FA is enforced
 
     @field_validator("username", "pin", mode="before")
     @classmethod
@@ -217,6 +220,9 @@ async def admin_login(body: _AdminLoginIn, request: Request):
 
     username = body.username.strip().lower()
     pin      = body.pin.strip()
+    ip       = request.client.host if request.client else "unknown"
+
+    check_rate_limit(username, ip)  # Task 1: raise 429 if account+IP is locked
 
     # Validate against runtime ADMIN_USERNAME and ADMIN_PASSWORD
     from utils.security import verify_pin
@@ -224,20 +230,77 @@ async def admin_login(body: _AdminLoginIn, request: Request):
     valid = (username == stored_username and verify_pin(pin, _cfg.ADMIN_PASSWORD))
 
     if not valid:
+        record_attempt(username, ip, False)  # Task 1: log failed attempt
+        try:
+            from utils.audit_logger import audit
+            audit(action="login_failed", category="auth", ip_address=ip, severity="warning")
+        except Exception:
+            pass
         return JSONResponse(
             status_code=401,
-            content={"error": "InvalidCredentials", "message": "Invalid username or PIN"},
+            content={
+                "error": "InvalidCredentials",
+                "message": "Invalid username or PIN",
+                "remaining_attempts": remaining_attempts(username, ip),
+            },
         )
 
     actual_username = getattr(_cfg, "ADMIN_USERNAME", "admin")
+
+    # ── TOTP 2FA check (enforced company admins) ──────────────────────────────
+    # Looks up the admin row by username to check totp_secrets.
+    # Only blocks login when enabled=1 (enforced=1 and enabled=0 → setup pending, allow login).
+    try:
+        from database.connection import execute_read as _er
+        from utils.totp_helper import verify_code as _tc
+        _admin_rows = _er(
+            "SELECT id FROM admins WHERE name = %s LIMIT 1",
+            (actual_username,),
+        )
+        if _admin_rows:
+            _aid = _admin_rows[0]["id"]
+            _totp = _er(
+                "SELECT secret, enabled FROM totp_secrets WHERE admin_id = %s",
+                (_aid,),
+            )
+            if _totp and _totp[0]["enabled"]:
+                if not body.totp_code:
+                    return JSONResponse(
+                        status_code=403,
+                        content={
+                            "error":        "TotpRequired",
+                            "requires_2fa": True,
+                            "message":      "Enter your 6-digit authenticator code",
+                        },
+                    )
+                if not _tc(_totp[0]["secret"], body.totp_code):
+                    return JSONResponse(
+                        status_code=401,
+                        content={
+                            "error":        "TotpInvalid",
+                            "requires_2fa": True,
+                            "message":      "Invalid or expired TOTP code",
+                        },
+                    )
+    except Exception as _totp_exc:
+        logger.warning("admin.py TOTP check failed (non-fatal): %s", _totp_exc)
+
     token = secrets.token_hex(32)   # 64-char hex
     expires_at = datetime.now(timezone.utc) + timedelta(hours=8)
 
     # Persist session in PostgreSQL (survives server restarts)
     database.create_session(token, expires_at)
 
-    # Update last_login tracking and write activity log
-    client_ip = request.client.host if request.client else "unknown"
+    clear_failed_attempts(username, ip)  # Task 1: clear failures on success
+    record_attempt(username, ip, True)   # Task 1: log successful attempt
+    try:
+        from utils.audit_logger import audit
+        audit(action="login_success", category="auth", ip_address=ip, severity="info")
+    except Exception:
+        pass
+
+    # Update last_login tracking, link session to admin_id, write activity log
+    client_ip = ip
     try:
         from database.connection import execute_read, execute_write
         admin_rows = execute_read("SELECT id, company_id FROM admins WHERE name = %s LIMIT 1", (actual_username,))
@@ -246,6 +309,22 @@ async def admin_login(body: _AdminLoginIn, request: Request):
             execute_write(
                 "UPDATE admins SET last_login_at = NOW(), last_login_ip = %s WHERE id = %s",
                 (client_ip, _aid),
+            )
+            # Task 2C: link session to admin_id + prune to 3 concurrent sessions
+            execute_write(
+                "UPDATE admin_sessions SET admin_id = %s WHERE token = %s",
+                (_aid, token),
+            )
+            execute_write(
+                """DELETE FROM admin_sessions
+                    WHERE admin_id = %s
+                      AND token NOT IN (
+                          SELECT token FROM admin_sessions
+                           WHERE admin_id = %s
+                           ORDER BY created_at DESC
+                           LIMIT 3
+                      )""",
+                (_aid, _aid),
             )
             log_activity(_aid, "login", "admin", f"ip:{client_ip}", admin_rows[0].get("company_id"))
     except Exception as _exc:
@@ -626,6 +705,123 @@ async def test_email(body: _TestEmailIn):
 class _TestSmsIn(BaseModel):
     phone:   str
     message: Optional[str] = None
+
+
+@router.get(
+    "/admin/me",
+    summary="Current admin identity",
+    description="Returns the authenticated admin's id, name, role, and company_id. Requires admin auth.",
+    dependencies=[Depends(require_admin)],
+)
+async def get_me(request: Request):
+    from database.connection import execute_read
+    auth = request.headers.get("authorization", "")
+    if auth.startswith("Bearer "):
+        token = auth[7:].strip()
+        rows = execute_read(
+            """SELECT a.id, a.name, a.role, a.company_id
+                 FROM admins a
+                 JOIN admin_sessions s ON s.admin_id = a.id
+                WHERE s.token = %s AND s.expires_at > NOW() LIMIT 1""",
+            (token,),
+        )
+        if rows:
+            return rows[0]
+    return JSONResponse(status_code=401, content={"error": "Not authenticated"})
+
+
+@router.get(
+    "/admin/parameters",
+    summary="Active parameters for this admin's company",
+    description="Returns all active company_parameters scoped to the authenticated admin's company. Requires admin auth.",
+    dependencies=[Depends(require_admin)],
+)
+async def get_admin_parameters(request: Request):
+    from database.connection import execute_read
+    auth = request.headers.get("authorization", "")
+    company_id = None
+    if auth.startswith("Bearer "):
+        token = auth[7:].strip()
+        rows = execute_read(
+            """SELECT a.company_id FROM admins a
+                 JOIN admin_sessions s ON s.admin_id = a.id
+                WHERE s.token = %s AND s.expires_at > NOW() LIMIT 1""",
+            (token,),
+        )
+        if rows:
+            company_id = rows[0].get("company_id")
+    if not company_id:
+        return []
+    params = execute_read(
+        """SELECT id, company_id, name, unit, min_value, max_value, is_active,
+                  created_at, updated_at
+             FROM company_parameters
+            WHERE company_id = %s AND is_active = TRUE
+            ORDER BY name""",
+        (company_id,),
+    )
+    for r in params:
+        for ts in ("created_at", "updated_at"):
+            if r.get(ts) and hasattr(r[ts], "isoformat"):
+                r[ts] = r[ts].isoformat()
+    return params
+
+
+class _ParamRequestIn(BaseModel):
+    name:      str = Field(min_length=1, max_length=100)
+    unit:      str = Field(min_length=1, max_length=50)
+    min_value: Optional[float] = None
+    max_value: Optional[float] = None
+
+
+@router.post(
+    "/admin/parameters",
+    status_code=201,
+    summary="Request a new company parameter (pending super admin approval)",
+    dependencies=[Depends(require_admin)],
+)
+async def request_admin_parameter(body: _ParamRequestIn, request: Request):
+    from database.connection import execute_read, execute_write
+    import json as _json
+
+    auth = request.headers.get("authorization", "")
+    admin_info = None
+    if auth.startswith("Bearer "):
+        token = auth[7:].strip()
+        rows = execute_read(
+            """SELECT a.id, a.company_id FROM admins a
+                 JOIN admin_sessions s ON s.admin_id = a.id
+                WHERE s.token = %s AND s.expires_at > NOW() LIMIT 1""",
+            (token,),
+        )
+        if rows:
+            admin_info = rows[0]
+
+    if not admin_info or not admin_info.get("company_id"):
+        return JSONResponse(status_code=401, content={"error": "Cannot determine admin identity from token"})
+
+    admin_id   = admin_info["id"]
+    company_id = admin_info["company_id"]
+
+    payload = {
+        "company_id": company_id,
+        "name":       body.name,
+        "unit":       body.unit,
+        "min_value":  body.min_value,
+        "max_value":  body.max_value,
+    }
+    execute_write(
+        """INSERT INTO pending_approvals (admin_id, action_type, payload)
+           VALUES (%s, 'add_parameter', %s)""",
+        (admin_id, _json.dumps(payload)),
+    )
+    log_activity(
+        admin_id, "parameter_requested", "company_parameters",
+        f"company_id:{company_id} name:{body.name}",
+        company_id,
+    )
+    logger.info("Admin %d requested add_parameter '%s' for company %d", admin_id, body.name, company_id)
+    return {"status": "pending", "message": f"Parameter '{body.name}' submitted for super admin approval."}
 
 
 @router.post(

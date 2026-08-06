@@ -351,3 +351,171 @@ async def delete_company_config(
         company_id,
     )
     return {"deleted": True, "company_id": company_id, "field": field}
+
+
+# ─── Company Parameters ───────────────────────────────────────────────────────
+
+class _ParamIn(BaseModel):
+    company_id: int
+    name: str        = Field(min_length=1, max_length=100)
+    unit: Optional[str] = Field(default=None, max_length=50)
+    min_value: Optional[float] = None
+    max_value: Optional[float] = None
+    reason: Optional[str] = Field(default=None, max_length=500)
+
+    @field_validator("name", mode="before")
+    @classmethod
+    def strip_name(cls, v):
+        return v.strip() if isinstance(v, str) else v
+
+
+class _ParamUpdateIn(BaseModel):
+    unit: Optional[str] = Field(default=None, max_length=50)
+    min_value: Optional[float] = None
+    max_value: Optional[float] = None
+    is_active: Optional[bool] = None
+
+
+def _serialize_param(r: dict) -> dict:
+    for ts in ("created_at", "updated_at"):
+        if r.get(ts) and hasattr(r[ts], "isoformat"):
+            r[ts] = r[ts].isoformat()
+    return r
+
+
+@router.get("/parameters", summary="List active parameters for a company")
+async def list_parameters(
+    company_id: int,
+    _: dict = Depends(require_super_admin),
+):
+    rows = execute_read(
+        """
+        SELECT id, company_id, name, unit, min_value, max_value, is_active,
+               created_at, updated_at
+          FROM company_parameters
+         WHERE company_id = %s AND is_active = TRUE
+         ORDER BY name
+        """,
+        (company_id,),
+    )
+    return [_serialize_param(r) for r in rows]
+
+
+@router.get("/parameters/{param_id}", summary="Get a single company parameter")
+async def get_parameter(
+    param_id: int,
+    _: dict = Depends(require_super_admin),
+):
+    rows = execute_read(
+        """
+        SELECT id, company_id, name, unit, min_value, max_value, is_active,
+               created_at, updated_at
+          FROM company_parameters WHERE id = %s
+        """,
+        (param_id,),
+    )
+    if not rows:
+        return JSONResponse(status_code=404, content={"error": "Parameter not found"})
+    return _serialize_param(rows[0])
+
+
+@router.post("/parameters", status_code=201, summary="Request a new company parameter (creates approval)")
+async def request_parameter(
+    body: _ParamIn,
+    sa: dict = Depends(require_super_admin),
+):
+    cos = execute_read("SELECT id FROM companies WHERE id = %s", (body.company_id,))
+    if not cos:
+        return JSONResponse(status_code=404, content={"error": "Company not found"})
+
+    import json as _json
+    payload = {
+        "company_id": body.company_id,
+        "name":       body.name,
+        "unit":       body.unit,
+        "min_value":  body.min_value,
+        "max_value":  body.max_value,
+    }
+    result = execute_write(
+        """
+        INSERT INTO pending_approvals (admin_id, action_type, payload)
+        VALUES (%s, 'add_parameter', %s) RETURNING id
+        """,
+        (sa["id"], _json.dumps(payload)),
+    )
+    log_activity(
+        sa["id"], "parameter_requested", "company_parameters",
+        f"company_id:{body.company_id} name:{body.name}",
+        body.company_id,
+    )
+    logger.info(
+        "Super admin %d requested add_parameter '%s' for company %d — approval #%s",
+        sa["id"], body.name, body.company_id, result.lastrowid,
+    )
+    return {
+        "status":      "pending",
+        "approval_id": result.lastrowid,
+        "action_type": "add_parameter",
+        "payload":     payload,
+    }
+
+
+@router.patch("/parameters/{param_id}", summary="Update a company parameter (direct, no approval)")
+async def update_parameter(
+    param_id: int,
+    body: _ParamUpdateIn,
+    sa: dict = Depends(require_super_admin),
+):
+    rows = execute_read(
+        "SELECT id, company_id, name FROM company_parameters WHERE id = %s", (param_id,)
+    )
+    if not rows:
+        return JSONResponse(status_code=404, content={"error": "Parameter not found"})
+
+    sets, params = [], []
+    if body.unit is not None:
+        sets.append("unit = %s"); params.append(body.unit)
+    if body.min_value is not None:
+        sets.append("min_value = %s"); params.append(body.min_value)
+    if body.max_value is not None:
+        sets.append("max_value = %s"); params.append(body.max_value)
+    if body.is_active is not None:
+        sets.append("is_active = %s"); params.append(body.is_active)
+    if not sets:
+        return JSONResponse(status_code=422, content={"error": "No fields to update"})
+
+    sets.append("updated_at = NOW()")
+    params.append(param_id)
+    execute_write(
+        f"UPDATE company_parameters SET {', '.join(sets)} WHERE id = %s",
+        tuple(params),
+    )
+    log_activity(
+        sa["id"], "parameter_updated", "company_parameters",
+        f"param_id:{param_id} name:{rows[0]['name']}",
+        rows[0]["company_id"],
+    )
+    return {"status": "updated", "param_id": param_id}
+
+
+@router.delete("/parameters/{param_id}", summary="Soft-delete a company parameter")
+async def delete_parameter(
+    param_id: int,
+    sa: dict = Depends(require_super_admin),
+):
+    rows = execute_read(
+        "SELECT id, company_id, name FROM company_parameters WHERE id = %s", (param_id,)
+    )
+    if not rows:
+        return JSONResponse(status_code=404, content={"error": "Parameter not found"})
+
+    execute_write(
+        "UPDATE company_parameters SET is_active = FALSE, updated_at = NOW() WHERE id = %s",
+        (param_id,),
+    )
+    log_activity(
+        sa["id"], "parameter_deleted", "company_parameters",
+        f"param_id:{param_id} name:{rows[0]['name']}",
+        rows[0]["company_id"],
+    )
+    return {"status": "deleted", "param_id": param_id}

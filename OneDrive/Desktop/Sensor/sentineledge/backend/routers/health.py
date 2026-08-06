@@ -5,9 +5,21 @@ Returns status, timestamp, uptime_seconds, and a modules dict.
 No credential values (passwords, usernames, etc.) are ever included.
 
 Rate limiting (slowapi): 120/minute per IP (mobile app polls frequently).
+
+SMS modem probe:
+    A background thread probes the SIM7600 serial port every 30 seconds and
+    caches the result.  /api/health reads from the cache — it never blocks
+    on serial I/O.  Possible cached values:
+
+        "live"          — modem found AND responded to AT with OK
+        "not_connected" — no SIM7600-like port found on any COM port
+        "error"         — port found but did not respond to AT command
+        "unknown"       — probe has not run yet (startup grace period)
 """
 
 import logging
+import threading
+import time
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Request
@@ -25,6 +37,164 @@ _START_TIME = datetime.now(timezone.utc)
 # Last sensor reading — updated by main.py WebSocket handler
 last_reading: dict = {}
 
+
+# ── SMS modem probe cache ──────────────────────────────────────────────────────
+
+_sms_probe_lock   = threading.Lock()
+_sms_probe_result = "unknown"   # "live" | "not_connected" | "error" | "unknown"
+_sms_probe_ts     = 0.0         # epoch seconds of last completed probe
+
+# Shared flag: sim7600_sender sets this True while a send is in progress so
+# the probe skips that cycle (avoids opening the port concurrently).
+# Imported lazily to avoid circular-import at module load.
+_SMS_IS_SENDING_ATTR = "_gsm_send_in_progress"   # attribute name on the sender module
+
+
+def _is_sms_sending() -> bool:
+    """Return True if the GSM sender is currently holding the serial port."""
+    try:
+        import modules.sms.sim7600_sender as _s  # type: ignore
+        return bool(getattr(_s, _SMS_IS_SENDING_ATTR, False))
+    except Exception:
+        return False
+
+
+def _run_sms_probe() -> str:
+    """
+    Probe the SIM7600 modem once.
+
+    Steps:
+      1. Scan COM ports for SIM7600 keywords.
+      2. For each candidate, open at 115200 baud, send b"AT\\r\\n",
+         wait up to 3 seconds for "OK", close port immediately.
+      3. Return "live" on first successful probe, "not_connected" if no
+         candidates found, or "error" if candidates exist but none respond.
+
+    Never raises.
+    """
+    try:
+        import serial          # type: ignore
+        import serial.tools.list_ports  # type: ignore
+    except ImportError:
+        return "not_connected"
+
+    _SIM76XX_KW = ("sim7600", "sim76", "simcom", "qualcomm hs-usb", "at command")
+
+    try:
+        ports = list(serial.tools.list_ports.comports())
+    except Exception:
+        return "not_connected"
+
+    candidates = [
+        p for p in ports
+        if any(kw in (p.description or "").lower() or
+               kw in (getattr(p, "manufacturer", None) or "").lower()
+               for kw in _SIM76XX_KW)
+    ]
+
+    baud = getattr(config, "SMS_SIM7600_BAUD", 115200)
+
+    if not candidates:
+        # Brute-force: driver may use generic description ("USB Serial Device").
+        # Probe all non-sensor ports with AT — accept the first that replies "OK".
+        _SENSOR_KW = ("ch340", "cp210", "ft232", "arduino", "ftdi", "prolific",
+                      "silicon labs", "audio", "microphone", "headset")
+        for p in sorted(ports, key=lambda p: p.device):
+            desc = (p.description or "").lower()
+            if any(kw in desc for kw in _SENSOR_KW):
+                continue
+            ser = None
+            try:
+                ser = serial.Serial(port=p.device, baudrate=baud,
+                                    timeout=1.5, write_timeout=1.5)
+                ser.reset_input_buffer()
+                ser.write(b"AT\r\n")
+                deadline = time.monotonic() + 1.5
+                response = ""
+                while time.monotonic() < deadline:
+                    time.sleep(0.05)
+                    chunk = ser.read(ser.in_waiting or 32).decode("utf-8", errors="replace")
+                    if chunk:
+                        response += chunk
+                    if "OK" in response:
+                        return "live"
+            except Exception:
+                pass
+            finally:
+                if ser is not None:
+                    try:
+                        ser.close()
+                    except Exception:
+                        pass
+        return "not_connected"
+
+    # Sort: prefer "at command" or "at" in description
+    def _rank(p):
+        d = (p.description or "").lower()
+        if "at command" in d:
+            return 0
+        if " at " in d or d.startswith("at ") or d.endswith(" at"):
+            return 1
+        return 2
+    candidates.sort(key=_rank)
+
+    for p in candidates:
+        ser = None
+        try:
+            ser = serial.Serial(port=p.device, baudrate=baud,
+                                timeout=3.0, write_timeout=3.0)
+            ser.reset_input_buffer()
+            ser.write(b"AT\r\n")
+            deadline = time.monotonic() + 3.0
+            response = ""
+            while time.monotonic() < deadline:
+                time.sleep(0.05)
+                chunk = ser.read(ser.in_waiting or 32).decode("utf-8", errors="replace")
+                if chunk:
+                    response += chunk
+                if "OK" in response:
+                    return "live"
+        except Exception:
+            pass
+        finally:
+            if ser is not None:
+                try:
+                    ser.close()
+                except Exception:
+                    pass
+
+    return "error"
+
+
+def _sms_probe_loop() -> None:
+    """Background thread: probe SIM7600 on startup then every 30 seconds."""
+    global _sms_probe_result, _sms_probe_ts
+
+    # First probe runs immediately (no initial delay)
+    while True:
+        if not _is_sms_sending():
+            result = _run_sms_probe()
+            with _sms_probe_lock:
+                _sms_probe_result = result
+                _sms_probe_ts     = time.monotonic()
+            logger.debug("SMS modem probe result: %s", result)
+        else:
+            logger.debug("SMS modem probe skipped — send in progress")
+
+        time.sleep(30)
+
+
+# Start background probe thread at module import time.
+# daemon=True ensures it doesn't block server shutdown.
+_sms_probe_thread = threading.Thread(
+    target=_sms_probe_loop,
+    daemon=True,
+    name="sms-modem-probe",
+)
+_sms_probe_thread.start()
+
+
+# ── Status helpers ─────────────────────────────────────────────────────────────
 
 def _overall_status() -> str:
     """
@@ -64,14 +234,24 @@ def _probe_email() -> str:
 
 
 def _probe_sms() -> str:
-    """Map SMS_METHOD to a human-readable status string."""
+    """
+    Return the cached SIM7600 modem probe result for sim7600 SMS method.
+
+    For other SMS methods, return a descriptive static string (unchanged
+    from the original behaviour so non-sim7600 setups are unaffected).
+    """
     method = (config.SMS_METHOD or "").lower().strip()
+
+    if method == "sim7600":
+        with _sms_probe_lock:
+            return _sms_probe_result     # "live" | "not_connected" | "error" | "unknown"
+
     if method == "gammu":
-        return "configured"          # USB GSM dongle (production path)
+        return "configured"             # USB GSM dongle (non-SIM7600 path)
     if method == "adb":
-        return "adb mode"            # Android phone via USB
+        return "adb mode"
     if method == "gateway":
-        return "gateway mode"        # Android SMS Gateway REST API
+        return "gateway mode"
     return "not configured"
 
 
@@ -86,8 +266,12 @@ def _probe_websocket() -> str:
 
 
 def _probe_sensor() -> str:
-    """Return 'demo mode' or 'live' based on DEMO_MODE flag — no hardware ping."""
-    return "demo mode" if config.DEMO_MODE else "live"
+    """Return 'live' or 'csv fallback' based on actual AdaptiveSensorReader state."""
+    try:
+        from core.sensor import player
+        return "live" if player.is_live else "csv fallback"
+    except Exception:
+        return "unknown"
 
 
 @router.get("/health")

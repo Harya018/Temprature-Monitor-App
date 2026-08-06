@@ -4,8 +4,9 @@
  */
 import { useState, useEffect } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
-import { Bell, WifiOff, Monitor } from 'lucide-react'
+import { Bell, WifiOff, Monitor, Sun, Moon } from 'lucide-react'
 import { nowIST } from '../../utils/time.js'
+import { useTheme } from '../../hooks/useTheme.js'
 
 const TITLES = {
   '/dashboard':   'Dashboard',
@@ -25,6 +26,7 @@ export default function Header({ connectionStatus, unreadCount }) {
   const [time, setTime] = useState(nowIST())
   const location = useLocation()
   const navigate = useNavigate()
+  const { isDark, toggle: toggleTheme } = useTheme()
 
   useEffect(() => {
     const t = setInterval(() => setTime(nowIST()), 1000)
@@ -71,6 +73,15 @@ export default function Header({ connectionStatus, unreadCount }) {
 
         {/* IST clock */}
         <span className="text-xs font-mono text-gray-400 hidden sm:block">IST {time}</span>
+
+        {/* Dark mode toggle */}
+        <button
+          onClick={toggleTheme}
+          className="p-2 rounded-lg hover:bg-gray-100 transition-colors text-gray-500"
+          title={isDark ? 'Switch to light mode' : 'Switch to dark mode'}
+        >
+          {isDark ? <Sun size={17} /> : <Moon size={17} />}
+        </button>
 
         {/* Monitor mode link */}
         <button

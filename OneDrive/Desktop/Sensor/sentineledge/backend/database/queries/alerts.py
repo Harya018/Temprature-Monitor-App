@@ -16,6 +16,15 @@ import psycopg2.extras
 logger = get_logger(__name__)
 
 
+def _default_company_id() -> Optional[int]:
+    """Return the id of the first company (any status), or None if no companies exist."""
+    try:
+        rows = execute_read("SELECT id FROM companies ORDER BY id LIMIT 1")
+        return rows[0]["id"] if rows else None
+    except Exception:
+        return None
+
+
 def insert_alert(
     parameter: str,
     value: float,
@@ -23,19 +32,24 @@ def insert_alert(
     direction: str,
     cooldown_until: str,
     severity: str = "WARNING",
+    company_id: Optional[int] = None,
 ) -> int:
     """Insert a new alert and return its row id."""
     try:
+        if company_id is None:
+            company_id = _default_company_id()
         ts = datetime.now(timezone.utc).isoformat()
         cur = execute_write(
             """
             INSERT INTO alerts
                 (parameter, value, threshold, direction, severity, timestamp,
-                 acknowledged, escalation_level, max_escalated, cooldown_until)
-            VALUES (%s, %s, %s, %s, %s, %s, 0, 1, 0, %s)
+                 acknowledged, escalation_level, max_escalated, cooldown_until,
+                 company_id)
+            VALUES (%s, %s, %s, %s, %s, %s, 0, 1, 0, %s, %s)
             RETURNING id
             """,
-            (parameter, value, threshold, direction, severity, ts, cooldown_until),
+            (parameter, value, threshold, direction, severity, ts, cooldown_until,
+             company_id),
         )
         return cur.lastrowid or -1
     except Exception as exc:
@@ -107,11 +121,11 @@ def set_max_escalated(alert_id: int) -> bool:
         return False
 
 
-def get_recent_alerts(limit: int = 50) -> list:
-    """Return the most recent `limit` alerts, newest first."""
+def get_recent_alerts(limit: int = 50, offset: int = 0) -> list:
+    """Return the most recent `limit` alerts, newest first, starting at `offset`."""
     try:
         return execute_read(
-            "SELECT * FROM alerts ORDER BY id DESC LIMIT %s", (limit,)
+            "SELECT * FROM alerts ORDER BY id DESC LIMIT %s OFFSET %s", (limit, offset)
         )
     except Exception as exc:
         logger.error("get_recent_alerts failed: %s", exc)

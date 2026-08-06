@@ -20,6 +20,8 @@ import {
 } from '../services/api.js'
 import Modal from '../components/shared/Modal.jsx'
 import PasswordConfirmModal from '../components/PasswordConfirmModal.jsx'
+import ErrorState from '../components/ErrorState'
+import EmptyState from '../components/EmptyState'
 
 // ── Constants ──────────────────────────────────────────────────────────────────
 const PAGE_SIZE = 6
@@ -62,6 +64,7 @@ const avatarColor = (idx) => AVATAR_COLORS[idx % AVATAR_COLORS.length]
 export default function SubscribersPage() {
   const [subs,       setSubs]       = useState([])
   const [loading,    setLoading]    = useState(false)
+  const [fetchError, setFetchError] = useState(null)
   const [showForm,   setShowForm]   = useState(false)
   const [form,       setForm]       = useState(EMPTY_FORM)
   const [errors,     setErrors]     = useState(EMPTY_ERRORS)
@@ -88,8 +91,9 @@ export default function SubscribersPage() {
   // ── Load ────────────────────────────────────────────────────────────────────
   const load = useCallback(async () => {
     setLoading(true)
+    setFetchError(null)
     try { setSubs(await fetchSubscribers()) }
-    catch { /* silent */ }
+    catch (err) { setFetchError(err?.message || 'Could not load subscribers') }
     finally { setLoading(false) }
   }, [])
 
@@ -346,13 +350,17 @@ export default function SubscribersPage() {
       )}
 
       {/* ── Subscriber cards ─────────────────────────────────────────────────── */}
-      {loading && subs.length === 0 ? (
+      {fetchError && !loading ? (
+        <ErrorState message={fetchError} onRetry={load} />
+      ) : loading && subs.length === 0 ? (
         <div className="text-center py-12 text-gray-400">Loading…</div>
       ) : subs.length === 0 ? (
-        <div className="card p-12 flex flex-col items-center gap-3 text-center text-gray-400">
-          <Users size={36} className="text-gray-300" />
-          <p className="font-medium text-gray-500">No subscribers configured</p>
-          <p className="text-xs">Add a subscriber to receive breach alerts</p>
+        <div className="card">
+          <EmptyState
+            icon={Users}
+            title="No subscribers configured"
+            description="Add a subscriber to receive breach alerts"
+          />
         </div>
       ) : (
         <>

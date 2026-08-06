@@ -7,6 +7,8 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { RefreshCw, CheckCircle2, Clock, User } from 'lucide-react'
 import { fetchAckLog } from '../services/api.js'
+import { SkeletonTable } from '../components/Skeleton'
+import ErrorState from '../components/ErrorState'
 
 // ── Time helpers ──────────────────────────────────────────────────────────────
 const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000
@@ -54,17 +56,20 @@ function fmtResponseTime(secs) {
 export default function AckLogPage({ wsData }) {
   const [rows,       setRows]       = useState([])
   const [loading,    setLoading]    = useState(true)
+  const [fetchError, setFetchError] = useState(null)
   const [lastUpdate, setLastUpdate] = useState(null)
   const rowsRef = useRef(rows)
   rowsRef.current = rows
 
   const load = useCallback(async () => {
+    setFetchError(null)
     try {
       const data = await fetchAckLog(200)
       setRows(data)
       setLastUpdate(new Date())
     } catch (err) {
       console.warn('[AckLog] fetch failed:', err)
+      setFetchError(err?.message || 'Could not load acknowledgement log')
     } finally {
       setLoading(false)
     }
@@ -147,8 +152,10 @@ export default function AckLogPage({ wsData }) {
           <h3 className="text-sm font-semibold text-gray-800">All Acknowledgements</h3>
         </div>
 
-        {loading ? (
-          <div className="p-12 text-center text-gray-400 text-sm">Loading…</div>
+        {fetchError && !loading ? (
+          <ErrorState message={fetchError} onRetry={load} />
+        ) : loading ? (
+          <SkeletonTable />
         ) : rows.length === 0 ? (
           <div className="p-12 text-center">
             <CheckCircle2 size={40} className="mx-auto mb-3 text-gray-200" />

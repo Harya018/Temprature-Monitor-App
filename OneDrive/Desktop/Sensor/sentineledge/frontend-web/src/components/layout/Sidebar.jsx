@@ -8,6 +8,7 @@ import {
   LayoutDashboard, Bell, Terminal, Archive, BarChart2,
   Receipt, Monitor, Users, Settings, Activity,
   ClipboardList, Thermometer, LogOut, CheckCheck, UserCircle2, ShieldCheck, UserRoundSearch,
+  TrendingUp,
 } from 'lucide-react'
 
 
@@ -17,6 +18,7 @@ const NAV = [
   { to: '/logs',        icon: Terminal,        label: 'Live Logs'     },
   { to: '/history',     icon: Archive,         label: 'History'       },
   { to: '/reports',     icon: BarChart2,       label: 'Reports'       },
+  { to: '/analytics',   icon: TrendingUp,      label: 'Analytics'     },
   { to: '/receipts',    icon: Receipt,         label: 'Receipts'      },
   { to: '/monitor',     icon: Monitor,         label: 'Monitor'       },
   { to: '/subscribers', icon: Users,            label: 'Subscribers',       end: true  },
@@ -38,7 +40,7 @@ export default function Sidebar({ unreadCount }) {
   }
 
   return (
-    <aside className="sidebar" style={{ overflowY: 'auto' }}>
+    <aside className="sidebar">
       {/* Logo */}
       <div className="px-4 py-4 border-b border-white/10 flex-shrink-0">
         <div className="flex items-center gap-3">
@@ -54,7 +56,7 @@ export default function Sidebar({ unreadCount }) {
       </div>
 
       {/* Nav */}
-      <nav className="flex-1 py-3 space-y-0.5 px-2">
+      <nav className="flex-1 py-3 space-y-0.5 px-2" style={{ overflowY: 'auto', minHeight: 0 }}>
         {NAV.map(({ to, icon: Icon, label, end: endMatch }) => (
           <NavLink
             key={to}

@@ -13,6 +13,12 @@ trusting an intermediary to pass it through.
 Mirrors modules/mobilepush/expo_push.py's shape: sync send_*() + async
 wrapper via run_in_executor, never raises, returns bool. Firebase Admin SDK
 is initialized lazily (once) on first use.
+
+NotRegistered cleanup (added):
+  When FCM returns an UNREGISTERED / NotRegistered error after all retry
+  attempts, the stale token is automatically cleared from the database via
+  the database.clear_fcm_token() helper.  Pass subscriber_id to enable this
+  behaviour; omit it (or pass None) to skip DB cleanup (backward-compatible).
 """
 
 import asyncio
@@ -22,6 +28,7 @@ from typing import Optional
 
 import firebase_admin
 from firebase_admin import credentials, messaging as fcm_messaging
+from firebase_admin.exceptions import FirebaseError
 
 from config import FCM_SERVICE_ACCOUNT_PATH
 
@@ -55,8 +62,34 @@ def _get_app() -> Optional[firebase_admin.App]:
 
 _RETRY_ATTEMPTS = 2  # one retry — covers "slow" without masking "unreachable"
 
+# FCM error codes that mean the token is permanently dead and should be purged.
+_NOT_REGISTERED_CODES = frozenset({
+    "registration-token-not-registered",  # firebase-admin Python SDK code
+    "UNREGISTERED",                        # FCM HTTP v1 error code
+})
 
-def send_fcm_direct(fcm_token: str, data: dict) -> bool:
+
+def _is_not_registered(exc: Exception) -> bool:
+    """Return True when *exc* indicates a permanently-invalid FCM token."""
+    # firebase_admin raises FirebaseError subclasses with a .code attribute.
+    code = getattr(exc, "code", "") or ""
+    cause = getattr(exc, "cause", None)
+    cause_code = getattr(cause, "code", "") or "" if cause else ""
+    msg = str(exc).lower()
+    return (
+        code in _NOT_REGISTERED_CODES
+        or cause_code in _NOT_REGISTERED_CODES
+        or "notregistered" in msg
+        or "not_registered" in msg
+        or "unregistered" in msg
+    )
+
+
+def send_fcm_direct(
+    fcm_token: str,
+    data: dict,
+    subscriber_id: Optional[int] = None,
+) -> bool:
     """
     Send a data-only, high-priority FCM message directly to a device.
 
@@ -65,6 +98,13 @@ def send_fcm_direct(fcm_token: str, data: dict) -> bool:
     (logs the error). Never raises. Retries once on failure — a slow-but-
     present connection (e.g. a weak hotspot) can plausibly take longer than
     a single attempt's default transport timeout to complete.
+
+    Args:
+        fcm_token:     Raw FCM registration token for the target device.
+        data:          Key-value payload (values coerced to str).
+        subscriber_id: When provided, a NotRegistered response after all
+                       retries will automatically clear the token from the
+                       subscribers table and log the invalidation.
     """
     if not fcm_token:
         logger.warning("send_fcm_direct: no FCM token — skipped.")
@@ -84,6 +124,8 @@ def send_fcm_direct(fcm_token: str, data: dict) -> bool:
     )
 
     last_exc: Optional[Exception] = None
+    not_registered_detected = False
+
     for attempt in range(1, _RETRY_ATTEMPTS + 1):
         try:
             message_id = fcm_messaging.send(message, app=app)
@@ -91,6 +133,14 @@ def send_fcm_direct(fcm_token: str, data: dict) -> bool:
             return True
         except Exception as exc:
             last_exc = exc
+            if _is_not_registered(exc):
+                not_registered_detected = True
+                logger.warning(
+                    "Direct FCM attempt %d/%d — NotRegistered for subscriber %s: %s",
+                    attempt, _RETRY_ATTEMPTS, subscriber_id, exc,
+                )
+                # NotRegistered is permanent — retrying is pointless.
+                break
             logger.warning(
                 "Direct FCM attempt %d/%d failed: %s", attempt, _RETRY_ATTEMPTS, exc,
             )
@@ -98,10 +148,35 @@ def send_fcm_direct(fcm_token: str, data: dict) -> bool:
                 time.sleep(1)
 
     logger.error("Direct FCM push failed after %d attempts: %s", _RETRY_ATTEMPTS, last_exc)
+
+    # ── Auto-cleanup: purge stale token from DB ────────────────────────────────
+    if not_registered_detected and subscriber_id is not None:
+        try:
+            import database  # local import avoids circular dependency at module load
+            database.clear_fcm_token(subscriber_id)
+            # Fetch name for a more informative log line
+            sub = database.get_subscriber_by_id(subscriber_id)
+            sub_name = sub["name"] if sub else "unknown"
+            logger.info(
+                "FCM token invalidated for subscriber %d (%s) — token removed from DB",
+                subscriber_id, sub_name,
+            )
+        except Exception as db_exc:
+            logger.error(
+                "Failed to clear FCM token for subscriber %d: %s", subscriber_id, db_exc
+            )
+
+
     return False
 
 
-async def send_fcm_direct_async(fcm_token: str, data: dict) -> bool:
+async def send_fcm_direct_async(
+    fcm_token: str,
+    data: dict,
+    subscriber_id: Optional[int] = None,
+) -> bool:
     """Async wrapper around send_fcm_direct() using a thread-pool executor."""
     loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(None, send_fcm_direct, fcm_token, data)
+    return await loop.run_in_executor(
+        None, send_fcm_direct, fcm_token, data, subscriber_id
+    )

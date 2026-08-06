@@ -35,6 +35,31 @@ const SPEED_OPTIONS = [
   { value: 50, label: '50x faster', desc: '~3 min per cycle' },
 ]
 
+function Section({ title, icon: Icon, children }) {
+  return (
+    <div className="card">
+      <div className="flex items-center gap-2.5 px-5 py-4 border-b border-gray-100">
+        <div className="w-8 h-8 rounded-lg bg-purple-100 flex items-center justify-center">
+          <Icon size={15} className="text-purple-600" />
+        </div>
+        <h3 className="text-sm font-semibold text-gray-800">{title}</h3>
+      </div>
+      <div className="p-5">{children}</div>
+    </div>
+  )
+}
+
+function StatusMsg({ msg }) {
+  if (!msg) return null
+  return (
+    <p className={`text-xs rounded-lg px-3 py-2 ${
+      msg.type === 'success' ? 'text-emerald-700 bg-emerald-50' :
+      msg.type === 'info'    ? 'text-blue-700 bg-blue-50' :
+                               'text-red-700 bg-red-50'
+    }`}>{msg.text}</p>
+  )
+}
+
 export default function SettingsPage() {
   const { toasts, addToast, dismiss } = useToast()
 
@@ -67,6 +92,7 @@ export default function SettingsPage() {
   const [paramMin, setParamMin] = useState('')
   const [paramMax, setParamMax] = useState('')
   const [paramSaved, setParamSaved] = useState(false)
+  const [paramSubmitting, setParamSubmitting] = useState(false)
 
   const [pwdAction, setPwdAction] = useState(null)
   const [pwdError, setPwdError] = useState(null)
@@ -253,26 +279,43 @@ export default function SettingsPage() {
     } finally { setTestingSms(false) }
   }
 
+  const handleSaveParam = async () => {
+    if (!paramName.trim() || !paramUnit.trim()) {
+      addToast({ type: 'warning', message: 'Parameter Name and Unit are required.' })
+      return
+    }
+    setParamSubmitting(true)
+    try {
+      const token = sessionStorage.getItem('admin_token')
+      const res = await fetch('/api/admin/parameters', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({
+          name:      paramName.trim(),
+          unit:      paramUnit.trim(),
+          min_value: paramMin !== '' ? Number(paramMin) : null,
+          max_value: paramMax !== '' ? Number(paramMax) : null,
+        }),
+      })
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}))
+        throw new Error(err.error || `Server error ${res.status}`)
+      }
+      addToast({ type: 'success', message: `"${paramName}" submitted for super admin approval.` })
+      setParamSaved(true)
+      setParamName(''); setParamUnit(''); setParamMin(''); setParamMax('')
+      setTimeout(() => setParamSaved(false), 3000)
+    } catch (err) {
+      addToast({ type: 'error', message: err.message || 'Failed to submit parameter.' })
+    } finally {
+      setParamSubmitting(false)
+    }
+  }
+
   const isOverride = threshData?.source === 'runtime_override'
-
-  const Section = ({ title, icon: Icon, children }) => (
-    <div className="card">
-      <div className="flex items-center gap-2.5 px-5 py-4 border-b border-gray-100">
-        <div className="w-8 h-8 rounded-lg bg-purple-100 flex items-center justify-center">
-          <Icon size={15} className="text-purple-600" />
-        </div>
-        <h3 className="text-sm font-semibold text-gray-800">{title}</h3>
-      </div>
-      <div className="p-5">{children}</div>
-    </div>
-  )
-
-  const StatusMsg = ({ msg }) => msg ? (
-    <p className={`text-xs rounded-lg px-3 py-2 ${msg.type === 'success' ? 'text-emerald-700 bg-emerald-50' :
-        msg.type === 'info' ? 'text-blue-700 bg-blue-50' :
-          'text-red-700 bg-red-50'
-      }`}>{msg.text}</p>
-  ) : null
 
   return (
     <>
@@ -692,29 +735,21 @@ export default function SettingsPage() {
           <div style={{ marginTop: 20, display: 'flex', alignItems: 'center', gap: 12 }}>
             <button
               id="save-parameter-btn"
-              onClick={() => {
-                if (!paramName.trim() || !paramUnit.trim()) {
-                  addToast({ type: 'warning', message: 'Parameter Name and Unit are required.' })
-                  return
-                }
-                addToast({
-                  type: 'success',
-                  message: `Parameter "${paramName}" (${paramUnit}) saved! Backend integration coming soon.`,
-                })
-                setParamSaved(true)
-                setParamName(''); setParamUnit(''); setParamMin(''); setParamMax('')
-                setTimeout(() => setParamSaved(false), 3000)
-              }}
+              onClick={handleSaveParam}
+              disabled={paramSubmitting}
               style={{
                 display: 'inline-flex', alignItems: 'center', gap: 6,
                 padding: '9px 20px', borderRadius: 8, border: 'none',
-                background: '#7C3AED', color: '#fff',
-                fontSize: 13, fontWeight: 600, cursor: 'pointer',
+                background: paramSubmitting ? '#A78BFA' : '#7C3AED', color: '#fff',
+                fontSize: 13, fontWeight: 600,
+                cursor: paramSubmitting ? 'not-allowed' : 'pointer',
                 transition: 'background 0.15s',
               }}
             >
-              <PlusCircle size={15} />
-              Save Parameter
+              {paramSubmitting
+                ? <><RefreshCw size={14} className="animate-spin" /> Submitting…</>
+                : <><PlusCircle size={15} /> Request Parameter</>
+              }
             </button>
             {paramSaved && (
               <span style={{ fontSize: 12, color: '#10B981', fontWeight: 600 }}>
@@ -729,7 +764,7 @@ export default function SettingsPage() {
               background: '#F0FDF4', border: '1px solid #BBF7D0', fontSize: 12, color: '#065F46',
             }}
           >
-            💡 Saved parameters will appear as live sensor cards on the Dashboard once backend integration is complete.
+            💡 Submitted parameters go to the Super Admin for approval. Once approved they appear as live sensor cards on the Dashboard.
           </div>
         </Section>
 

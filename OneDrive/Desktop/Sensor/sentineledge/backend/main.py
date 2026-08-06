@@ -37,6 +37,10 @@ import database
 import core.sensor as sensor
 import core.threshold as threshold
 import core.escalation as escalation
+import core.extra_sensor as extra_sensor  # secondary sensor reader (pH, etc.)
+from core.escalation_policy import run_escalation_check
+from core.anomaly_detector import run_anomaly_detection
+from modules.sms.receiver import run_sms_receiver
 from core.validator import validate_reading
 from core.daily_report import schedule_daily_report
 from config import (
@@ -170,6 +174,25 @@ async def _monthly_snapshot_task() -> None:
             logger.warning("Monthly snapshot task error: %s", exc)
 
 
+async def _monthly_quota_reset_task() -> None:
+    """Sleeps until the 1st of next month midnight UTC, then resets all usage counters."""
+    import datetime as _dt
+    while True:
+        now = _dt.datetime.now(_dt.timezone.utc)
+        if now.month == 12:
+            next_reset = _dt.datetime(now.year + 1, 1, 1, tzinfo=_dt.timezone.utc)
+        else:
+            next_reset = _dt.datetime(now.year, now.month + 1, 1, tzinfo=_dt.timezone.utc)
+        wait_seconds = (next_reset - now).total_seconds()
+        await asyncio.sleep(wait_seconds)
+        try:
+            from utils.tier_enforcer import reset_monthly_quotas
+            reset_monthly_quotas()
+            logger.info("Monthly SMS/email/push usage quotas reset for all companies")
+        except Exception as exc:
+            logger.warning("Monthly quota reset failed: %s", exc)
+
+
 async def _retention_policy_task() -> None:
     """Every 6 hours: apply DB-driven retention policies from the retention_policies table."""
     while True:
@@ -235,6 +258,9 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(_scheduled_broadcast_task(),   name="scheduled-broadcast")
     asyncio.create_task(_monthly_snapshot_task(),      name="monthly-snapshot")
     asyncio.create_task(_retention_policy_task(),      name="retention-policy")
+    asyncio.create_task(run_escalation_check(),        name="escalation-policy")
+    asyncio.create_task(run_anomaly_detection(),       name="anomaly-detector")
+    asyncio.create_task(_monthly_quota_reset_task(),   name="monthly-quota-reset")
 
     try:
         lan_ip = socket.gethostbyname(socket.gethostname())
@@ -261,6 +287,7 @@ async def lifespan(app: FastAPI):
     # 5. Start GSM SMS queue worker — owns the serial port for the server lifetime
     from modules.sms.sender import start_gsm_worker
     start_gsm_worker()
+    asyncio.create_task(run_sms_receiver(), name="sms-receiver")
 
     yield
 
@@ -319,6 +346,19 @@ Admin endpoints require header:
 
 configure_cors(app)
 app.add_middleware(BaseHTTPMiddleware, dispatch=log_requests)
+
+# ── Security headers (Task 6) ─────────────────────────────────────────────────
+class _SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request, call_next):
+        response = await call_next(request)
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["X-XSS-Protection"] = "1; mode=block"
+        response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+        response.headers["Permissions-Policy"] = "geolocation=(), microphone=(), camera=()"
+        return response
+
+app.add_middleware(_SecurityHeadersMiddleware)
 
 # ── Rate limiting (slowapi) ───────────────────────────────────────────────────────
 app.state.limiter = limiter
@@ -394,6 +434,91 @@ async def internal_error_handler(request: Request, exc):
     )
 
 
+# ─── Custom parameter threshold helper ───────────────────────────────────────
+
+# Per-parameter cooldown: {param_name: cooldown_epoch_seconds}
+_extra_param_cooldowns: dict = {}
+_EXTRA_PARAM_COOLDOWN = 300   # 5-minute cooldown between repeated alerts per param
+
+def _check_extra_param_thresholds(extra_params: dict, breach_dicts: list) -> None:
+    """
+    For each live custom-parameter reading, fetch its configured min/max from
+    company_parameters and insert an alert if the value is strictly outside range.
+    Appends alert dicts to breach_dicts so they ride the same WebSocket payload.
+    Uses a 5-minute per-parameter cooldown to avoid alert floods.
+    """
+    import time as _time
+    from datetime import datetime, timezone, timedelta
+    from database.connection import execute_read
+    import database
+
+    now = _time.monotonic()
+    try:
+        params = execute_read(
+            "SELECT name, unit, min_value, max_value, company_id "
+            "FROM company_parameters WHERE is_active = TRUE"
+        )
+    except Exception:
+        return
+
+    param_map = {p["name"]: p for p in (params or [])}
+
+    for name, value in extra_params.items():
+        cfg = param_map.get(name)
+        if cfg is None:
+            continue
+
+        mn = cfg.get("min_value")
+        mx = cfg.get("max_value")
+        if mn is None or mx is None:
+            continue
+
+        try:
+            mn_f, mx_f = float(mn), float(mx)
+        except (TypeError, ValueError):
+            continue
+
+        if mn_f <= value <= mx_f:
+            continue   # within range — no alert
+
+        # Check cooldown
+        last_fired = _extra_param_cooldowns.get(name, 0)
+        if now - last_fired < _EXTRA_PARAM_COOLDOWN:
+            continue
+
+        direction = "high" if value > mx_f else "low"
+        threshold_val = mx_f if direction == "high" else mn_f
+        cooldown_until = (
+            datetime.now(timezone.utc) + timedelta(seconds=_EXTRA_PARAM_COOLDOWN)
+        ).isoformat()
+
+        try:
+            alert_id = database.insert_alert(
+                parameter=name,
+                value=value,
+                threshold=threshold_val,
+                direction=direction,
+                cooldown_until=cooldown_until,
+                severity="WARNING",
+                company_id=cfg.get("company_id"),
+            )
+            _extra_param_cooldowns[name] = now
+            logger.info(
+                "Custom param alert: %s=%.3f %s threshold %.3f (alert_id=%s)",
+                name, value, direction, threshold_val, alert_id,
+            )
+            breach_dicts.append({
+                "parameter": name,
+                "value":     value,
+                "threshold": threshold_val,
+                "direction": direction,
+                "severity":  "WARNING",
+                "alert_id":  alert_id,
+            })
+        except Exception as exc:
+            logger.warning("Failed to insert custom param alert for %s: %s", name, exc)
+
+
 # ─── WebSocket ───────────────────────────────────────────────────────────────
 
 @app.websocket("/ws")
@@ -421,11 +546,14 @@ async def websocket_endpoint(ws: WebSocket):
                     "breaches":         [],
                     "is_valid":         False,
                     "validation_error": reason,
+                    "extra_params":     dict(extra_sensor.extra_readings),
                 }
                 await broadcast(payload)
                 continue
 
-            breaches = threshold.check_threshold(reading)
+            # CSV fallback readings never trigger alerts — only real sensor data does.
+            # Manual breach override (settings page) has no is_live key → defaults True.
+            breaches = threshold.check_threshold(reading) if reading.get("is_live", True) else []
 
             # Persisting alerts (DB insert) is fast — await it so the live
             # broadcast below can include each breach's real alert_id (the
@@ -446,11 +574,19 @@ async def websocket_endpoint(ws: WebSocket):
                 d["alert_id"] = aid
                 breach_dicts.append(d)
 
+            # ── Custom parameter threshold enforcement ────────────────────────
+            # For each live extra_param value, check against company_parameters
+            # min/max and fire an alert if it falls outside the configured range.
+            ep = dict(extra_sensor.extra_readings)
+            if ep:
+                _check_extra_param_thresholds(ep, breach_dicts)
+
             payload = {
-                "temperature": reading["temperature"],
-                "timestamp":   reading["timestamp"],
-                "breaches":    breach_dicts,
-                "is_valid":    True,
+                "temperature":  reading["temperature"],
+                "timestamp":    reading["timestamp"],
+                "breaches":     breach_dicts,
+                "is_valid":     True,
+                "extra_params": ep,
             }
             await broadcast(payload)
 
@@ -473,15 +609,28 @@ async def log_stream(websocket: WebSocket):
     # Resolve log path relative to this file so it works regardless of CWD
     log_path = Path(os.path.join(os.path.dirname(__file__), "..", "logs", "sentineledge.log")).resolve()
 
-    # Send last 100 lines on connect — silently skip if file missing or unreadable
+    # Send last 200 lines on connect — tail-read from end of file so we
+    # never load the full log into memory (O(chunk) not O(file)).
     if log_path.exists():
         try:
-            lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
-            initial_lines = lines[-100:] if len(lines) > 100 else lines
+            _LOG_TAIL_LINES  = 200
+            _LOG_CHUNK_BYTES = 1024 * 32  # 32 KB — enough for 200 typical log lines
+
+            with open(log_path, "rb") as _f:
+                _f.seek(0, 2)                         # seek to end
+                _file_size = _f.tell()
+                _read_bytes = min(_file_size, _LOG_CHUNK_BYTES)
+                _f.seek(-_read_bytes, 2)              # back up by chunk
+                _chunk = _f.read(_read_bytes)
+
+            _text_lines = _chunk.decode("utf-8", errors="replace").splitlines()
+            initial_lines = _text_lines[-_LOG_TAIL_LINES:]
             for line in initial_lines:
-                await websocket.send_text(line)
+                if line.strip():
+                    await websocket.send_text(line)
         except Exception as exc:
             logger.warning("log_stream: error reading initial lines: %s", exc)
+
 
     last_size = log_path.stat().st_size if log_path.exists() else 0
     try:
@@ -547,6 +696,8 @@ app.include_router(workers_router)
 app.include_router(super_admin_router)
 app.include_router(notifications_router)
 app.include_router(super_admin_v2_router)
+from routers.analytics import router as analytics_router
+app.include_router(analytics_router)
 app.include_router(phase1_command_router)
 app.include_router(phase2_admin_control_router)
 app.include_router(phase3_config_router)

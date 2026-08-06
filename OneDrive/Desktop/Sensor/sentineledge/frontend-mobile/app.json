@@ -20,11 +20,17 @@
         "RECEIVE_BOOT_COMPLETED",
         "REQUEST_IGNORE_BATTERY_OPTIMIZATIONS",
         "USE_FULL_SCREEN_INTENT",
-        "VIBRATE"
+        "VIBRATE",
+        "POST_NOTIFICATIONS"
       ]
     },
     "plugins": [
-      "expo-notifications"
+      [
+        "expo-notifications",
+        {
+          "color": "#818CF8"
+        }
+      ]
     ]
   }
 }

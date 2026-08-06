@@ -11,7 +11,7 @@ export default function Layout({ children, connectionStatus, unreadCount }) {
     <div style={{ display: 'flex', minHeight: '100vh' }}>
       <Sidebar unreadCount={unreadCount} />
 
-      <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', marginLeft: 240 }}>
+      <div className="layout-content" style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
         <Header connectionStatus={connectionStatus} unreadCount={unreadCount} />
 
         <main style={{

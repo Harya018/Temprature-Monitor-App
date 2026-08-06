@@ -299,7 +299,7 @@ async def approve_approval(
     sa: dict = Depends(require_super_admin),
 ):
     rows = execute_read(
-        "SELECT id, admin_id, action_type, status FROM pending_approvals WHERE id = %s",
+        "SELECT id, admin_id, action_type, payload, status FROM pending_approvals WHERE id = %s",
         (approval_id,),
     )
     if not rows:
@@ -325,9 +325,65 @@ async def approve_approval(
         None,
     )
     logger.info("Approval %d approved by super_admin %d", approval_id, sa["id"])
+
+    # ── Execute the approved action ───────────────────────────────────────────
+    action_type = rows[0]["action_type"]
+    payload     = rows[0].get("payload") or {}
+
+    if action_type == "add_parameter":
+        try:
+            execute_write(
+                """
+                INSERT INTO company_parameters
+                    (company_id, name, unit, min_value, max_value)
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (company_id, name) DO UPDATE SET
+                    unit       = EXCLUDED.unit,
+                    min_value  = EXCLUDED.min_value,
+                    max_value  = EXCLUDED.max_value,
+                    updated_at = NOW()
+                """,
+                (
+                    payload.get("company_id"),
+                    payload.get("name"),
+                    payload.get("unit"),
+                    payload.get("min_value"),
+                    payload.get("max_value"),
+                ),
+            )
+            logger.info(
+                "Approval %d executed: add_parameter '%s' for company %s",
+                approval_id, payload.get("name"), payload.get("company_id"),
+            )
+            try:
+                from modules.inapp.manager import broadcast as _broadcast
+                import asyncio
+                asyncio.create_task(_broadcast({
+                    "type":       "parameter_added",
+                    "company_id": payload.get("company_id"),
+                    "parameter": {
+                        "name":      payload.get("name"),
+                        "unit":      payload.get("unit"),
+                        "min_value": payload.get("min_value"),
+                        "max_value": payload.get("max_value"),
+                    },
+                }))
+            except Exception as _bcast_exc:
+                logger.warning("parameter_added broadcast failed: %s", _bcast_exc)
+        except Exception as _exec_exc:
+            logger.error(
+                "Approval %d: add_parameter execution failed: %s", approval_id, _exec_exc
+            )
+    else:
+        logger.warning(
+            "Approval %d approved but action_type '%s' has no executor — skipped",
+            approval_id, action_type,
+        )
+
     return {
         "approval_id": approval_id,
         "status":      "approved",
+        "action_type": action_type,
         "reviewed_by": sa["id"],
         "note":        body.note,
     }

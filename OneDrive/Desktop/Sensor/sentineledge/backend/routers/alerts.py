@@ -39,11 +39,16 @@ def _build_delivery_status(alert_id: int) -> dict:
     "/alerts",
     response_model=list[AlertOut],
     summary="Get recent alerts",
-    description="Returns the last 50 alerts with delivery status and escalation level.",
+    description="Returns alerts with delivery status. Supports ?limit (1-200, default 50) and ?page (default 1).",
 )
 @limiter.limit("60/minute")
-async def get_alerts(request: Request):
-    rows = database.get_recent_alerts(limit=50)
+async def get_alerts(
+    request: Request,
+    limit: int = Query(50, ge=1, le=1000, description="Number of alerts per page"),
+    page:  int = Query(1,  ge=1,           description="Page number (1-based)"),
+):
+    offset = (page - 1) * limit
+    rows = database.get_recent_alerts(limit=limit, offset=offset)
     result = []
     for r in rows:
         delivery_status = _build_delivery_status(r["id"])
@@ -75,7 +80,7 @@ async def get_alerts(request: Request):
 )
 @limiter.limit("30/minute")
 async def acknowledge_alert(alert_id: int, body: AcknowledgeIn, request: Request):
-    ok = await escalation.acknowledge(alert_id, body.acknowledged_by)
+    ok = await escalation.acknowledge(alert_id, f"{body.acknowledged_by} (app)")
     if not ok:
         raise HTTPException(
             status_code=404,

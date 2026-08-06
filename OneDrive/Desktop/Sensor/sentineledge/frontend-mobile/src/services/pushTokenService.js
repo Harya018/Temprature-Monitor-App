@@ -137,3 +137,31 @@ export async function getCachedPushToken() {
     return null;
   }
 }
+
+/**
+ * Subscribe to Expo push token refresh events and re-register the new
+ * token with the backend automatically.  Call once after login and
+ * store the returned subscription to remove it on logout.
+ *
+ * @param {string} authToken
+ * @param {string} serverBaseUrl
+ * @returns {import('expo-notifications').Subscription}
+ */
+export function setupTokenRefresh(authToken, serverBaseUrl) {
+  return Notifications.addPushTokenListener(async ({ data: newToken }) => {
+    try {
+      await AsyncStorage.setItem(PUSH_TOKEN_KEY, newToken);
+      await fetch(`${serverBaseUrl}/api/notifications/push-token`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Auth-Token': authToken,
+        },
+        body: JSON.stringify({ token: newToken, type: 'expo' }),
+      });
+      console.log('[PushToken] Token refreshed and re-registered:', newToken);
+    } catch (err) {
+      console.warn('[PushToken] Token refresh re-registration failed:', err);
+    }
+  });
+}

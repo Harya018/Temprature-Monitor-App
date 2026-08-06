@@ -15,6 +15,7 @@ import {
   LayoutDashboard, Bell, Terminal, Archive, BarChart2,
   Receipt, Monitor, Users, Activity, ClipboardList,
   Thermometer, LogOut, CheckCheck, Eye, EyeOff, ShieldAlert,
+  User, Lock,
 } from 'lucide-react'
 import { VolumeX } from 'lucide-react'
 
@@ -43,16 +44,28 @@ function SubAdminLoginPage() {
   const [showPwd, setShowPwd] = useState(false)
   const [error,   setError]   = useState('')
   const [loading, setLoading] = useState(false)
+  const [shaking, setShaking] = useState(false)
+  const nameRef  = useRef(null)
   const navigate = useNavigate()
 
   useEffect(() => {
     if (sessionStorage.getItem('subAdminAuthenticated') === 'true') {
       navigate('/sub-admin/dashboard', { replace: true })
     }
+    nameRef.current?.focus()
   }, [navigate])
+
+  const shake = (msg) => {
+    setShaking(true)
+    setError(msg)
+    setPwd('')
+    setTimeout(() => setShaking(false), 500)
+  }
 
   const handleSubmit = async (e) => {
     e.preventDefault()
+    if (!name.trim()) { shake('Name is required'); return }
+    if (!pwd.trim())  { shake('Password is required'); return }
     setError('')
     setLoading(true)
     try {
@@ -63,12 +76,11 @@ function SubAdminLoginPage() {
       })
       const data = await res.json()
       if (!res.ok) {
-        setError(data.detail?.message || 'Invalid credentials')
+        shake(data.detail?.message || 'Invalid credentials')
         return
       }
       if (data.role === 'main') {
-        // Main admin should use the main dashboard
-        setError('Please use the main admin dashboard to log in as main admin.')
+        shake('Please use the main admin dashboard to log in as main admin.')
         return
       }
       sessionStorage.setItem('subAdminAuthenticated', 'true')
@@ -76,70 +88,196 @@ function SubAdminLoginPage() {
       sessionStorage.setItem('subAdminToken', data.token)
       navigate('/sub-admin/dashboard', { replace: true })
     } catch {
-      setError('Connection failed. Check your server.')
+      shake('Connection failed. Check your server.')
     } finally {
       setLoading(false)
     }
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center px-4"
-         style={{ background: 'linear-gradient(135deg, #1E1B4B 0%, #2D2680 50%, #1E1B4B 100%)' }}>
-      <div className="bg-white rounded-2xl shadow-2xl p-8 w-full max-w-sm">
-        <div className="flex flex-col items-center mb-6">
-          <div className="w-14 h-14 rounded-2xl flex items-center justify-center mb-3"
-               style={{ background: '#7c3aed15' }}>
-            <ShieldAlert size={28} style={{ color: '#7c3aed' }} />
+    <div style={saStyles.page}>
+      <div className={shaking ? 'animate-shake' : ''} style={saStyles.card}>
+
+        {/* LEFT PANEL */}
+        <div style={saStyles.leftPanel} className="sentinel-card-left">
+          <div style={{ ...saStyles.shape, ...saStyles.shape1 }} />
+          <div style={{ ...saStyles.shape, ...saStyles.shape2 }} />
+          <div style={{ ...saStyles.shape, ...saStyles.shape3 }} />
+          <div style={{ ...saStyles.shape, ...saStyles.shape4 }} />
+          <div style={saStyles.curveDivider} />
+          <div style={saStyles.leftContent}>
+            <div style={saStyles.leftIconWrap}>
+              <ShieldAlert size={44} color="#fff" strokeWidth={1.5} />
+            </div>
+            <p style={saStyles.leftTitle}>SUB</p>
+            <p style={{ ...saStyles.leftTitle, fontSize: 34 }}>ADMIN</p>
+            <p style={saStyles.leftSubtitle}>PORTAL</p>
           </div>
-          <h1 className="text-xl font-bold text-gray-900">Sub-Admin Login</h1>
-          <p className="text-xs text-gray-500 mt-1">SentinelEdge Monitoring System</p>
         </div>
 
-        <form onSubmit={handleSubmit} className="space-y-4">
-          <div>
-            <label className="block text-xs font-semibold text-gray-600 mb-1.5">Name</label>
-            <input
-              type="text"
-              value={name}
-              onChange={e => setName(e.target.value)}
-              required
-              placeholder="Your admin name"
-              className="w-full border border-gray-200 rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-purple-200 focus:border-purple-400"
-            />
+        {/* RIGHT PANEL */}
+        <div style={saStyles.rightPanel} className="sentinel-card-right">
+
+          <div style={saStyles.mobileHeader} className="mobile-only-header">
+            <div style={saStyles.mobileIconWrap}>
+              <ShieldAlert size={28} color="#fff" />
+            </div>
+            <span style={saStyles.mobileName}>Sub-Admin</span>
           </div>
-          <div>
-            <label className="block text-xs font-semibold text-gray-600 mb-1.5">Password</label>
-            <div className="relative">
+
+          <div style={saStyles.avatarCircle}>
+            <User size={32} color="#fff" strokeWidth={2} />
+          </div>
+
+          <h1 style={saStyles.loginHeading}>LOGIN</h1>
+
+          <form onSubmit={handleSubmit} style={saStyles.form} noValidate>
+
+            <div style={saStyles.fieldWrap} className="underline-field">
+              <User size={18} color="#9CA3AF" style={{ flexShrink: 0 }} />
+              <input
+                ref={nameRef}
+                type="text"
+                placeholder="Your name"
+                value={name}
+                onChange={e => { setName(e.target.value); setError('') }}
+                autoComplete="username"
+                autoCapitalize="none"
+                style={saStyles.underlineInput}
+                className="underline-input"
+              />
+            </div>
+
+            <div style={saStyles.fieldWrap} className="underline-field">
+              <Lock size={18} color="#9CA3AF" style={{ flexShrink: 0 }} />
               <input
                 type={showPwd ? 'text' : 'password'}
+                placeholder="Password"
                 value={pwd}
-                onChange={e => setPwd(e.target.value)}
-                required
-                placeholder="Your password"
-                className="w-full border border-gray-200 rounded-lg px-3 py-2.5 text-sm pr-10 focus:outline-none focus:ring-2 focus:ring-purple-200 focus:border-purple-400"
+                onChange={e => { setPwd(e.target.value); setError('') }}
+                autoComplete="current-password"
+                style={saStyles.underlineInput}
+                className="underline-input"
               />
-              <button type="button" onClick={() => setShowPwd(v => !v)}
-                      className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400">
-                {showPwd ? <EyeOff size={15} /> : <Eye size={15} />}
+              <button type="button" onClick={() => setShowPwd(v => !v)} style={saStyles.eyeBtn} tabIndex={-1}>
+                {showPwd ? <EyeOff size={17} color="#9CA3AF" /> : <Eye size={17} color="#9CA3AF" />}
               </button>
             </div>
-          </div>
-          {error && (
-            <p className="text-xs text-red-600 bg-red-50 rounded-lg px-3 py-2">{error}</p>
-          )}
-          <button type="submit" disabled={loading}
-                  className="w-full py-2.5 rounded-lg font-bold text-white text-sm disabled:opacity-50"
-                  style={{ background: '#7c3aed' }}>
-            {loading ? 'Signing in…' : 'Sign In'}
-          </button>
-        </form>
-        <p className="text-center text-xs text-gray-400 mt-4">
-          Main admin?{' '}
-          <a href="/" className="text-purple-600 hover:underline">Use main dashboard</a>
-        </p>
+
+            {error && <p style={saStyles.errorText}>{error}</p>}
+
+            <button
+              type="submit"
+              disabled={loading || !name.trim() || !pwd.trim()}
+              style={{ ...saStyles.loginBtn, opacity: (loading || !name.trim() || !pwd.trim()) ? 0.65 : 1 }}
+              className="login-btn-hover"
+            >
+              {loading ? 'Signing in…' : 'LOGIN'}
+            </button>
+          </form>
+
+          <p style={saStyles.adminLink}>
+            Main admin?{' '}
+            <a href="/" style={{ color: '#7C3AED', fontWeight: 600, textDecoration: 'underline' }}>
+              Use main dashboard
+            </a>
+          </p>
+
+          <p style={saStyles.footer}>SentinelEdge v1.0.0 · Sub-Admin Portal</p>
+        </div>
       </div>
+
+      <style>{`
+        @keyframes shake {
+          0%, 100% { transform: translateX(0); }
+          20%       { transform: translateX(-10px); }
+          40%       { transform: translateX(10px); }
+          60%       { transform: translateX(-7px); }
+          80%       { transform: translateX(7px); }
+        }
+        .animate-shake { animation: shake 0.45s ease-in-out; }
+        .underline-input:focus { outline: none; }
+        .underline-field:focus-within { border-bottom-color: #7C3AED !important; }
+        .login-btn-hover:hover:not(:disabled) {
+          background: #6D28D9 !important;
+          transform: translateY(-1px);
+          box-shadow: 0 6px 20px rgba(124,58,237,0.4);
+        }
+        .login-btn-hover { transition: all 0.2s ease; }
+        .mobile-only-header { display: none; }
+        @media (max-width: 767px) {
+          .sentinel-card-left  { display: none !important; }
+          .sentinel-card-right { border-radius: 0 !important; min-height: 100svh !important; width: 100% !important; }
+          .mobile-only-header  { display: flex !important; }
+        }
+      `}</style>
     </div>
   )
+}
+
+const saStyles = {
+  page: {
+    minHeight: '100svh', display: 'flex', alignItems: 'center', justifyContent: 'center',
+    background: '#1E1B4B', padding: '1.5rem', fontFamily: "'Inter', 'Segoe UI', sans-serif",
+  },
+  card: {
+    display: 'flex', flexDirection: 'row', width: '100%', maxWidth: 900,
+    borderRadius: 24, overflow: 'hidden', boxShadow: '0 25px 60px rgba(0,0,0,0.45)',
+    position: 'relative', minHeight: 520, background: '#fff',
+  },
+  leftPanel: {
+    width: '45%', position: 'relative', overflow: 'hidden',
+    background: 'linear-gradient(135deg, #3B1F8C 0%, #1E1B4B 100%)',
+    display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
+  },
+  shape: { position: 'absolute', borderRadius: 20, pointerEvents: 'none' },
+  shape1: { width: 280, height: 280, background: 'rgba(92,53,176,0.45)', top: '-60px', left: '-80px', transform: 'rotate(-20deg)' },
+  shape2: { width: 220, height: 220, background: 'rgba(76,42,158,0.55)', bottom: '-50px', left: '-40px', transform: 'rotate(-35deg)' },
+  shape3: { width: 200, height: 160, background: 'rgba(91,53,176,0.35)', top: '45%', right: '-30px', transform: 'rotate(-15deg)' },
+  shape4: { width: 160, height: 120, background: 'rgba(109,40,217,0.3)', top: '10px', right: '20px', transform: 'rotate(12deg)' },
+  curveDivider: {
+    position: 'absolute', top: 0, right: -40, width: 80, height: '100%',
+    background: '#fff', clipPath: 'ellipse(50% 100% at 100% 50%)', zIndex: 2,
+  },
+  leftContent: {
+    position: 'relative', zIndex: 3, display: 'flex', flexDirection: 'column',
+    alignItems: 'center', gap: 2, paddingRight: 32,
+  },
+  leftIconWrap: { marginBottom: 10, opacity: 0.9 },
+  leftTitle: { color: '#fff', fontSize: 38, fontWeight: 900, letterSpacing: '0.12em', lineHeight: 1, margin: 0, textShadow: '0 2px 8px rgba(0,0,0,0.3)' },
+  leftSubtitle: { color: 'rgba(255,255,255,0.75)', fontSize: 15, fontWeight: 600, letterSpacing: '0.3em', margin: '8px 0 0' },
+  rightPanel: {
+    flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center',
+    justifyContent: 'center', padding: '3rem 2.5rem', background: '#fff', gap: 0,
+  },
+  mobileHeader: { display: 'none', alignItems: 'center', gap: 10, marginBottom: 28 },
+  mobileIconWrap: {
+    width: 42, height: 42, borderRadius: 12,
+    background: 'linear-gradient(135deg, #7C3AED, #5B21B6)',
+    display: 'flex', alignItems: 'center', justifyContent: 'center',
+  },
+  mobileName: { color: '#1E1B4B', fontSize: 20, fontWeight: 800, letterSpacing: '-0.02em' },
+  avatarCircle: {
+    width: 72, height: 72, borderRadius: '50%', background: '#7C3AED',
+    display: 'flex', alignItems: 'center', justifyContent: 'center',
+    boxShadow: '0 4px 20px rgba(124,58,237,0.4)', marginBottom: 16,
+  },
+  loginHeading: { fontSize: 26, fontWeight: 800, color: '#1E1B4B', letterSpacing: '0.1em', margin: '0 0 28px 0' },
+  form: { width: '100%', maxWidth: 320, display: 'flex', flexDirection: 'column', gap: 0 },
+  fieldWrap: {
+    display: 'flex', alignItems: 'center', gap: 10,
+    borderBottom: '2px solid #E5E7EB', paddingBottom: 10, marginBottom: 24, transition: 'border-color 0.2s',
+  },
+  underlineInput: { flex: 1, border: 'none', outline: 'none', background: 'transparent', fontSize: 15, color: '#111827', padding: '4px 0' },
+  eyeBtn: { background: 'none', border: 'none', cursor: 'pointer', padding: '0 2px', display: 'flex', alignItems: 'center', flexShrink: 0 },
+  errorText: { color: '#DC2626', fontSize: 13, fontWeight: 500, textAlign: 'center', marginBottom: 12, marginTop: -8 },
+  loginBtn: {
+    width: '100%', padding: '13px 0', background: '#7C3AED', color: '#fff',
+    border: 'none', borderRadius: 10, fontSize: 15, fontWeight: 700,
+    letterSpacing: '0.08em', cursor: 'pointer', marginTop: 8, marginBottom: 20,
+  },
+  adminLink: { color: '#9CA3AF', fontSize: 13, textAlign: 'center', marginBottom: 6 },
+  footer: { color: '#9CA3AF', fontSize: 12, textAlign: 'center', marginTop: 4 },
 }
 
 // ── Sub-Admin Sidebar ─────────────────────────────────────────────────────────

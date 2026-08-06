@@ -14,15 +14,19 @@ import { useState, useEffect, useCallback } from 'react'
 import { Receipt, RefreshCw, Filter, CheckCircle, XCircle, Mail, MessageSquare } from 'lucide-react'
 import { fetchReceipts } from '../services/api.js'
 import { utcToIST, timeAgo } from '../utils/time.js'
+import { SkeletonTable } from '../components/Skeleton'
+import ErrorState from '../components/ErrorState'
 
 export default function ReceiptsPage() {
-  const [receipts, setReceipts] = useState([])
-  const [loading,  setLoading]  = useState(false)
-  const [channel,  setChannel]  = useState('all')   // all | email | sms
-  const [status,   setStatus]   = useState('all')   // all | success | failed
+  const [receipts,   setReceipts]   = useState([])
+  const [loading,    setLoading]    = useState(false)
+  const [fetchError, setFetchError] = useState(null)
+  const [channel,    setChannel]    = useState('all')   // all | email | sms
+  const [status,     setStatus]     = useState('all')   // all | success | failed
 
   const load = useCallback(async () => {
     setLoading(true)
+    setFetchError(null)
     try {
       // Fetch all receipts then filter client-side so we can always
       // exclude inapp rows regardless of the channel filter.
@@ -44,7 +48,7 @@ export default function ReceiptsPage() {
         : byChannel.filter(r => status === 'success' ? r.success : !r.success)
 
       setReceipts(byStatus)
-    } catch { /* silent */ }
+    } catch (err) { setFetchError(err?.message || 'Could not load receipts') }
     finally { setLoading(false) }
   }, [channel, status])
 
@@ -129,7 +133,11 @@ export default function ReceiptsPage() {
           <span className="text-sm font-semibold text-gray-800">{receipts.length} receipts</span>
         </div>
 
-        {receipts.length === 0 ? (
+        {fetchError && !loading ? (
+          <ErrorState message={fetchError} onRetry={load} />
+        ) : loading && receipts.length === 0 ? (
+          <SkeletonTable />
+        ) : receipts.length === 0 ? (
           <div className="text-center py-12 text-gray-400">
             <CheckCircle size={32} className="mx-auto mb-2 text-emerald-400" />
             <p>No receipts found</p>

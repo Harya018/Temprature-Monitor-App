@@ -11,6 +11,7 @@
     "axios": "^1.7.9",
     "expo": "~56.0.9",
     "expo-av": "^16.0.8",
+    "expo-network": "~7.0.0",
     "expo-background-fetch": "~56.0.17",
     "expo-haptics": "~56.0.3",
     "expo-intent-launcher": "~56.0.4",

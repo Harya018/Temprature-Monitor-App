@@ -58,7 +58,7 @@ def _configure() -> None:
     console.setLevel(level)
     root.addHandler(console)
 
-    # ── Rotating file handler ─────────────────────────────────────────────────
+    # ── Rotating file handler (all levels) ───────────────────────────────────
     try:
         _LOGS_DIR.mkdir(parents=True, exist_ok=True)
         log_file = _LOGS_DIR / "sentineledge.log"
@@ -74,6 +74,24 @@ def _configure() -> None:
     except Exception as exc:
         # Never crash on logging setup failure
         root.warning("Could not create file log handler: %s", exc)
+
+    # ── Error-only rotating file handler ──────────────────────────────────────
+    try:
+        error_file = _LOGS_DIR / "sentineledge_error.log"
+        efh = RotatingFileHandler(
+            error_file,
+            maxBytes=5 * 1024 * 1024,   # 5 MB
+            backupCount=5,
+            encoding="utf-8",
+        )
+        efh.setLevel(logging.ERROR)
+        efh.setFormatter(logging.Formatter(
+            "%(asctime)s [%(levelname)s] %(name)s: %(message)s\n"
+            "%(pathname)s:%(lineno)d"
+        ))
+        root.addHandler(efh)
+    except Exception as exc:
+        root.warning("Could not create error log handler: %s", exc)
 
     # Silence noisy third-party loggers
     logging.getLogger("uvicorn.access").setLevel(logging.WARNING)

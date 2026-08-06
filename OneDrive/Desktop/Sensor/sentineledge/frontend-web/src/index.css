@@ -2,6 +2,63 @@
 @tailwind components;
 @tailwind utilities;
 
+:root {
+  --surface-1: #ffffff;
+  --surface-2: #F3F4F6;
+  --border: #E5E7EB;
+  --radius: 0.75rem;
+  --text-primary: #1F2937;
+  --text-secondary: #6B7280;
+}
+
+:root[data-theme="dark"] {
+  --surface-1: #1F2937;
+  --surface-2: #374151;
+  --border: #4B5563;
+  --text-primary: #F9FAFB;
+  --text-secondary: #9CA3AF;
+}
+
+:root[data-theme="dark"] body {
+  background-color: #111827;
+  color: #F9FAFB;
+}
+
+:root[data-theme="dark"] .card {
+  background: #1F2937;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.4);
+}
+
+:root[data-theme="dark"] header.flex {
+  background: #1F2937;
+  border-color: #374151;
+}
+
+:root[data-theme="dark"] .data-table th {
+  color: #9CA3AF;
+  border-color: #374151;
+}
+:root[data-theme="dark"] .data-table td {
+  color: #F3F4F6;
+  border-color: #2D3748;
+}
+:root[data-theme="dark"] .data-table tr:hover td { background: #2D3748; }
+
+:root[data-theme="dark"] .form-input {
+  background: #374151;
+  border-color: #4B5563;
+  color: #F9FAFB;
+}
+
+:root[data-theme="dark"] .btn-ghost {
+  border-color: #4B5563;
+  color: #9CA3AF;
+}
+:root[data-theme="dark"] .btn-ghost:hover:not(:disabled) {
+  background: #374151;
+  color: #F9FAFB;
+}
+
 *, *::before, *::after { box-sizing: border-box; }
 
 body {
@@ -23,17 +80,39 @@ body {
 .sidebar {
   background: #1E1B4B;
   width: 240px;
-  min-height: 100vh;
+  height: 100vh;
   position: fixed;
   left: 0; top: 0;
   display: flex;
   flex-direction: column;
   z-index: 50;
   transition: width 0.25s ease;
+  overflow: hidden;
 }
 @media (max-width: 768px) {
   .sidebar { width: 60px; }
   .sidebar-label { display: none; }
+}
+
+/* Sidebar nav scrollbar — always visible, styled to match dark theme */
+.sidebar nav::-webkit-scrollbar {
+  width: 4px;
+}
+.sidebar nav::-webkit-scrollbar-track {
+  background: transparent;
+}
+.sidebar nav::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.2);
+  border-radius: 2px;
+}
+.sidebar nav::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.4);
+}
+
+/* ── Layout content offset ── */
+.layout-content { margin-left: 240px; }
+@media (max-width: 768px) {
+  .layout-content { margin-left: 60px; }
 }
 
 /* ── Card ── */
@@ -194,6 +273,25 @@ body {
   font-weight: 600;
   font-size: 0.9rem;
   animation: flashRed 1s ease-in-out infinite;
+}
+
+/* ── Print — incident report modal only ── */
+@media print {
+  body * { visibility: hidden; }
+  .incident-report-modal,
+  .incident-report-modal * { visibility: visible; }
+  .incident-report-modal {
+    position: fixed;
+    inset: 0;
+    overflow: visible !important;
+    max-height: none !important;
+    box-shadow: none !important;
+    margin: 0;
+    padding: 1.5rem;
+    border-radius: 0;
+    width: 100%;
+  }
+  .no-print { display: none !important; }
 }
 
 /* ── Terminal (LogsPage) ── */

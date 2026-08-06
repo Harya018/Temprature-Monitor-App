@@ -39,6 +39,7 @@ from modules.inapp.broadcaster import send_push_async
 from modules.mobilepush.expo_push import send_expo_push_async
 from modules.mobilepush.fcm_direct import send_fcm_direct_async
 from utils.formatter import format_alert_message   # used by _build_message (SMS body)
+from utils.severity_router import get_routing
 from config import ALERT_COOLDOWN_SECONDS, RUNTIME_THRESHOLDS
 from models import BreachEvent
 
@@ -169,7 +170,7 @@ async def _notify_subscriber(
             }
             tasks = []
             if fcm_token:
-                tasks.append(send_fcm_direct_async(fcm_token, payload))
+                tasks.append(send_fcm_direct_async(fcm_token, payload, subscriber_id=sub_id))
             if expo_token:
                 tasks.append(send_expo_push_async(expo_token, payload))
             results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -220,6 +221,8 @@ async def _notify_all_subscribers(
     alert_meta = database.get_alert(alert_id) or {}
     severity   = alert_meta.get("severity", "WARNING")
     timestamp_utc = str(alert_meta.get("timestamp", "") or "")
+    company_id = alert_meta.get("company_id")
+    routing    = get_routing(company_id, severity)
 
     subscribers = database.get_subscribers_ordered()
     active_subs = [s for s in subscribers if s.get("is_active", s.get("active", True))]
@@ -267,16 +270,43 @@ async def _notify_all_subscribers(
     # ── Channel 2 (Batch): SMS to ALL subscribers simultaneously ──────────────
     async def _sms_batch() -> None:
         try:
+            # Only send to subscribers that have a phone number stored.
+            # send_sms_to_all already filters on phone, but we log skipped
+            # subscribers here so operators can see exactly who gets SMS.
+            sms_targets = [s for s in active_subs if s.get("phone")]
+            skipped = len(active_subs) - len(sms_targets)
+            if skipped:
+                logger.info(
+                    "SMS: skipping %d subscriber(s) with no phone number", skipped
+                )
+
+            if not sms_targets:
+                logger.warning("SMS batch: no subscribers with a phone number — skipping")
+                for sub in active_subs:
+                    database.insert_receipt(
+                        alert_id, "sms", sub["id"], level, False, "no phone number"
+                    )
+                return
+
+            # Log each subscriber before handing off to the queue worker
+            for sub in sms_targets:
+                logger.info(
+                    "SMS queued for subscriber %s — %s",
+                    sub["name"], sub["phone"],
+                )
+
             results = await send_sms_to_all(
-                subscribers=active_subs,
+                subscribers=sms_targets,
                 value=value,
                 threshold=threshold,
                 direction=direction,
                 timestamp_utc=timestamp_utc,
             )
-            # Log receipts for each subscriber
-            for sub, res in zip(active_subs, results):
-                ok  = res.get("status") in ("sent", "queued")
+
+            # Log receipts for targeted subscribers
+            targeted_ids = {s["id"] for s in sms_targets}
+            for sub, res in zip(sms_targets, results):
+                ok  = res.get("status") in ("sent", "queued", "mock_sent")
                 err = res.get("error")
                 database.log_escalation(alert_id, level, sub["id"], "sms", ok)
                 database.insert_receipt(alert_id, "sms", sub["id"], level, ok, err)
@@ -285,6 +315,14 @@ async def _notify_all_subscribers(
                         "SMS to %s (sub %d) failed: %s",
                         sub["phone"], sub["id"], err,
                     )
+
+            # Mark no-phone subscribers as skipped in receipts
+            for sub in active_subs:
+                if sub["id"] not in targeted_ids:
+                    database.insert_receipt(
+                        alert_id, "sms", sub["id"], level, False, "no phone number"
+                    )
+
         except Exception as exc:
             logger.error("SMS batch failed for alert %d: %s", alert_id, exc)
             for sub in active_subs:
@@ -340,7 +378,7 @@ async def _notify_all_subscribers(
         try:
             tasks = []
             if fcm_token:
-                tasks.append(send_fcm_direct_async(fcm_token, payload))
+                tasks.append(send_fcm_direct_async(fcm_token, payload, subscriber_id=sub_id))
             if expo_token:
                 tasks.append(send_expo_push_async(expo_token, payload))
             results = await asyncio.gather(*tasks, return_exceptions=True)
@@ -358,18 +396,25 @@ async def _notify_all_subscribers(
 
     mobile_push_tasks = [_mobile_push_one(sub) for sub in active_subs]
 
-    # ── Fire email batch, SMS batch, WebSocket pushes, and mobile pushes simultaneously ──
-    await asyncio.gather(
-        _email_batch(),
-        _sms_batch(),
-        *push_tasks,
-        *mobile_push_tasks,
-        return_exceptions=True,
-    )
+    # ── Severity routing: close push coroutines for disabled channels ─────────
+    # push_tasks / mobile_push_tasks are already-created coroutine objects.
+    # Closing them before gather avoids "coroutine never awaited" warnings.
+    if not routing["push"]:
+        for _c in push_tasks:        _c.close()
+        for _c in mobile_push_tasks: _c.close()
+        push_tasks, mobile_push_tasks = [], []
+
+    # ── Fire enabled channels simultaneously ────────────────────────────────
+    _ch: list = []
+    if routing["email"]: _ch.append(_email_batch())
+    if routing["sms"]:   _ch.append(_sms_batch())
+    await asyncio.gather(*_ch, *push_tasks, *mobile_push_tasks, return_exceptions=True)
 
     logger.info(
-        "Parallel alert delivery complete for alert %d — %d subscriber(s) notified",
+        "Parallel alert delivery complete for alert %d — %d subscriber(s) notified "
+        "(email=%s sms=%s push=%s)",
         alert_id, len(active_subs),
+        routing["email"], routing["sms"], routing["push"],
     )
 
 

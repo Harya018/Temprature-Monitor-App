@@ -18,6 +18,7 @@ import DashboardScreen from './src/screens/DashboardScreen';
 import AlertsScreen from './src/screens/AlertsScreen';
 import SettingsScreen from './src/screens/SettingsScreen';
 import AlertOverlay from './src/components/AlertOverlay';
+import OfflineBanner from './src/components/OfflineBanner';
 import { verifySession } from './src/services/auth';
 import { registerBackgroundTask } from './src/tasks/backgroundTask';
 import { useWebSocket } from './src/hooks/useWebSocket';
@@ -127,6 +128,22 @@ export default function App() {
         }
       }
 
+      // 2b. Create the high-priority alert channel (Android only).
+      // Must be done programmatically — plugin config only handles build-time assets.
+      // Channel settings are user-owned after first creation; this is a no-op on re-runs
+      // unless the channel was deleted.
+      if (Platform.OS === 'android') {
+        await Notifications.setNotificationChannelAsync('critical-alerts', {
+          name: 'Critical Alerts',
+          importance: Notifications.AndroidImportance.MAX,
+          vibrationPattern: [0, 500, 200, 500, 200, 500],
+          enableVibrate: true,
+          bypassDnd: true,
+          lockscreenVisibility: Notifications.AndroidNotificationVisibility.PUBLIC,
+          showBadge: true,
+        });
+      }
+
       // 3. Register background task
       try {
         await registerBackgroundTask();
@@ -176,6 +193,7 @@ export default function App() {
   return (
     <SafeAreaProvider>
       <StatusBar barStyle="light-content" backgroundColor="#0F0C29" />
+      <OfflineBanner />
       <NavigationContainer>
         <Stack.Navigator
           initialRouteName={initialRoute}

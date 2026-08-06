@@ -88,6 +88,7 @@ def get_subscriber_by_name_and_pin(name: str, pin: str) -> Optional[dict]:
 def add_subscriber(
     name: str, phone: str, email: str, escalation_order: int,
     pin: Optional[str] = None,
+    company_id: Optional[int] = None,
 ) -> int:
     """Insert a new subscriber and return its row id.
 
@@ -100,11 +101,11 @@ def add_subscriber(
         cur = execute_write(
             """
             INSERT INTO subscribers
-                (name, phone, email, pin, escalation_order, active, created_at)
-            VALUES (%s, %s, %s, %s, %s, 1, %s)
+                (name, phone, email, pin, escalation_order, active, created_at, company_id)
+            VALUES (%s, %s, %s, %s, %s, 1, %s, %s)
             RETURNING id
             """,
-            (name, phone, email, hashed_pin, escalation_order, ts),
+            (name, phone, email, hashed_pin, escalation_order, ts, company_id),
         )
         return cur.lastrowid or -1
     except psycopg2.errors.UniqueViolation as exc:
@@ -165,6 +166,21 @@ def update_fcm_token(subscriber_id: int, fcm_token: str) -> bool:
         return True
     except Exception as exc:
         logger.error("update_fcm_token failed: %s", exc)
+        return False
+
+
+def clear_fcm_token(subscriber_id: int) -> bool:
+    """Null-out the FCM token for a subscriber whose token has become invalid
+    (e.g. FCM returned NotRegistered / UNREGISTERED).  Safe to call from any
+    thread — uses the shared psycopg2 connection pool."""
+    try:
+        execute_write(
+            "UPDATE subscribers SET fcm_token = NULL WHERE id = %s",
+            (subscriber_id,),
+        )
+        return True
+    except Exception as exc:
+        logger.error("clear_fcm_token failed for subscriber %d: %s", subscriber_id, exc)
         return False
 
 

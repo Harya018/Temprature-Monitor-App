@@ -17,6 +17,8 @@ import {
 import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
 import { login, saveSession } from '../services/auth';
+import { registerPushToken } from '../services/pushTokenService';
+import { API_BASE } from '../config/config';
 
 const LoginScreen = ({ navigation }) => {
   const [username, setUsername] = useState('');
@@ -41,6 +43,7 @@ const LoginScreen = ({ navigation }) => {
 
       await saveSession(token, username.trim());
       navigation.replace('Main');
+      registerPushToken(token, API_BASE.replace('/api', '')).catch(() => {});
     } catch (err) {
       console.error('[Login] Error:', err);
       if (err.response?.status === 401) {

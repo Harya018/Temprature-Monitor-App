@@ -1,0 +1,25 @@
+.skeleton-table-wrapper {
+  padding: 0.875rem 1.25rem;
+}
+
+.skeleton-row {
+  display: flex;
+  gap: 1rem;
+  padding: 0.875rem 0;
+  border-bottom: 1px solid var(--border);
+}
+
+.skeleton-row:last-child {
+  border-bottom: none;
+}
+
+.skeleton-cell {
+  height: 0.875rem;
+  border-radius: 0.25rem;
+  background: var(--surface-2);
+}
+
+.skeleton-base {
+  background: var(--surface-2);
+  border-radius: 0.375rem;
+}

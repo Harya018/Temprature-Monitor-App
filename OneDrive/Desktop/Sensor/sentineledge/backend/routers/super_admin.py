@@ -348,3 +348,76 @@ async def global_alerts(
     except Exception as exc:
         logger.error("global_alerts failed: %s", exc)
         return JSONResponse(status_code=500, content={"error": str(exc)})
+
+
+@router.get(
+    "/company-parameters",
+    summary="All parameters per company",
+    description=(
+        "Returns each company with its full list of monitored parameters — "
+        "always includes 'Temperature' (built-in) plus any approved custom parameters. "
+        "Requires super_admin role."
+    ),
+)
+async def company_parameters(
+    _admin: dict = Depends(require_super_admin),
+):
+    """
+    Returns a list of company objects, each with a 'parameters' array.
+    Built-in temperature parameter is always present.
+    Custom parameters come from company_parameters table.
+    """
+    try:
+        companies = execute_read(
+            "SELECT id, name, slug, is_active FROM companies ORDER BY id"
+        )
+        if not companies:
+            return []
+
+        # Fetch all active custom parameters, grouped by company_id
+        custom_rows = execute_read(
+            """
+            SELECT company_id, name, unit, min_value, max_value, created_at
+              FROM company_parameters
+             WHERE is_active = TRUE
+             ORDER BY company_id, name
+            """
+        )
+        # Build {company_id: [param, ...]} map
+        from collections import defaultdict
+        custom_by_company: dict = defaultdict(list)
+        for r in (custom_rows or []):
+            cid = r["company_id"]
+            custom_by_company[cid].append({
+                "name":      r["name"],
+                "unit":      r["unit"] or "",
+                "min_value": float(r["min_value"]) if r.get("min_value") is not None else None,
+                "max_value": float(r["max_value"]) if r.get("max_value") is not None else None,
+                "created_at": r["created_at"].isoformat() if r.get("created_at") else None,
+                "builtin":   False,
+            })
+
+        result = []
+        for co in companies:
+            cid = co["id"]
+            params = [
+                {
+                    "name":      "Temperature",
+                    "unit":      "°C",
+                    "min_value": None,
+                    "max_value": None,
+                    "created_at": None,
+                    "builtin":   True,
+                }
+            ] + custom_by_company.get(cid, [])
+            result.append({
+                "company_id": cid,
+                "company_name": co["name"],
+                "is_active":  co["is_active"],
+                "parameters": params,
+            })
+        return result
+
+    except Exception as exc:
+        logger.error("company_parameters failed: %s", exc)
+        return JSONResponse(status_code=500, content={"error": str(exc)})

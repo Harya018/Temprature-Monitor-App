@@ -18,27 +18,40 @@ from models import PushSubscriptionIn, SetPinIn, SubscriberIn, SubscriberOut, Su
 from utils.activity_logger import log_activity
 
 
-def _caller_admin_id(request) -> int:
-    """Best-effort: extract admin id from Bearer session, fall back to super_admin id."""
+def _session_admin(request) -> dict:
+    """Return the admins row for the Bearer-token caller, or {} on failure."""
     auth = request.headers.get("authorization", "")
     if auth.startswith("Bearer "):
         token = auth[7:].strip()
         try:
             rows = execute_read(
-                """SELECT a.id FROM admins a
-                   JOIN admin_sessions s ON s.token = %s
-                   WHERE s.expires_at > NOW() LIMIT 1""",
+                """SELECT a.id, a.company_id FROM admins a
+                   JOIN admin_sessions s ON s.admin_id = a.id
+                   WHERE s.token = %s AND s.expires_at > NOW() LIMIT 1""",
                 (token,),
             )
             if rows:
-                return rows[0]["id"]
+                return rows[0]
         except Exception:
             pass
+    return {}
+
+
+def _caller_admin_id(request) -> int:
+    """Best-effort: extract admin id from Bearer session, fall back to super_admin id."""
+    admin = _session_admin(request)
+    if admin:
+        return admin["id"]
     try:
         rows = execute_read("SELECT id FROM admins WHERE role = 'super_admin' LIMIT 1")
         return rows[0]["id"] if rows else 0
     except Exception:
         return 0
+
+
+def _caller_company_id(request) -> int | None:
+    """Return the company_id of the caller admin, or None for super_admin / unknown."""
+    return _session_admin(request).get("company_id")
 
 router = APIRouter(prefix="/api", tags=["Subscribers"])
 
@@ -86,9 +99,12 @@ async def get_subscribers(request: Request):
 )
 @limiter.limit("30/minute")
 async def add_subscriber(body: SubscriberIn, request: Request):
+    from utils.tier_enforcer import check_subscriber_limit
+    check_subscriber_limit(_caller_company_id(request))
     sub_id = database.add_subscriber(
         body.name, body.phone, body.email, body.escalation_order,
-        pin=body.pin,           # optional; hashed inside the query layer
+        pin=body.pin,
+        company_id=_caller_company_id(request),
     )
     if sub_id == -1:
         raise HTTPException(
