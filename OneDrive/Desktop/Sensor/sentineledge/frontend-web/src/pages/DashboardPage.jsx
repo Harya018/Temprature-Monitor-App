@@ -178,7 +178,7 @@ export default function DashboardPage({ wsData, health, thresholds, onAlertCount
                     liveValue != null && inRange === false ? '#EF4444' : '#7C3AED'
                   }
                   label={p.name}
-                  value={liveValue}
+                  value={liveValue != null ? Number(liveValue).toFixed(2) : null}
                   unit={p.unit || ''}
                   subtitle={subtitle}
                   footer={p.unit ? `Live ${p.name} reading (${p.unit})` : `Live ${p.name} reading`}

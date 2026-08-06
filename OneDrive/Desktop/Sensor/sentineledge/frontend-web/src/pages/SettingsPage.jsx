@@ -60,18 +60,22 @@ function StatusMsg({ msg }) {
   )
 }
 
-// ── Add Parameter form — module-level so it has stable identity and its own
-// state; parent re-renders (e.g. from WebSocket ticks) never interfere. ────────
+// ── Add Parameter form — uncontrolled inputs (ref + defaultValue) so React
+// never touches the DOM value; WebSocket re-renders can't reset the caret. ──────
 function AddParameterForm({ onToast }) {
-  const [paramName, setParamName]             = useState('')
-  const [paramUnit, setParamUnit]             = useState('')
-  const [paramMin,  setParamMin]              = useState('')
-  const [paramMax,  setParamMax]              = useState('')
+  const nameRef = useRef(null)
+  const unitRef = useRef(null)
+  const minRef  = useRef(null)
+  const maxRef  = useRef(null)
   const [paramSubmitting, setParamSubmitting] = useState(false)
   const [paramSaved, setParamSaved]           = useState(false)
 
   async function handleSaveParam() {
-    if (!paramName.trim() || !paramUnit.trim()) {
+    const name = nameRef.current?.value?.trim() || ''
+    const unit = unitRef.current?.value?.trim() || ''
+    const min  = minRef.current?.value  || ''
+    const max  = maxRef.current?.value  || ''
+    if (!name || !unit) {
       onToast({ type: 'warning', message: 'Parameter Name and Unit are required.' })
       return
     }
@@ -85,19 +89,22 @@ function AddParameterForm({ onToast }) {
           Authorization: `Bearer ${token}`,
         },
         body: JSON.stringify({
-          name:      paramName.trim(),
-          unit:      paramUnit.trim(),
-          min_value: paramMin !== '' ? Number(paramMin) : null,
-          max_value: paramMax !== '' ? Number(paramMax) : null,
+          name,
+          unit,
+          min_value: min !== '' ? Number(min) : null,
+          max_value: max !== '' ? Number(max) : null,
         }),
       })
       if (!res.ok) {
         const err = await res.json().catch(() => ({}))
         throw new Error(err.error || `Server error ${res.status}`)
       }
-      onToast({ type: 'success', message: `"${paramName}" submitted for super admin approval.` })
+      onToast({ type: 'success', message: `"${name}" submitted for super admin approval.` })
+      if (nameRef.current) nameRef.current.value = ''
+      if (unitRef.current) unitRef.current.value = ''
+      if (minRef.current)  minRef.current.value  = ''
+      if (maxRef.current)  maxRef.current.value  = ''
       setParamSaved(true)
-      setParamName(''); setParamUnit(''); setParamMin(''); setParamMax('')
       setTimeout(() => setParamSaved(false), 3000)
     } catch (err) {
       onToast({ type: 'error', message: err.message || 'Failed to submit parameter.' })
@@ -117,10 +124,10 @@ function AddParameterForm({ onToast }) {
             Parameter Name
           </label>
           <input
+            ref={nameRef}
             className="form-input"
-            value={paramName}
-            onChange={e => setParamName(e.target.value)}
-            placeholder="e.g. Pressure"
+            defaultValue=""
+            placeholder="e.g. pH"
           />
         </div>
         <div style={{ gridColumn: '1 / -1' }}>
@@ -128,10 +135,10 @@ function AddParameterForm({ onToast }) {
             Unit
           </label>
           <input
+            ref={unitRef}
             className="form-input"
-            value={paramUnit}
-            onChange={e => setParamUnit(e.target.value)}
-            placeholder="e.g. bar, %, mm/s"
+            defaultValue=""
+            placeholder="e.g. pH, bar, %"
           />
         </div>
         <div>
@@ -139,11 +146,11 @@ function AddParameterForm({ onToast }) {
             Min Value
           </label>
           <input
+            ref={minRef}
             className="form-input"
             type="number"
-            value={paramMin}
-            onChange={e => setParamMin(e.target.value)}
-            placeholder="e.g. 0.0"
+            defaultValue=""
+            placeholder="e.g. 6.5"
           />
         </div>
         <div>
@@ -151,10 +158,10 @@ function AddParameterForm({ onToast }) {
             Max Value
           </label>
           <input
+            ref={maxRef}
             className="form-input"
             type="number"
-            value={paramMax}
-            onChange={e => setParamMax(e.target.value)}
+            defaultValue=""
             placeholder="e.g. 10.0"
           />
         </div>

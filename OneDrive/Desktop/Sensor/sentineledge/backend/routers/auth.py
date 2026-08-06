@@ -208,8 +208,8 @@ async def admin_login(body: _AdminLoginIn, request: Request):
     token = secrets.token_hex(32)
     expires_at = datetime.now(timezone.utc) + timedelta(hours=8)
 
-    # Persist session in PostgreSQL
-    database.create_session(token, expires_at)
+    # Persist session in PostgreSQL (include admin_id so token→admin JOIN works)
+    database.create_session(token, expires_at, admin["id"])
 
     logger.info("Admin login: name=%r role=%s", admin["name"], admin["role"])
 

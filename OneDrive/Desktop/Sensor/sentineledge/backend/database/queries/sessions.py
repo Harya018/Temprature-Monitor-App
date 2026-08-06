@@ -20,7 +20,7 @@ from utils.logger import get_logger
 logger = get_logger(__name__)
 
 
-def create_session(token: str, expires_at: datetime) -> None:
+def create_session(token: str, expires_at: datetime, admin_id: int = None) -> None:
     """
     Persist a new admin session token.
 
@@ -28,15 +28,16 @@ def create_session(token: str, expires_at: datetime) -> None:
     ----------
     token      : 64-char hex token issued on login
     expires_at : UTC datetime when this session expires
+    admin_id   : FK to admins.id — required so token→admin lookups work
     """
     try:
         execute_write(
             """
-            INSERT INTO admin_sessions (token, expires_at)
-            VALUES (%s, %s)
+            INSERT INTO admin_sessions (token, expires_at, admin_id)
+            VALUES (%s, %s, %s)
             ON CONFLICT (token) DO NOTHING
             """,
-            (token, expires_at),
+            (token, expires_at, admin_id),
         )
     except Exception as exc:
         logger.error("create_session failed: %s", exc)

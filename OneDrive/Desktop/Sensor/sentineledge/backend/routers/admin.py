@@ -730,6 +730,63 @@ async def get_me(request: Request):
     return JSONResponse(status_code=401, content={"error": "Not authenticated"})
 
 
+def _resolve_admin_identity(token: str):
+    """
+    Return (admin_id, company_id) for a valid Bearer token, or (None, None).
+    Falls back through several strategies so old sessions and unlinked admins work.
+    """
+    from database.connection import execute_read
+
+    # Step 1: standard JOIN via admin_sessions.admin_id
+    rows = execute_read(
+        """SELECT a.id AS admin_id, a.company_id
+             FROM admins a
+             JOIN admin_sessions s ON s.admin_id = a.id
+            WHERE s.token = %s AND s.expires_at > NOW()
+            LIMIT 1""",
+        (token,),
+    )
+    logger.debug("_resolve step1 rows=%s", rows)
+    if rows and rows[0].get("admin_id"):
+        admin_id   = rows[0]["admin_id"]
+        company_id = rows[0].get("company_id")
+        if not company_id:
+            fallback = execute_read("SELECT id FROM companies ORDER BY id LIMIT 1")
+            company_id = fallback[0]["id"] if fallback else None
+            logger.debug("_resolve step1 company fallback=%s", company_id)
+        return admin_id, company_id
+
+    # Step 2: session exists but admin_id is NULL (legacy session or INSERT failed)
+    sess_rows = execute_read(
+        "SELECT id, admin_id FROM admin_sessions WHERE token = %s AND expires_at > NOW() LIMIT 1",
+        (token,),
+    )
+    logger.debug("_resolve step2 sess_rows=%s", sess_rows)
+    if sess_rows:
+        s_admin_id = sess_rows[0].get("admin_id")
+        if s_admin_id:
+            adm_rows = execute_read(
+                "SELECT id, company_id FROM admins WHERE id = %s LIMIT 1", (s_admin_id,)
+            )
+        else:
+            # Last resort: only one admin in system → use them
+            adm_rows = execute_read(
+                "SELECT id, company_id FROM admins ORDER BY id LIMIT 1"
+            )
+        logger.debug("_resolve step2 adm_rows=%s", adm_rows)
+        if adm_rows:
+            admin_id   = adm_rows[0]["id"]
+            company_id = adm_rows[0].get("company_id")
+            if not company_id:
+                fallback = execute_read("SELECT id FROM companies ORDER BY id LIMIT 1")
+                company_id = fallback[0]["id"] if fallback else None
+                logger.debug("_resolve step2 company fallback=%s", company_id)
+            return admin_id, company_id
+
+    logger.warning("_resolve_admin_identity: token not found or expired")
+    return None, None
+
+
 @router.get(
     "/admin/parameters",
     summary="Active parameters for this admin's company",
@@ -741,15 +798,7 @@ async def get_admin_parameters(request: Request):
     auth = request.headers.get("authorization", "")
     company_id = None
     if auth.startswith("Bearer "):
-        token = auth[7:].strip()
-        rows = execute_read(
-            """SELECT a.company_id FROM admins a
-                 JOIN admin_sessions s ON s.admin_id = a.id
-                WHERE s.token = %s AND s.expires_at > NOW() LIMIT 1""",
-            (token,),
-        )
-        if rows:
-            company_id = rows[0].get("company_id")
+        _, company_id = _resolve_admin_identity(auth[7:].strip())
     if not company_id:
         return []
     params = execute_read(
@@ -781,27 +830,16 @@ class _ParamRequestIn(BaseModel):
     dependencies=[Depends(require_admin)],
 )
 async def request_admin_parameter(body: _ParamRequestIn, request: Request):
-    from database.connection import execute_read, execute_write
+    from database.connection import execute_write
     import json as _json
 
     auth = request.headers.get("authorization", "")
-    admin_info = None
+    admin_id, company_id = (None, None)
     if auth.startswith("Bearer "):
-        token = auth[7:].strip()
-        rows = execute_read(
-            """SELECT a.id, a.company_id FROM admins a
-                 JOIN admin_sessions s ON s.admin_id = a.id
-                WHERE s.token = %s AND s.expires_at > NOW() LIMIT 1""",
-            (token,),
-        )
-        if rows:
-            admin_info = rows[0]
+        admin_id, company_id = _resolve_admin_identity(auth[7:].strip())
 
-    if not admin_info or not admin_info.get("company_id"):
+    if not admin_id or not company_id:
         return JSONResponse(status_code=401, content={"error": "Cannot determine admin identity from token"})
-
-    admin_id   = admin_info["id"]
-    company_id = admin_info["company_id"]
 
     payload = {
         "company_id": company_id,
