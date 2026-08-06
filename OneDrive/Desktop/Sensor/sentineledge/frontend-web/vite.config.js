@@ -10,14 +10,12 @@ export default defineConfig({
   server: {
     proxy: {
       '/api': {
-        target: 'https://localhost:5000',
-        secure: false,
+        target: 'http://localhost:5000',
         changeOrigin: true,
       },
       '/ws': {
-        target: 'wss://localhost:5000',
+        target: 'ws://localhost:5000',
         ws: true,
-        secure: false,
       }
     }
   }
