@@ -131,6 +131,8 @@ const AddParameterForm = memo(function AddParameterForm({ onToast }) {
             defaultValue=""
             autoComplete="off"
             placeholder="e.g. pH"
+            style={{ caretColor: '#7C3AED' }}
+            onMouseDown={e => { e.preventDefault(); e.currentTarget.focus() }}
           />
         </div>
         <div style={{ gridColumn: '1 / -1' }}>
@@ -143,6 +145,8 @@ const AddParameterForm = memo(function AddParameterForm({ onToast }) {
             defaultValue=""
             autoComplete="off"
             placeholder="e.g. pH, bar, %"
+            style={{ caretColor: '#7C3AED' }}
+            onMouseDown={e => { e.preventDefault(); e.currentTarget.focus() }}
           />
         </div>
         <div>
@@ -156,6 +160,8 @@ const AddParameterForm = memo(function AddParameterForm({ onToast }) {
             defaultValue=""
             autoComplete="off"
             placeholder="e.g. 6.5"
+            style={{ caretColor: '#7C3AED' }}
+            onMouseDown={e => { e.preventDefault(); e.currentTarget.focus() }}
           />
         </div>
         <div>
@@ -169,6 +175,8 @@ const AddParameterForm = memo(function AddParameterForm({ onToast }) {
             defaultValue=""
             autoComplete="off"
             placeholder="e.g. 10.0"
+            style={{ caretColor: '#7C3AED' }}
+            onMouseDown={e => { e.preventDefault(); e.currentTarget.focus() }}
           />
         </div>
       </div>
