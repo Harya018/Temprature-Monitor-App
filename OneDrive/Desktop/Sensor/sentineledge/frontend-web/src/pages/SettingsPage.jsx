@@ -2,7 +2,7 @@
  * src/pages/SettingsPage.jsx
  * Threshold config, demo controls (CSV playback), and admin info.
  */
-import { useState, useEffect, useCallback, useRef } from 'react'
+import { useState, useEffect, useCallback, useRef, memo } from 'react'
 import { Settings2, RotateCcw, Zap, Database, Info, Server, RefreshCw, AlertTriangle, Mail, CheckCircle, MessageSquare, Smartphone, PlusCircle, Pencil } from 'lucide-react'
 import {
   fetchThresholds, updateThresholds, resetThresholds,
@@ -60,9 +60,11 @@ function StatusMsg({ msg }) {
   )
 }
 
-// ── Add Parameter form — uncontrolled inputs (ref + defaultValue) so React
-// never touches the DOM value; WebSocket re-renders can't reset the caret. ──────
-function AddParameterForm({ onToast }) {
+// ── Add Parameter form — memo + uncontrolled inputs.
+// memo: skips re-render when parent updates (addToast ref is stable).
+// uncontrolled: React never touches the DOM value so browser keeps the caret.
+// autoComplete="off": stops browser autofill from grabbing focus on click. ───────
+const AddParameterForm = memo(function AddParameterForm({ onToast }) {
   const nameRef = useRef(null)
   const unitRef = useRef(null)
   const minRef  = useRef(null)
@@ -127,6 +129,7 @@ function AddParameterForm({ onToast }) {
             ref={nameRef}
             className="form-input"
             defaultValue=""
+            autoComplete="off"
             placeholder="e.g. pH"
           />
         </div>
@@ -138,6 +141,7 @@ function AddParameterForm({ onToast }) {
             ref={unitRef}
             className="form-input"
             defaultValue=""
+            autoComplete="off"
             placeholder="e.g. pH, bar, %"
           />
         </div>
@@ -150,6 +154,7 @@ function AddParameterForm({ onToast }) {
             className="form-input"
             type="number"
             defaultValue=""
+            autoComplete="off"
             placeholder="e.g. 6.5"
           />
         </div>
@@ -162,6 +167,7 @@ function AddParameterForm({ onToast }) {
             className="form-input"
             type="number"
             defaultValue=""
+            autoComplete="off"
             placeholder="e.g. 10.0"
           />
         </div>
@@ -196,7 +202,7 @@ function AddParameterForm({ onToast }) {
       </div>
     </>
   )
-}
+})
 
 export default function SettingsPage() {
   const { toasts, addToast, dismiss } = useToast()
