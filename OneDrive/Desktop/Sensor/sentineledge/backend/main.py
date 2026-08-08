@@ -45,7 +45,7 @@ from core.validator import validate_reading
 from core.daily_report import schedule_daily_report
 from config import (
     APP_ENV, DEMO_MODE, SERVER_PORT, MODULE_STATUS,
-    SMTP_USER, SMTP_PASSWORD, SMS_GATEWAY_URL, ADMIN_PASSWORD,
+    SMTP_USER, SMTP_PASSWORD, ADMIN_PASSWORD,
     APP_VERSION,
 )
 from models import ReadingOut
@@ -238,14 +238,22 @@ async def lifespan(app: FastAPI):
     from utils.security import migrate_env_admin_password
     migrate_env_admin_password()
 
-    # 2. Clean up any stale admin sessions from previous server runs
+    # 2. Clean up any stale sessions from previous server runs
     try:
         from database.queries.sessions import cleanup_expired_sessions
         expired = cleanup_expired_sessions()
         if expired:
             logger.info("Startup: cleaned up %d expired admin session(s)", expired)
     except Exception as exc:
-        logger.warning("Startup: session cleanup failed: %s", exc)
+        logger.warning("Startup: admin session cleanup failed: %s", exc)
+
+    try:
+        from database.queries.subscriber_sessions import cleanup_expired_sub_sessions
+        expired_sub = cleanup_expired_sub_sessions()
+        if expired_sub:
+            logger.info("Startup: cleaned up %d expired subscriber session(s)", expired_sub)
+    except Exception as exc:
+        logger.warning("Startup: subscriber session cleanup failed: %s", exc)
 
     # 3. Resume any pending escalations from before last shutdown
     await escalation.resume_pending_escalations()
@@ -272,17 +280,20 @@ async def lifespan(app: FastAPI):
     )
 
     # ── Startup validation ────────────────────────────────────────────────────
-    if APP_ENV == "production":
-        if not SMTP_USER:
-            logger.warning("SMTP_USER not set — email alerts will fail")
-        if not SMTP_PASSWORD:
-            logger.warning("SMTP_PASSWORD not set — email alerts will fail")
-        if not SMS_GATEWAY_URL:
-            logger.warning("SMS_GATEWAY_URL not set — SMS alerts will fail")
-        if ADMIN_PASSWORD == "admin123":
-            logger.warning("ADMIN_PASSWORD is default — change before deployment")
-    else:
-        logger.info("Running in DEVELOPMENT mode — using test configuration")
+    _WARN = logger.warning
+    if not SMTP_USER or not SMTP_PASSWORD:
+        _WARN("SECURITY: SMTP_USER/SMTP_PASSWORD not set — email alerts will fail")
+    if ADMIN_PASSWORD in ("admin123", "sentineledge-admin", "password", ""):
+        _WARN("SECURITY: ADMIN_PASSWORD is a known default — change it before exposing to a network")
+    from config import VAPID_PUBLIC_KEY, VAPID_PRIVATE_KEY
+    if not VAPID_PUBLIC_KEY or not VAPID_PRIVATE_KEY:
+        _WARN("SECURITY: VAPID keys not set — web push notifications will not work")
+    _default_db = "postgresql://sentineledge:sentineledge123@localhost"
+    import os as _os
+    if _os.getenv("DATABASE_URL", "").startswith(_default_db) or not _os.getenv("DATABASE_URL"):
+        _WARN("SECURITY: DATABASE_URL uses default credentials — set a strong password in .env")
+    if APP_ENV != "production":
+        logger.info("Running in %s mode — set APP_ENV=production for production checks", APP_ENV)
 
     # 5. Start GSM SMS queue worker — owns the serial port for the server lifetime
     from modules.sms.sender import start_gsm_worker

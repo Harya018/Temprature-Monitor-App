@@ -87,7 +87,6 @@ export default function AlertsPage({ onCountChange }) {
         method: 'DELETE',
         headers: {
           'Content-Type': 'application/json',
-          'X-Admin-Password': password,
           ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
         },
         credentials: 'include',

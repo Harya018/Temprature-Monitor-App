@@ -2,8 +2,7 @@
 routers/auth.py — Mobile app authentication endpoints.
 
 Provides name + PIN login for subscribers.
-Tokens are stored in-memory; cleared on server restart.
-Clients (React Native) store the token in AsyncStorage and re-login on restart.
+Tokens are stored in PostgreSQL (subscriber_sessions table) — survive restarts.
 
 Endpoints
 ---------
@@ -14,8 +13,6 @@ GET  /api/auth/me       — requires X-Auth-Token header
 POST /api/auth/admin-login  — sub-admin/admin dashboard login (uses DB sessions)
 GET  /api/auth/admin-me     — returns current admin session info
 """
-
-
 
 import secrets
 from datetime import datetime, timezone, timedelta
@@ -33,32 +30,29 @@ logger = get_logger(__name__)
 
 router = APIRouter(prefix="/api/auth", tags=["Auth"])
 
-# ── In-memory subscriber token store ─────────────────────────────────────────
-# Key: token (64-char hex string)
-# Value: {"subscriber_id": int, "name": str, "escalation_order": int,
-#         "expires_at": datetime}
-#
-# Cleared on every server restart — clients must re-login.
-active_tokens: dict[str, dict[str, Any]] = {}
-
 _TOKEN_TTL_DAYS = 30
 
 
 def _get_valid_token(x_auth_token: str | None) -> dict[str, Any]:
-    """Validate a token header and return its payload, or raise HTTP 401."""
-    if not x_auth_token or x_auth_token not in active_tokens:
+    """Validate a subscriber token against DB and return its payload, or raise HTTP 401."""
+    from database.queries.subscriber_sessions import get_sub_session
+    if not x_auth_token:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail={"error": "InvalidToken", "message": "Missing or invalid X-Auth-Token"},
         )
-    payload = active_tokens[x_auth_token]
-    if datetime.now(timezone.utc) > payload["expires_at"]:
-        del active_tokens[x_auth_token]
+    session = get_sub_session(x_auth_token)
+    if session is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail={"error": "TokenExpired", "message": "Token has expired — please log in again"},
+            detail={"error": "TokenExpired", "message": "Token not found or expired — please log in again"},
         )
-    return payload
+    return {
+        "subscriber_id":    session["subscriber_id"],
+        "name":             session["name"],
+        "escalation_order": session["escalation_order"],
+        "expires_at":       session["expires_at"],
+    }
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
@@ -85,14 +79,12 @@ async def login(body: LoginIn, request: Request) -> LoginOut:
             detail={"error": "InvalidCredentials", "message": "Name or PIN is incorrect"},
         )
 
-    token = secrets.token_hex(32)          # 64-char hex string
+    token      = secrets.token_hex(32)
     expires_at = datetime.now(timezone.utc) + timedelta(days=_TOKEN_TTL_DAYS)
-    active_tokens[token] = {
-        "subscriber_id":    subscriber["id"],
-        "name":             subscriber["name"],
-        "escalation_order": subscriber["escalation_order"],
-        "expires_at":       expires_at,
-    }
+
+    from database.queries.subscriber_sessions import create_sub_session
+    create_sub_session(token, subscriber["id"], expires_at)
+
     logger.info("Login successful for subscriber id=%d name=%r", subscriber["id"], subscriber["name"])
     logger.info(
         f"Login SUCCESS — name: {body.name}, "
@@ -114,7 +106,8 @@ async def login(body: LoginIn, request: Request) -> LoginOut:
 )
 async def logout(x_auth_token: str = Header(default=None)):
     _get_valid_token(x_auth_token)   # raises 401 if bad
-    del active_tokens[x_auth_token]
+    from database.queries.subscriber_sessions import delete_sub_session
+    delete_sub_session(x_auth_token)
     logger.info("Token invalidated (logout)")
     return {"message": "Logged out"}
 

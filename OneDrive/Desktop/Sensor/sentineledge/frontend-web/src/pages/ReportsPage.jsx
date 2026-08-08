@@ -8,10 +8,8 @@ import { fetchDailyReports } from '../services/api.js'
 import { SkeletonTable } from '../components/Skeleton'
 
 function adminHeaders() {
-  const token    = sessionStorage.getItem('admin_token') || ''
-  const password = sessionStorage.getItem('adminPassword') || 'admin123'
+  const token = sessionStorage.getItem('admin_token') || ''
   return {
-    'X-Admin-Password': password,
     ...(token ? { Authorization: `Bearer ${token}` } : {}),
   }
 }

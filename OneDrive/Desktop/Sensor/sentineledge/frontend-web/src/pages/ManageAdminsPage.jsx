@@ -9,9 +9,10 @@ import ConfirmModal from '../components/shared/ConfirmModal'
 import { SkeletonTable } from '../components/Skeleton'
 
 function adminHeaders() {
+  const token = sessionStorage.getItem('admin_token') || ''
   return {
     'Content-Type': 'application/json',
-    'X-Admin-Password': sessionStorage.getItem('adminPassword') || 'admin123',
+    ...(token ? { Authorization: `Bearer ${token}` } : {}),
   }
 }
 

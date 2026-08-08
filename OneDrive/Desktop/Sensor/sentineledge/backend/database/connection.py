@@ -1181,6 +1181,26 @@ def _run_migrations(pool: psycopg2.pool.ThreadedConnectionPool) -> None:
             # Migration 43: delete_parameter support in pending_approvals — no schema change needed
             # (action_type='delete_parameter' reuses the existing pending_approvals table)
 
+            # Migration 44: subscriber_sessions — persistent mobile auth tokens (replaces in-memory dict)
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS subscriber_sessions (
+                    id            SERIAL      PRIMARY KEY,
+                    token         TEXT        NOT NULL UNIQUE,
+                    subscriber_id INTEGER     NOT NULL,
+                    created_at    TIMESTAMPTZ DEFAULT NOW(),
+                    expires_at    TIMESTAMPTZ NOT NULL,
+                    last_used_at  TIMESTAMPTZ DEFAULT NOW()
+                )
+                """
+            )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_sub_sessions_token ON subscriber_sessions(token)"
+            )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_sub_sessions_expires ON subscriber_sessions(expires_at)"
+            )
+
         conn.commit()
     except Exception as exc:
         conn.rollback()

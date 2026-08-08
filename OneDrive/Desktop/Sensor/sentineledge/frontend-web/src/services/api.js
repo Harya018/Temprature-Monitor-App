@@ -4,18 +4,13 @@
  * Uses RELATIVE URLs so this works whether the app is served
  * on port 5000, 8000, or any reverse proxy — no hardcoded host/port.
  *
- * Auth: Sends BOTH X-Admin-Password (legacy) AND Authorization: Bearer <token>
- * (new) so either method works on the backend.
+ * Auth: Authorization: Bearer <token> from POST /api/auth/admin-login.
  */
 
-function adminHeaders(overridePassword) {
-  const token    = sessionStorage.getItem('admin_token') || ''
-  const password = overridePassword
-    || sessionStorage.getItem('adminPassword')
-    || 'admin123'
+function adminHeaders() {
+  const token = sessionStorage.getItem('admin_token') || ''
   return {
-    'Content-Type':    'application/json',
-    'X-Admin-Password': password,
+    'Content-Type': 'application/json',
     ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
   }
 }

@@ -25,11 +25,9 @@ import './SuperAdmin.css'
 // ─── API layer ────────────────────────────────────────────────────────────────
 
 function adminHeaders() {
-  const token    = sessionStorage.getItem('admin_token') || ''
-  const password = sessionStorage.getItem('adminPassword') || ''
+  const token = sessionStorage.getItem('admin_token') || ''
   return {
     'Content-Type': 'application/json',
-    'X-Admin-Password': password,
     ...(token ? { Authorization: `Bearer ${token}` } : {}),
   }
 }

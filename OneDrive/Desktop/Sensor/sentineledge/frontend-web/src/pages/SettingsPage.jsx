@@ -13,19 +13,25 @@ import Badge from '../components/shared/Badge.jsx'
 import { useToast, ToastContainer } from '../components/shared/Toast.jsx'
 import PasswordConfirmModal from '../components/PasswordConfirmModal.jsx'
 
+function _bearerHeaders(extra = {}) {
+  const token = sessionStorage.getItem('admin_token') || ''
+  return {
+    'Content-Type': 'application/json',
+    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    ...extra,
+  }
+}
+
 const simulateDemo = (speed) => fetch('/api/simulate/demo', {
   method: 'POST',
-  headers: {
-    'Content-Type': 'application/json',
-    'X-Admin-Password': sessionStorage.getItem('adminPassword') || '',
-  },
+  headers: _bearerHeaders(),
   body: JSON.stringify({ speed }),
   credentials: 'include',
 }).then(r => r.json())
 
 const simulateReset = () => fetch('/api/simulate/reset', {
   method: 'POST',
-  headers: { 'X-Admin-Password': sessionStorage.getItem('adminPassword') || '' },
+  headers: _bearerHeaders(),
   credentials: 'include',
 }).then(r => r.json())
 
@@ -480,10 +486,7 @@ export default function SettingsPage() {
     try {
       const res = await fetch('/api/admin/test-email', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Admin-Password': sessionStorage.getItem('adminPassword') || 'admin123',
-        },
+        headers: _bearerHeaders(),
         body: JSON.stringify({ email: testEmailAddr.trim() }),
         credentials: 'include',
       })
@@ -508,10 +511,7 @@ export default function SettingsPage() {
     try {
       const res = await fetch('/api/admin/test-sms', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'X-Admin-Password': sessionStorage.getItem('adminPassword') || 'admin123',
-        },
+        headers: _bearerHeaders(),
         body: JSON.stringify({ phone: testSmsPhone.trim() }),
         credentials: 'include',
       })

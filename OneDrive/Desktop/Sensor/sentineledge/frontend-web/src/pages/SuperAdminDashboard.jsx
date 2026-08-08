@@ -25,10 +25,8 @@ import {
 
 function adminHeaders() {
   const token = sessionStorage.getItem('admin_token') || ''
-  const password = sessionStorage.getItem('adminPassword') || ''
   return {
     'Content-Type': 'application/json',
-    'X-Admin-Password': password,
     ...(token ? { Authorization: `Bearer ${token}` } : {}),
   }
 }

@@ -92,13 +92,11 @@ export default function HealthPage() {
     if (!smsPhone.trim()) return
     setSmsSending(true)
     try {
-      const token    = sessionStorage.getItem('admin_token') || ''
-      const password = sessionStorage.getItem('adminPassword') || 'admin123'
+      const token = sessionStorage.getItem('admin_token') || ''
       const res = await fetch('/api/admin/test-sms', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'X-Admin-Password': password,
           ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
         },
         body: JSON.stringify({ phone: smsPhone.trim() }),
