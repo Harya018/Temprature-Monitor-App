@@ -275,12 +275,25 @@ def csv_clear():
 
 # ── shared query helpers ──────────────────────────────────────────────────────
 
-def _live_param_col(parameter: str) -> Optional[str]:
-    """Map parameter name to readings column. Only temperature exists live."""
+import re as _re
+
+def _safe_param(name: str) -> bool:
+    """Allow only safe parameter names to prevent SQL injection."""
+    return bool(_re.match(r'^[a-zA-Z0-9_ ]{1,100}$', name))
+
+def _live_param_expr(parameter: str) -> Optional[str]:
+    """Return SQL expression for the given parameter from the readings table."""
     if parameter == "temperature":
         return "temperature"
-    return None  # readings has no pressure/humidity/vibration column
+    if _safe_param(parameter):
+        return f"(extra_params->>'{parameter}')::float"
+    return None
 
+def _live_extra_filter(parameter: str) -> str:
+    """Return extra WHERE clause for non-temperature parameters."""
+    if parameter == "temperature":
+        return ""
+    return f"AND extra_params ? '{parameter}'"
 
 def _csv_param_col(parameter: str) -> Optional[str]:
     mapping = {"temperature": "temperature", "pressure": "pressure"}
@@ -306,18 +319,20 @@ def chart_live_trend(
     ts_start = f"{start}T00:00:00+00:00"
     ts_end   = f"{end}T23:59:59+00:00"
 
-    live_col = _live_param_col(parameter)
-    csv_col  = _csv_param_col(parameter)
+    live_col    = _live_param_expr(parameter)
+    live_filter = _live_extra_filter(parameter)
+    csv_col     = _csv_param_col(parameter)
 
     rows: list[dict] = []
 
     if source in ("live", "both") and live_col:
         rows += execute_read(
             f"""
-            SELECT {live_col}::float AS value,
+            SELECT ({live_col})::float AS value,
                    timestamp::timestamptz AS recorded_at
             FROM readings
             WHERE is_valid = 1
+              {live_filter}
               AND timestamp::timestamptz BETWEEN %s AND %s
             ORDER BY id DESC
             LIMIT %s
@@ -376,20 +391,22 @@ def chart_daily_avg(
     ts_start = f"{start}T00:00:00+00:00"
     ts_end   = f"{end}T23:59:59+00:00"
 
-    live_col = _live_param_col(parameter)
-    csv_col  = _csv_param_col(parameter)
+    live_col    = _live_param_expr(parameter)
+    live_filter = _live_extra_filter(parameter)
+    csv_col     = _csv_param_col(parameter)
     rows: list[dict] = []
 
     if source in ("live", "both") and live_col:
         rows += execute_read(
             f"""
             SELECT DATE(timestamp::timestamptz)::text               AS date,
-                   ROUND(AVG({live_col})::numeric, 2)               AS avg,
-                   ROUND(MIN({live_col})::numeric, 2)               AS min,
-                   ROUND(MAX({live_col})::numeric, 2)               AS max,
+                   ROUND(AVG(({live_col}))::numeric, 2)             AS avg,
+                   ROUND(MIN(({live_col}))::numeric, 2)             AS min,
+                   ROUND(MAX(({live_col}))::numeric, 2)             AS max,
                    COUNT(*)                                         AS reading_count
             FROM readings
             WHERE is_valid = 1
+              {live_filter}
               AND timestamp::timestamptz BETWEEN %s AND %s
             GROUP BY DATE(timestamp::timestamptz)
             ORDER BY DATE(timestamp::timestamptz)
@@ -455,18 +472,20 @@ def chart_hourly_avg(
     ts_start = f"{start}T00:00:00+00:00"
     ts_end   = f"{end}T23:59:59+00:00"
 
-    live_col = _live_param_col(parameter)
-    csv_col  = _csv_param_col(parameter)
+    live_col    = _live_param_expr(parameter)
+    live_filter = _live_extra_filter(parameter)
+    csv_col     = _csv_param_col(parameter)
     rows: list[dict] = []
 
     if source in ("live", "both") and live_col:
         rows += execute_read(
             f"""
             SELECT EXTRACT(HOUR FROM timestamp::timestamptz)::int    AS hour,
-                   ROUND(AVG({live_col})::numeric, 2)               AS avg,
+                   ROUND(AVG(({live_col}))::numeric, 2)             AS avg,
                    COUNT(*)                                         AS reading_count
             FROM readings
             WHERE is_valid = 1
+              {live_filter}
               AND timestamp::timestamptz BETWEEN %s AND %s
             GROUP BY EXTRACT(HOUR FROM timestamp::timestamptz)
             ORDER BY hour
@@ -522,19 +541,21 @@ def chart_weekly_avg(
     ts_start = f"{start}T00:00:00+00:00"
     ts_end   = f"{end}T23:59:59+00:00"
 
-    live_col = _live_param_col(parameter)
-    csv_col  = _csv_param_col(parameter)
+    live_col    = _live_param_expr(parameter)
+    live_filter = _live_extra_filter(parameter)
+    csv_col     = _csv_param_col(parameter)
     rows: list[dict] = []
 
     if source in ("live", "both") and live_col:
         rows += execute_read(
             f"""
             SELECT EXTRACT(WEEK FROM timestamp::timestamptz)::int    AS week_number,
-                   ROUND(AVG({live_col})::numeric, 2)               AS avg,
-                   ROUND(MIN({live_col})::numeric, 2)               AS min,
-                   ROUND(MAX({live_col})::numeric, 2)               AS max
+                   ROUND(AVG(({live_col}))::numeric, 2)             AS avg,
+                   ROUND(MIN(({live_col}))::numeric, 2)             AS min,
+                   ROUND(MAX(({live_col}))::numeric, 2)             AS max
             FROM readings
             WHERE is_valid = 1
+              {live_filter}
               AND timestamp::timestamptz BETWEEN %s AND %s
             GROUP BY EXTRACT(WEEK FROM timestamp::timestamptz)
             ORDER BY week_number
@@ -589,8 +610,9 @@ def chart_distribution(
     ts_start = f"{start}T00:00:00+00:00"
     ts_end   = f"{end}T23:59:59+00:00"
 
-    live_col = _live_param_col(parameter)
-    csv_col  = _csv_param_col(parameter)
+    live_col    = _live_param_expr(parameter)
+    live_filter = _live_extra_filter(parameter)
+    csv_col     = _csv_param_col(parameter)
 
     def _bucket_sql(col: str) -> str:
         return f"""
@@ -614,7 +636,8 @@ def chart_distribution(
             f"""
             SELECT {_bucket_sql(live_col)} AS bucket_label, COUNT(*) AS count
             FROM readings
-            WHERE is_valid = 1 AND {live_col} IS NOT NULL
+            WHERE is_valid = 1
+              {live_filter}
               AND timestamp::timestamptz BETWEEN %s AND %s
             GROUP BY bucket_label
             """,
@@ -888,15 +911,16 @@ def chart_summary_stats(
     ts_start = f"{start}T00:00:00+00:00"
     ts_end   = f"{end}T23:59:59+00:00"
 
-    live_col = _live_param_col(parameter)
-    csv_col  = _csv_param_col(parameter)
+    live_col    = _live_param_expr(parameter)
+    live_filter = _live_extra_filter(parameter)
+    csv_col     = _csv_param_col(parameter)
 
     values: list[float] = []
 
     if source in ("live", "both") and live_col:
         for r in execute_read(
-            f"SELECT {live_col}::float AS v FROM readings WHERE is_valid=1 AND {live_col} IS NOT NULL "
-            f"AND timestamp::timestamptz BETWEEN %s AND %s",
+            f"SELECT ({live_col})::float AS v FROM readings WHERE is_valid=1 "
+            f"{live_filter} AND timestamp::timestamptz BETWEEN %s AND %s",
             (ts_start, ts_end),
         ):
             if r["v"] is not None:
@@ -1050,9 +1074,10 @@ def chart_predictions(
     Returns predictions only when a breach is estimated within 4 hours.
     source=csv uses csv_sensor_history; everything else uses the readings table.
     """
-    live_col = _live_param_col(parameter)
-    csv_col  = _csv_param_col(parameter)
-    unit     = "°C" if parameter == "temperature" else "hPa" if parameter == "pressure" else ""
+    live_col    = _live_param_expr(parameter)
+    live_filter = _live_extra_filter(parameter)
+    csv_col     = _csv_param_col(parameter)
+    unit        = "°C" if parameter == "temperature" else "hPa" if parameter == "pressure" else ""
 
     # Fetch one reading per minute over the last 20 minutes for a meaningful slope.
     # Rapid readings (multiple per second) collapse into noise without this bucketing.
@@ -1074,10 +1099,10 @@ def chart_predictions(
         rows = execute_read(
             f"""
             SELECT DISTINCT ON (DATE_TRUNC('minute', timestamp::timestamptz))
-                   {live_col}::float AS v,
+                   ({live_col})::float AS v,
                    EXTRACT(EPOCH FROM timestamp::timestamptz) AS ts
               FROM readings
-             WHERE is_valid = 1 AND {live_col} IS NOT NULL
+             WHERE is_valid = 1 {live_filter}
              ORDER BY DATE_TRUNC('minute', timestamp::timestamptz) DESC, timestamp::timestamptz DESC
              LIMIT 20
             """

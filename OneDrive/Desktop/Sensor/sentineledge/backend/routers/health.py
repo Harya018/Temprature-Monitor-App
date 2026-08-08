@@ -27,6 +27,7 @@ from fastapi import APIRouter, Request
 import config
 from config import MODULE_STATUS
 from middleware.rate_limit import limiter
+import database
 
 router = APIRouter(prefix="/api")
 logger = logging.getLogger("sentineledge.routers.health")
@@ -284,10 +285,13 @@ async def health(request: Request):
     ws_status     = _probe_websocket()
     sensor_status = _probe_sensor()
 
+    alerts_today = database.get_alerts_today_count()
+
     return {
         "status":         _overall_status(),
         "timestamp":      datetime.now(timezone.utc).isoformat(),
         "uptime_seconds": int((datetime.now(timezone.utc) - _START_TIME).total_seconds()),
+        "alerts_today":   alerts_today,
         "modules": {
             "database":  {"status": db_status},
             "email":     {"status": email_status},

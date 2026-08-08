@@ -3,13 +3,18 @@ routers/reports.py — Daily summary reports.
 
 Endpoints:
     GET /api/reports/daily?days=30
+    GET /api/reports/readings-export?from_date=YYYY-MM-DD&to_date=YYYY-MM-DD&format=csv|json
 
 Performance rewrite: replaced 90 serial round-trip queries (30 days × 3 queries,
 with Python-side aggregation on raw rows) with 3 bulk aggregate queries that let
 PostgreSQL do all grouping and math.  Query time on 893k-row tables: <500 ms.
 """
 
+import io
+import csv
+import json
 from fastapi import APIRouter, Depends, Query
+from fastapi.responses import StreamingResponse
 
 from middleware.auth import require_admin
 from database.connection import execute_read
@@ -147,3 +152,91 @@ async def daily_reports(days: int = Query(30, ge=1, le=90)):
         })
 
     return results
+
+
+@router.get("/readings-export", dependencies=[Depends(require_admin)])
+async def readings_export(
+    from_date: str  = Query(..., description="YYYY-MM-DD"),
+    to_date:   str  = Query(..., description="YYYY-MM-DD"),
+    fmt:       str  = Query("csv", alias="format", regex="^(csv|json)$"),
+):
+    """
+    Export all stored readings (including extra_params) for a date range.
+    Returns CSV or JSON. Intended for the Reports page download feature.
+    """
+    ts_start = f"{from_date}T00:00:00+00:00"
+    ts_end   = f"{to_date}T23:59:59+00:00"
+
+    try:
+        rows = execute_read(
+            """
+            SELECT id, temperature, timestamp, is_valid, extra_params
+            FROM readings
+            WHERE timestamp::timestamptz BETWEEN %s AND %s
+            ORDER BY id ASC
+            LIMIT 100000
+            """,
+            (ts_start, ts_end),
+        )
+    except Exception as exc:
+        logger.error("readings_export query failed: %s", exc)
+        rows = []
+
+    # Collect all extra_params keys seen across all rows
+    all_extra_keys: list[str] = []
+    seen_keys: set[str] = set()
+    for r in rows:
+        ep = r.get("extra_params") or {}
+        if isinstance(ep, str):
+            try: ep = json.loads(ep)
+            except Exception: ep = {}
+        for k in ep:
+            if k not in seen_keys:
+                seen_keys.add(k)
+                all_extra_keys.append(k)
+
+    if fmt == "json":
+        result = []
+        for r in rows:
+            ep = r.get("extra_params") or {}
+            if isinstance(ep, str):
+                try: ep = json.loads(ep)
+                except Exception: ep = {}
+            result.append({
+                "id":          r["id"],
+                "temperature": r["temperature"],
+                "timestamp":   str(r["timestamp"]),
+                "is_valid":    bool(r["is_valid"]),
+                **{k: ep.get(k) for k in all_extra_keys},
+            })
+        content = json.dumps(result)
+        return StreamingResponse(
+            iter([content]),
+            media_type="application/json",
+            headers={"Content-Disposition": f'attachment; filename="readings_{from_date}_{to_date}.json"'},
+        )
+
+    # CSV
+    output = io.StringIO()
+    base_fields = ["id", "timestamp", "temperature", "is_valid"] + all_extra_keys
+    writer = csv.DictWriter(output, fieldnames=base_fields, extrasaction="ignore")
+    writer.writeheader()
+    for r in rows:
+        ep = r.get("extra_params") or {}
+        if isinstance(ep, str):
+            try: ep = json.loads(ep)
+            except Exception: ep = {}
+        writer.writerow({
+            "id":          r["id"],
+            "timestamp":   str(r["timestamp"]),
+            "temperature": r["temperature"],
+            "is_valid":    int(r["is_valid"]),
+            **{k: ep.get(k, "") for k in all_extra_keys},
+        })
+
+    csv_content = output.getvalue()
+    return StreamingResponse(
+        iter([csv_content]),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="readings_{from_date}_{to_date}.csv"'},
+    )

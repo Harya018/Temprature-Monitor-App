@@ -536,6 +536,7 @@ async def websocket_endpoint(ws: WebSocket):
                 reading["temperature"],
                 reading["timestamp"],
                 is_valid=is_valid,
+                extra_params=dict(extra_sensor.extra_readings),
             )
 
             if not is_valid:

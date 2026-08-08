@@ -374,6 +374,31 @@ async def approve_approval(
             logger.error(
                 "Approval %d: add_parameter execution failed: %s", approval_id, _exec_exc
             )
+    elif action_type == "delete_parameter":
+        try:
+            execute_write(
+                "DELETE FROM company_parameters WHERE id = %s AND company_id = %s",
+                (payload.get("parameter_id"), payload.get("company_id")),
+            )
+            logger.info(
+                "Approval %d executed: delete_parameter '%s' (id=%s) for company %s",
+                approval_id, payload.get("name"), payload.get("parameter_id"), payload.get("company_id"),
+            )
+            try:
+                from modules.inapp.manager import broadcast as _broadcast
+                import asyncio
+                asyncio.create_task(_broadcast({
+                    "type":         "parameter_deleted",
+                    "company_id":   payload.get("company_id"),
+                    "parameter_id": payload.get("parameter_id"),
+                    "name":         payload.get("name"),
+                }))
+            except Exception as _bcast_exc:
+                logger.warning("parameter_deleted broadcast failed: %s", _bcast_exc)
+        except Exception as _exec_exc:
+            logger.error(
+                "Approval %d: delete_parameter execution failed: %s", approval_id, _exec_exc
+            )
     else:
         logger.warning(
             "Approval %d approved but action_type '%s' has no executor — skipped",

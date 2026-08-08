@@ -1,10 +1,11 @@
 """
-database/queries/readings.py — Sensor reading queries (temperature only).
+database/queries/readings.py — Sensor reading queries.
 
 Uses execute_write / execute_read from connection.py.
 PostgreSQL: ? → %s, cursor.lastrowid → RETURNING id.
 """
 
+import json
 from database.connection import execute_write, execute_read
 from utils.logger import get_logger
 
@@ -15,13 +16,15 @@ def insert_reading(
     temperature: float,
     timestamp: str,
     is_valid: bool = True,
+    extra_params: dict = None,
 ) -> int:
-    """Insert a sensor reading. Returns the new row id, or -1 on failure."""
+    """Insert a sensor reading including any extra sensor params. Returns new row id, or -1 on failure."""
+    ep = json.dumps(extra_params or {})
     try:
         cur = execute_write(
-            "INSERT INTO readings (temperature, timestamp, is_valid) "
-            "VALUES (%s, %s, %s) RETURNING id",
-            (temperature, timestamp, int(is_valid)),
+            "INSERT INTO readings (temperature, timestamp, is_valid, extra_params) "
+            "VALUES (%s, %s, %s, %s) RETURNING id",
+            (temperature, timestamp, int(is_valid), ep),
         )
         return cur.lastrowid or -1
     except Exception as exc:

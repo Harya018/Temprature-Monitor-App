@@ -105,6 +105,18 @@ export default function DashboardPage({ wsData, health, thresholds, onAlertCount
     setTimeout(() => setParamToast(''), 4000)
   }, [lastEvent, companyId])
 
+  useEffect(() => {
+    if (!lastEvent || lastEvent.type !== 'parameter_deleted') return
+    if (companyId && lastEvent.company_id !== companyId) return
+    const deletedId   = lastEvent.parameter_id
+    const deletedName = lastEvent.name
+    setExtraParams(prev =>
+      prev.filter(ep => ep.id !== deletedId && ep.name !== deletedName)
+    )
+    setParamToast(`Parameter removed: ${deletedName}`)
+    setTimeout(() => setParamToast(''), 4000)
+  }, [lastEvent, companyId])
+
   return (
     <ErrorBoundary>
       {paramToast && (
@@ -126,35 +138,35 @@ export default function DashboardPage({ wsData, health, thresholds, onAlertCount
           <UptimeCard uptimeSeconds={health?.uptime_seconds ?? null} />
         </div>
 
-        {/* Row 2 — Sensor parameter cards (3 columns, same grid as row 1) */}
+        {/* Row 2 — Sensor parameter cards (show simulated unless real sensor data exists for that name) */}
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-          <SensorCard
-            icon={Gauge}
-            iconColor="#0EA5E9"
-            label="Pressure"
-            value={pressure}
-            unit="bar"
-            subtitle="Δ −0.2 predicted"
-            footer="Operating range 1.5 – 3.0 bar"
-          />
-          <SensorCard
-            icon={Droplets}
-            iconColor="#10B981"
-            label="Humidity"
-            value={humidity}
-            unit="%"
-            subtitle="Trending upward"
-            footer="Acceptable 40 – 70 %"
-          />
-          <SensorCard
-            icon={Activity}
-            iconColor="#F59E0B"
-            label="Vibration"
-            value={vibration}
-            unit="mm/s"
-            subtitle="RMS velocity"
-            footer="Limit < 4.5 mm/s"
-          />
+          {(() => {
+            const liveP = lastReading?.extra_params?.['Pressure'] ?? lastReading?.extra_params?.['pressure'] ?? null
+            const liveH = lastReading?.extra_params?.['Humidity'] ?? lastReading?.extra_params?.['humidity'] ?? null
+            const liveV = lastReading?.extra_params?.['Vibration'] ?? lastReading?.extra_params?.['vibration'] ?? null
+            const hasP  = extraParams.some(p => p.name.toLowerCase() === 'pressure')
+            const hasH  = extraParams.some(p => p.name.toLowerCase() === 'humidity')
+            const hasV  = extraParams.some(p => p.name.toLowerCase() === 'vibration')
+            return (
+              <>
+                {!hasP && (
+                  <SensorCard icon={Gauge} iconColor="#0EA5E9" label="Pressure"
+                    value={pressure} unit="bar" subtitle="Δ −0.2 predicted"
+                    footer="Operating range 1.5 – 3.0 bar" />
+                )}
+                {!hasH && (
+                  <SensorCard icon={Droplets} iconColor="#10B981" label="Humidity"
+                    value={humidity} unit="%" subtitle="Trending upward"
+                    footer="Acceptable 40 – 70 %" />
+                )}
+                {!hasV && (
+                  <SensorCard icon={Activity} iconColor="#F59E0B" label="Vibration"
+                    value={vibration} unit="mm/s" subtitle="RMS velocity"
+                    footer="Limit < 4.5 mm/s" />
+                )}
+              </>
+            )
+          })()}
         </div>
 
         {/* Row 3 — Dynamic parameter cards (from approved company_parameters) */}

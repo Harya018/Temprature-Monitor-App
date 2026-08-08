@@ -1173,6 +1173,14 @@ def _run_migrations(pool: psycopg2.pool.ThreadedConnectionPool) -> None:
             if cur.rowcount > 0:
                 logger.info("Migration 41: backfilled company_id on %d alerts", cur.rowcount)
 
+            # Migration 42: extra_params on readings — stores live custom sensor values per reading
+            cur.execute(
+                "ALTER TABLE readings ADD COLUMN IF NOT EXISTS extra_params JSONB DEFAULT '{}'"
+            )
+
+            # Migration 43: delete_parameter support in pending_approvals — no schema change needed
+            # (action_type='delete_parameter' reuses the existing pending_approvals table)
+
         conn.commit()
     except Exception as exc:
         conn.rollback()

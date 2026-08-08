@@ -1,16 +1,31 @@
 /**
  * src/pages/ReportsPage.jsx
- * Daily summary reports — last 30 days.
+ * Daily summary reports — last 30 days + raw readings export.
  */
 import { useState, useEffect, useCallback } from 'react'
-import { BarChart2, RefreshCw, ChevronDown, ChevronUp } from 'lucide-react'
+import { BarChart2, RefreshCw, ChevronDown, ChevronUp, Download } from 'lucide-react'
 import { fetchDailyReports } from '../services/api.js'
 import { SkeletonTable } from '../components/Skeleton'
+
+function adminHeaders() {
+  const token    = sessionStorage.getItem('admin_token') || ''
+  const password = sessionStorage.getItem('adminPassword') || 'admin123'
+  return {
+    'X-Admin-Password': password,
+    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+  }
+}
 
 export default function ReportsPage() {
   const [reports,    setReports]    = useState([])
   const [loading,    setLoading]    = useState(false)
   const [expanded,   setExpanded]   = useState(null)
+  const [exportFrom, setExportFrom] = useState(() => {
+    const d = new Date(); d.setDate(d.getDate() - 7)
+    return d.toISOString().slice(0, 10)
+  })
+  const [exportTo,   setExportTo]   = useState(() => new Date().toISOString().slice(0, 10))
+  const [exporting,  setExporting]  = useState(false)
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -20,6 +35,27 @@ export default function ReportsPage() {
   }, [])
 
   useEffect(() => { load() }, [load])
+
+  const downloadExport = useCallback(async (fmt) => {
+    if (!exportFrom || !exportTo) return
+    setExporting(true)
+    try {
+      const res = await fetch(
+        `/api/reports/readings-export?from_date=${exportFrom}&to_date=${exportTo}&format=${fmt}`,
+        { headers: adminHeaders() },
+      )
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      const blob = await res.blob()
+      const a    = document.createElement('a')
+      a.href     = URL.createObjectURL(blob)
+      a.download = `readings_${exportFrom}_${exportTo}.${fmt}`
+      a.click()
+    } catch (e) {
+      alert('Export failed: ' + e.message)
+    } finally {
+      setExporting(false)
+    }
+  }, [exportFrom, exportTo])
 
   function statusIcon(r) {
     if (r.error) return '❓'
@@ -39,6 +75,30 @@ export default function ReportsPage() {
         <button onClick={load} disabled={loading} className="btn btn-ghost btn-sm">
           <RefreshCw size={13} className={loading ? 'animate-spin' : ''} /> Refresh
         </button>
+      </div>
+
+      {/* Raw data export */}
+      <div className="card px-5 py-4">
+        <div className="flex flex-wrap items-center gap-3">
+          <div className="flex items-center gap-2 text-sm font-semibold text-gray-700">
+            <Download size={15} className="text-purple-600" />
+            Export Raw Readings
+          </div>
+          <input type="date" value={exportFrom} onChange={e => setExportFrom(e.target.value)}
+            className="border border-gray-200 rounded px-2 py-1 text-xs" />
+          <span className="text-xs text-gray-400">to</span>
+          <input type="date" value={exportTo} onChange={e => setExportTo(e.target.value)}
+            className="border border-gray-200 rounded px-2 py-1 text-xs" />
+          <button onClick={() => downloadExport('csv')} disabled={exporting}
+            className="btn btn-sm btn-ghost text-xs border border-gray-200">
+            {exporting ? 'Exporting…' : '↓ CSV'}
+          </button>
+          <button onClick={() => downloadExport('json')} disabled={exporting}
+            className="btn btn-sm btn-ghost text-xs border border-gray-200">
+            {exporting ? '…' : '↓ JSON'}
+          </button>
+          <span className="text-xs text-gray-400">All sensor readings including custom parameters</span>
+        </div>
       </div>
 
       {loading && reports.length === 0 ? (

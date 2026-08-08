@@ -62,6 +62,14 @@ function barColor(value, max) {
   return CORAL
 }
 
+// ── fetch approved company parameters ────────────────────────────────────────
+async function fetchCompanyParams() {
+  try {
+    const rows = await apiFetch('/api/admin/parameters')
+    return Array.isArray(rows) ? rows : []
+  } catch { return [] }
+}
+
 // ── shared chart states ────────────────────────────────────────────────────────
 function useChartData(url, deps = []) {
   const [data,    setData]    = useState(null)
@@ -123,13 +131,12 @@ function CustomTooltip({ active, payload, label, unit = '' }) {
 // ─────────────────────────────────────────────────────────────────────────────
 // Chart 1 — Live Trend
 // ─────────────────────────────────────────────────────────────────────────────
-function LiveTrendChart({ source, parameter, fromDate, toDate, wsData }) {
+function LiveTrendChart({ source, parameter, fromDate, toDate, wsData, unit = '' }) {
   const [data,      setData]      = useState([])
   const [thresholds, setThresholds] = useState({ high: null, low: null })
   const [loading,   setLoading]   = useState(true)
   const [error,     setError]     = useState(null)
   const intervalRef = useRef(null)
-  const unit = parameter === 'temperature' ? '°C' : 'hPa'
 
   // Extract so the effect dep tracks the array reference, not the whole wsData object
   const wsReadings = wsData?.readings
@@ -857,9 +864,8 @@ function CsvImportPanel({ onImported }) {
 // ─────────────────────────────────────────────────────────────────────────────
 // Main page
 // ─────────────────────────────────────────────────────────────────────────────
-const PARAMS = [
-  { value: 'temperature', label: 'Temperature' },
-  { value: 'pressure',    label: 'Pressure'    },
+const DEFAULT_PARAMS = [
+  { value: 'temperature', label: 'Temperature', unit: '°C' },
 ]
 const RANGES = [
   { value: '1d',     label: 'Last 24h' },
@@ -886,6 +892,24 @@ export default function AnalyticsPage({ wsData }) {
   const [csvRefresh,  setCsvRefresh]  = useState(0)
   const [showCsvPanel,  setShowCsvPanel]  = useState(false)
   const [predictions,   setPredictions]   = useState([])
+  const [paramList,     setParamList]     = useState(DEFAULT_PARAMS)
+
+  // Load approved company parameters and merge with defaults
+  useEffect(() => {
+    fetchCompanyParams().then(rows => {
+      const extras = rows.map(p => ({
+        value: p.name.toLowerCase(),
+        label: p.name.charAt(0).toUpperCase() + p.name.slice(1),
+        unit:  p.unit || '',
+      }))
+      const existing = new Set(DEFAULT_PARAMS.map(p => p.value))
+      const merged = [
+        ...DEFAULT_PARAMS,
+        ...extras.filter(p => !existing.has(p.value)),
+      ]
+      setParamList(merged)
+    })
+  }, [])
 
   const dates = range === 'custom'
     ? { from: customFrom, to: customTo }
@@ -957,7 +981,7 @@ export default function AnalyticsPage({ wsData }) {
 
           {/* Parameter */}
           <select className="analytics-select" value={parameter} onChange={e => setParameter(e.target.value)}>
-            {PARAMS.map(p => <option key={p.value} value={p.value}>{p.label}</option>)}
+            {paramList.map(p => <option key={p.value} value={p.value}>{p.label}</option>)}
           </select>
 
           {/* Date range */}
@@ -1030,7 +1054,10 @@ export default function AnalyticsPage({ wsData }) {
       )}
 
       {/* ── 2. Live Trend (full width) ── */}
-      <LiveTrendChart source={source} parameter={parameter} fromDate={fromDate} toDate={toDate} wsData={wsData} />
+      <LiveTrendChart
+        source={source} parameter={parameter} fromDate={fromDate} toDate={toDate} wsData={wsData}
+        unit={(paramList.find(p => p.value === parameter) || {}).unit || ''}
+      />
 
       {/* ── 3. Daily Avg + Hourly Avg ── */}
       <div className="analytics-row">

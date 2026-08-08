@@ -3,7 +3,7 @@
  * Threshold config, demo controls (CSV playback), and admin info.
  */
 import { useState, useEffect, useCallback, useRef, memo } from 'react'
-import { Settings2, RotateCcw, Zap, Database, Info, Server, RefreshCw, AlertTriangle, Mail, CheckCircle, MessageSquare, Smartphone, PlusCircle, Pencil } from 'lucide-react'
+import { Settings2, RotateCcw, Zap, Database, Info, Server, RefreshCw, AlertTriangle, Mail, CheckCircle, MessageSquare, Smartphone, PlusCircle, Pencil, Trash2 } from 'lucide-react'
 import {
   fetchThresholds, updateThresholds, resetThresholds,
   simulateBreach, createBackup, fetchHealth,
@@ -64,7 +64,7 @@ function StatusMsg({ msg }) {
 // showModal() puts the dialog in the browser top layer and TRAPS FOCUS INSIDE.
 // No React re-render (WebSocket ticks, parent state, etc.) can steal focus
 // from a native modal dialog — the browser enforces it at the OS level.
-const AddParameterForm = memo(function AddParameterForm({ onToast }) {
+const AddParameterForm = memo(function AddParameterForm({ onToast, onAdded }) {
   const dialogRef = useRef(null)
   const nameRef   = useRef(null)
   const unitRef   = useRef(null)
@@ -123,6 +123,7 @@ const AddParameterForm = memo(function AddParameterForm({ onToast }) {
       if (maxRef.current)  maxRef.current.value  = ''
       setParamSaved(true)
       setTimeout(() => setParamSaved(false), 4000)
+      onAdded?.()
       closeDialog()
     } catch (err) {
       onToast({ type: 'error', message: err.message || 'Failed to submit parameter.' })
@@ -316,6 +317,9 @@ export default function SettingsPage() {
   const [pwdAction, setPwdAction] = useState(null)
   const [pwdError, setPwdError] = useState(null)
 
+  const [existingParams, setExistingParams] = useState([])
+  const [deletingId, setDeletingId] = useState(null)
+
   // Track whether user has touched the inputs so fetches don't overwrite
   const dirtyRef = useRef(false)
 
@@ -334,7 +338,38 @@ export default function SettingsPage() {
     try { setHealth(await fetchHealth()) } catch { /* silent */ }
   }, [])
 
-  useEffect(() => { loadThresholds(); loadHealth() }, [loadThresholds, loadHealth])
+  const loadParams = useCallback(async () => {
+    try {
+      const token = sessionStorage.getItem('admin_token')
+      if (!token) return
+      const res = await fetch('/api/admin/parameters', { headers: { Authorization: `Bearer ${token}` } })
+      if (res.ok) setExistingParams(await res.json())
+    } catch { /* silent */ }
+  }, [])
+
+  useEffect(() => { loadThresholds(); loadHealth(); loadParams() }, [loadThresholds, loadHealth, loadParams])
+
+  const handleDeleteParam = async (param) => {
+    if (!window.confirm(`Request deletion of "${param.name}"? Super Admin must approve before it's removed.`)) return
+    setDeletingId(param.id)
+    try {
+      const token = sessionStorage.getItem('admin_token')
+      const res = await fetch(`/api/admin/parameters/${param.id}`, {
+        method: 'DELETE',
+        headers: { Authorization: `Bearer ${token}` },
+      })
+      const data = await res.json().catch(() => ({}))
+      if (res.ok) {
+        addToast({ type: 'success', message: `Deletion of "${param.name}" submitted for Super Admin approval.` })
+      } else {
+        addToast({ type: 'error', message: data.error || `Error ${res.status}` })
+      }
+    } catch (err) {
+      addToast({ type: 'error', message: err.message })
+    } finally {
+      setDeletingId(null)
+    }
+  }
 
   useEffect(() => {
     if (health?.smtp_user) setTestEmailAddr(health.smtp_user)
@@ -841,12 +876,57 @@ export default function SettingsPage() {
           </div>
         </Section>
 
-        {/* ── Section 5: Add Parameter ──────────────────────────────────────── */}
-        <Section title="Add Parameter" icon={PlusCircle}>
-          <AddParameterForm onToast={addToast} />
+        {/* ── Section 5: Manage Parameters ──────────────────────────────────── */}
+        <Section title="Manage Parameters" icon={Database}>
+          {existingParams.length === 0 ? (
+            <p style={{ fontSize: 13, color: '#9CA3AF' }}>No custom parameters added yet.</p>
+          ) : (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              {existingParams.map(p => (
+                <div key={p.id} style={{
+                  display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                  padding: '10px 14px', borderRadius: 8, background: '#F9FAFB',
+                  border: '1px solid #E5E7EB',
+                }}>
+                  <div>
+                    <span style={{ fontSize: 13, fontWeight: 600, color: '#111827' }}>{p.name}</span>
+                    <span style={{ fontSize: 12, color: '#6B7280', marginLeft: 8 }}>{p.unit || ''}</span>
+                    {(p.min_value != null || p.max_value != null) && (
+                      <span style={{ fontSize: 11, color: '#9CA3AF', marginLeft: 8 }}>
+                        ({p.min_value ?? '—'} – {p.max_value ?? '—'})
+                      </span>
+                    )}
+                  </div>
+                  <button
+                    onClick={() => handleDeleteParam(p)}
+                    disabled={deletingId === p.id}
+                    title="Request deletion (needs Super Admin approval)"
+                    style={{
+                      display: 'inline-flex', alignItems: 'center', gap: 4,
+                      padding: '5px 12px', borderRadius: 6, border: '1px solid #FCA5A5',
+                      background: '#FEF2F2', color: '#DC2626',
+                      fontSize: 12, fontWeight: 500, cursor: deletingId === p.id ? 'not-allowed' : 'pointer',
+                      opacity: deletingId === p.id ? 0.6 : 1,
+                    }}
+                  >
+                    <Trash2 size={12} />
+                    {deletingId === p.id ? 'Requesting…' : 'Delete'}
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+          <p style={{ fontSize: 11, color: '#9CA3AF', marginTop: 12 }}>
+            Deletion requests go to Super Admin for approval before the parameter is removed.
+          </p>
         </Section>
 
-        {/* ── Section 6: Admin Info ───────────────────────────────────────── */}
+        {/* ── Section 6: Add Parameter ──────────────────────────────────────── */}
+        <Section title="Add Parameter" icon={PlusCircle}>
+          <AddParameterForm onToast={addToast} onAdded={loadParams} />
+        </Section>
+
+        {/* ── Section 7: Admin Info ───────────────────────────────────────── */}
         <Section title="Admin Info" icon={Info}>
           <div className="space-y-3">
             {[

@@ -862,6 +862,48 @@ async def request_admin_parameter(body: _ParamRequestIn, request: Request):
     return {"status": "pending", "message": f"Parameter '{body.name}' submitted for super admin approval."}
 
 
+@router.delete(
+    "/admin/parameters/{parameter_id}",
+    status_code=202,
+    summary="Request deletion of a company parameter (pending super admin approval)",
+    dependencies=[Depends(require_admin)],
+)
+async def request_delete_parameter(parameter_id: int, request: Request):
+    from database.connection import execute_write, execute_read as _er
+    import json as _json
+
+    auth = request.headers.get("authorization", "")
+    admin_id, company_id = (None, None)
+    if auth.startswith("Bearer "):
+        admin_id, company_id = _resolve_admin_identity(auth[7:].strip())
+
+    if not admin_id or not company_id:
+        return JSONResponse(status_code=401, content={"error": "Cannot determine admin identity from token"})
+
+    rows = _er(
+        "SELECT id, name, unit FROM company_parameters WHERE id = %s AND company_id = %s",
+        (parameter_id, company_id),
+    )
+    if not rows:
+        return JSONResponse(status_code=404, content={"error": "Parameter not found"})
+
+    param = rows[0]
+    payload = {"parameter_id": parameter_id, "name": param["name"], "company_id": company_id}
+    execute_write(
+        """INSERT INTO pending_approvals (admin_id, action_type, payload)
+           VALUES (%s, 'delete_parameter', %s)""",
+        (admin_id, _json.dumps(payload)),
+    )
+    log_activity(
+        admin_id, "parameter_delete_requested", "company_parameters",
+        f"company_id:{company_id} name:{param['name']} id:{parameter_id}",
+        company_id,
+    )
+    logger.info("Admin %d requested delete_parameter '%s' (id=%d) for company %d",
+                admin_id, param["name"], parameter_id, company_id)
+    return {"status": "pending", "message": f"Deletion of '{param['name']}' submitted for super admin approval."}
+
+
 @router.post(
     "/admin/test-sms",
     summary="Send a test SMS alert",
