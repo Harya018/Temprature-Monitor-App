@@ -200,7 +200,7 @@ async def list_companies(
 ):
     try:
         rows = execute_read(
-            "SELECT id, name, slug, is_active, created_at::TEXT FROM companies ORDER BY id ASC"
+            "SELECT id, name, slug, is_active, COALESCE(maintenance_mode, 0) AS maintenance_mode, created_at::TEXT FROM companies ORDER BY id ASC"
         )
         return [_company_with_counts(r) for r in rows]
     except Exception as exc:

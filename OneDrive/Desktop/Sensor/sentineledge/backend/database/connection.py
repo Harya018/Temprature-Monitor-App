@@ -1181,7 +1181,18 @@ def _run_migrations(pool: psycopg2.pool.ThreadedConnectionPool) -> None:
             # Migration 43: delete_parameter support in pending_approvals — no schema change needed
             # (action_type='delete_parameter' reuses the existing pending_approvals table)
 
-            # Migration 44: subscriber_sessions — persistent mobile auth tokens (replaces in-memory dict)
+            # Migration 44: ensure companies that have admins are is_active=1
+            # (guards against accidental toggle-off or legacy 0 defaults)
+            cur.execute(
+                """
+                UPDATE companies
+                   SET is_active = 1
+                 WHERE is_active = 0
+                   AND id IN (SELECT DISTINCT company_id FROM admins WHERE company_id IS NOT NULL)
+                """
+            )
+
+            # Migration 46: subscriber_sessions — persistent mobile auth tokens (replaces in-memory dict)
             cur.execute(
                 """
                 CREATE TABLE IF NOT EXISTS subscriber_sessions (

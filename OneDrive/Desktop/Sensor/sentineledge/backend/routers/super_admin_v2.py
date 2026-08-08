@@ -240,6 +240,8 @@ async def overview(
         company_rows = execute_read(
             """
             SELECT c.id, c.name, c.is_active,
+                   COALESCE(c.maintenance_mode, 0)    AS maintenance_mode,
+                   COALESCE(c.maintenance_reason, '') AS maintenance_reason,
                    (SELECT COUNT(*) FROM subscribers WHERE company_id = c.id) AS subscriber_count,
                    (SELECT COUNT(*) FROM alerts WHERE company_id = c.id AND timestamp >= %s) AS alerts_today
             FROM companies c ORDER BY c.id

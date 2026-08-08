@@ -450,7 +450,13 @@ function OverviewTab({ onNavigate }) {
                       <td><strong>{c.name}</strong></td>
                       <td>{c.subscriber_count}</td>
                       <td>{c.alerts_today}</td>
-                      <td><Badge label={c.is_active ? 'Active' : 'Inactive'} type={c.is_active ? 'active' : 'inactive'} /></td>
+                      <td>{
+                    c.maintenance_mode
+                      ? <Badge label="Maintenance" type="warning" />
+                      : c.is_active
+                        ? <Badge label="Active" type="active" />
+                        : <Badge label="Inactive" type="inactive" />
+                  }</td>
                     </tr>
                   ))
               }
@@ -593,7 +599,13 @@ function CompaniesTab({ onViewAdmins }) {
                 <tr key={c.id}>
                   <td><strong>{c.name}</strong></td>
                   <td style={{ fontFamily: 'monospace', color: '#6B7280', fontSize: 13 }}>{c.slug}</td>
-                  <td><Badge label={c.is_active ? 'Active' : 'Inactive'} type={c.is_active ? 'active' : 'inactive'} /></td>
+                  <td>{
+                    c.maintenance_mode
+                      ? <Badge label="Maintenance" type="warning" />
+                      : c.is_active
+                        ? <Badge label="Active" type="active" />
+                        : <Badge label="Inactive" type="inactive" />
+                  }</td>
                   <td style={{ textAlign: 'center' }}>{c.subscriber_count}</td>
                   <td style={{ textAlign: 'center' }}>{c.admin_count}</td>
                   <td style={{ textAlign: 'center' }}>—</td>
