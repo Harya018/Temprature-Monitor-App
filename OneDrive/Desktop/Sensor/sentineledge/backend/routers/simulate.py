@@ -11,8 +11,9 @@ Rate limiting (slowapi):
 """
 
 import asyncio
+import os
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
@@ -28,6 +29,14 @@ from utils.time import now_iso
 from config import ALERT_COOLDOWN_SECONDS
 
 logger = get_logger("routers.simulate")
+
+_IS_PRODUCTION = os.getenv("APP_ENV", "development").lower() == "production"
+
+
+def _require_non_production() -> None:
+    """Raise 403 if running in production — demo endpoints are dev/staging only."""
+    if _IS_PRODUCTION:
+        raise HTTPException(status_code=403, detail="This endpoint is not available in production")
 
 router = APIRouter(prefix="/api", tags=["Testing"])
 
@@ -159,14 +168,14 @@ class DemoSpeedIn(BaseModel):
     summary="Start accelerated demo playback",
     description=(
         "Rewinds to the first CSV reading and plays back at the requested speed. "
-        "The LOW threshold alert fires when temperature drops below 38.0°C. "
-        "speed=30 → ~5 minutes, speed=50 → ~3 minutes. "
+        "Not available in production (APP_ENV=production). "
         "Requires admin auth. Rate limited to 10/min."
     ),
     dependencies=[Depends(require_admin)],
 )
 @limiter.limit("10/minute")
 async def simulate_demo(body: DemoSpeedIn, request: Request):
+    _require_non_production()
     result = sensor.activate_demo(speed=body.speed)
     return result
 
@@ -178,10 +187,11 @@ async def simulate_demo(body: DemoSpeedIn, request: Request):
     summary="Reset sensor to beginning of data",
     description=(
         "Stops demo mode and rewinds CSV playback to the very first reading. "
-        "Normal 1-reading/second speed is restored. "
+        "Not available in production (APP_ENV=production). "
         "Requires admin auth."
     ),
     dependencies=[Depends(require_admin)],
 )
 async def simulate_reset():
+    _require_non_production()
     return sensor.reset_sensor()

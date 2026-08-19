@@ -91,6 +91,29 @@ DEMO_MODE: bool = os.getenv("DEMO_MODE", "false").lower() in ("1", "true", "yes"
 SENSOR_PORT: str = os.getenv("SENSOR_PORT", "COM3")
 SENSOR_BAUD: int = int(os.getenv("SENSOR_BAUD", "9600"))
 
+# ── Excel file sensor (pro-server / HMI data via .xlsx) ──────────────────────
+# Leave EXCEL_FILE_PATH empty to use the normal serial/CSV sensor.
+# Set it to the absolute path of the Excel file the pro server is writing to
+# (e.g. C:\ProServer\data\readings.xlsx) to switch to Excel mode.
+# ── Pro-face Pro-Server EX live data reader ───────────────────────────────────
+# Set EXCEL_FILE_PATH to the absolute path of the CSV or Excel file that
+# Pro-Server EX is writing to.  Leave it empty to use the normal serial sensor.
+#
+# Pro-Server EX default CSV columns:
+#   Date | Time | <your item names configured in GP-Pro EX>
+#
+# Match EXCEL_TEMP_COL exactly to the temperature column header in your file.
+# EXCEL_DATE_COL and EXCEL_TIME_COL are used to reconstruct the timestamp.
+# All other numeric columns become extra parameters (pH, DO, etc.) automatically.
+EXCEL_FILE_PATH     : str   = os.getenv("EXCEL_FILE_PATH",     "")
+EXCEL_TEMP_COL      : str   = os.getenv("EXCEL_TEMP_COL",      "Temperature")
+EXCEL_DATE_COL      : str   = os.getenv("EXCEL_DATE_COL",      "Date")
+EXCEL_TIME_COL      : str   = os.getenv("EXCEL_TIME_COL",      "Time")
+EXCEL_TIMESTAMP_COL : str   = os.getenv("EXCEL_TIMESTAMP_COL", "")   # leave blank for Pro-Server EX
+EXCEL_SHEET         : str   = os.getenv("EXCEL_SHEET",         "0")  # Excel only
+EXCEL_POLL_INTERVAL : float = float(os.getenv("EXCEL_POLL_INTERVAL", "1.0"))
+EXCEL_ENCODING      : str   = os.getenv("EXCEL_ENCODING",      "")   # auto-detect if blank
+
 # ── Admin credentials ─────────────────────────────────────────────────────────
 ADMIN_PASSWORD: str = os.getenv("ADMIN_PASSWORD", "sentineledge-admin")
 ADMIN_USERNAME: str = os.getenv("ADMIN_USERNAME", "admin")

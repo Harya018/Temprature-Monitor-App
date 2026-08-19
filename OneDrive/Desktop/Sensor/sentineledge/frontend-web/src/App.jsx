@@ -71,6 +71,23 @@ export default function App() {
   const [alertCount, setAlertCount] = useState(0)
   const prevConnected = useRef(null)
 
+  // ── Impersonation: super admin opens a new tab with ?impersonate=TOKEN ────
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search)
+    const impToken = params.get('impersonate')
+    const impName  = params.get('admin_name')
+    if (impToken) {
+      sessionStorage.setItem('admin_token',    impToken)
+      sessionStorage.setItem('admin_username', impName || 'admin')
+      sessionStorage.setItem('authenticated',  'true')
+      const clean = new URL(window.location.href)
+      clean.searchParams.delete('impersonate')
+      clean.searchParams.delete('admin_name')
+      clean.searchParams.delete('company_id')
+      window.history.replaceState({}, '', clean.toString())
+    }
+  }, [])
+
   const { toasts, addToast, dismiss } = useToast()
   const alarm = useAudioAlarm()
   const { playAlarm } = alarm

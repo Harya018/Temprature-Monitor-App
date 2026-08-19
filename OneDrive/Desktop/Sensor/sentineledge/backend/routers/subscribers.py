@@ -8,7 +8,6 @@ Rate limiting (slowapi):
 """
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import JSONResponse
 
 import database
 from database.connection import execute_read
@@ -56,6 +55,20 @@ def _caller_company_id(request) -> int | None:
 router = APIRouter(prefix="/api", tags=["Subscribers"])
 
 
+def _assert_subscriber_company(subscriber_id: int, company_id: int | None) -> dict:
+    """
+    Fetch subscriber and verify it belongs to company_id.
+    Raises 404 (not found) if missing or company mismatch — same response
+    either way so callers can't enumerate other companies' subscriber IDs.
+    """
+    row = database.get_subscriber_by_id(subscriber_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Subscriber not found")
+    if company_id is not None and row.get("company_id") != company_id:
+        raise HTTPException(status_code=404, detail="Subscriber not found")
+    return row
+
+
 def _row_to_out(r: dict) -> SubscriberOut:
     """Convert a DB row dict to SubscriberOut, hiding the raw PIN."""
     # Support both old 'active' and new 'is_active' columns gracefully
@@ -81,11 +94,12 @@ def _row_to_out(r: dict) -> SubscriberOut:
     "/subscribers",
     response_model=list[SubscriberOut],
     summary="List all subscribers",
-    description="Returns all subscribers ordered by escalation_order.",
+    description="Returns subscribers for the authenticated admin's company.",
+    dependencies=[Depends(require_admin)],
 )
 @limiter.limit("30/minute")
 async def get_subscribers(request: Request):
-    rows = database.get_subscribers_ordered()
+    rows = database.get_subscribers_ordered(company_id=_caller_company_id(request))
     return [_row_to_out(r) for r in rows]
 
 
@@ -124,12 +138,11 @@ async def add_subscriber(body: SubscriberIn, request: Request):
 )
 @limiter.limit("30/minute")
 async def delete_subscriber(subscriber_id: int, request: Request):
-    existing = database.get_subscriber_by_id(subscriber_id)
+    existing = _assert_subscriber_company(subscriber_id, _caller_company_id(request))
     ok = database.delete_subscriber(subscriber_id)
     if not ok:
         raise HTTPException(status_code=404, detail="Subscriber not found")
-    name = existing.get("name", str(subscriber_id)) if existing else str(subscriber_id)
-    log_activity(_caller_admin_id(request), "remove_subscriber", "subscriber", name)
+    log_activity(_caller_admin_id(request), "remove_subscriber", "subscriber", existing.get("name", str(subscriber_id)))
     return {"status": "deleted", "id": subscriber_id}
 
 
@@ -141,6 +154,7 @@ async def delete_subscriber(subscriber_id: int, request: Request):
 )
 @limiter.limit("30/minute")
 async def disable_subscriber(subscriber_id: int, request: Request):
+    _assert_subscriber_company(subscriber_id, _caller_company_id(request))
     ok = database.disable_subscriber(subscriber_id)
     if not ok:
         raise HTTPException(status_code=404, detail="Subscriber not found")
@@ -155,6 +169,7 @@ async def disable_subscriber(subscriber_id: int, request: Request):
 )
 @limiter.limit("30/minute")
 async def enable_subscriber(subscriber_id: int, request: Request):
+    _assert_subscriber_company(subscriber_id, _caller_company_id(request))
     ok = database.enable_subscriber(subscriber_id)
     if not ok:
         raise HTTPException(status_code=404, detail="Subscriber not found")
@@ -167,7 +182,8 @@ async def enable_subscriber(subscriber_id: int, request: Request):
     description="Stores a Web Push subscription for in-app notifications.",
     dependencies=[Depends(require_admin)],
 )
-async def save_push_subscription(subscriber_id: int, body: PushSubscriptionIn):
+async def save_push_subscription(subscriber_id: int, body: PushSubscriptionIn, request: Request):
+    _assert_subscriber_company(subscriber_id, _caller_company_id(request))
     ok = database.update_push_subscription(subscriber_id, body.subscription_json)
     if not ok:
         raise HTTPException(status_code=404, detail="Subscriber not found")
@@ -183,12 +199,13 @@ async def save_push_subscription(subscriber_id: int, body: PushSubscriptionIn):
     ),
     dependencies=[Depends(require_admin)],
 )
-async def set_subscriber_pin(subscriber_id: int, body: SetPinIn):
+async def set_subscriber_pin(subscriber_id: int, body: SetPinIn, request: Request):
     if body.subscriber_id != subscriber_id:
         raise HTTPException(
             status_code=400,
             detail="subscriber_id in path and body must match",
         )
+    _assert_subscriber_company(subscriber_id, _caller_company_id(request))
     ok = database.set_subscriber_pin(subscriber_id, body.pin)
     if not ok:
         raise HTTPException(status_code=404, detail="Subscriber not found")
@@ -201,13 +218,12 @@ async def set_subscriber_pin(subscriber_id: int, body: SetPinIn):
     "/subscribers/{subscriber_id}",
     response_model=SubscriberOut,
     summary="Get single subscriber",
-    description="Returns the full subscriber record including profile fields.",
+    description="Returns the full subscriber record including profile fields. Requires admin auth.",
+    dependencies=[Depends(require_admin)],
 )
 @limiter.limit("30/minute")
 async def get_subscriber(subscriber_id: int, request: Request):
-    row = database.get_subscriber_by_id(subscriber_id)
-    if not row:
-        raise HTTPException(status_code=404, detail="Subscriber not found")
+    row = _assert_subscriber_company(subscriber_id, _caller_company_id(request))
     return _row_to_out(row)
 
 
@@ -220,10 +236,7 @@ async def get_subscriber(subscriber_id: int, request: Request):
 )
 @limiter.limit("30/minute")
 async def update_subscriber(subscriber_id: int, body: SubscriberUpdate, request: Request):
-    # Check subscriber exists first
-    existing = database.get_subscriber_by_id(subscriber_id)
-    if not existing:
-        raise HTTPException(status_code=404, detail="Subscriber not found")
+    existing = _assert_subscriber_company(subscriber_id, _caller_company_id(request))
 
     # Build dict of only the non-None fields that were explicitly supplied
     fields = {k: v for k, v in body.model_dump().items() if v is not None}
@@ -246,9 +259,6 @@ async def update_subscriber(subscriber_id: int, body: SubscriberUpdate, request:
 )
 @limiter.limit("30/minute")
 async def get_subscriber_acknowledgements(subscriber_id: int, request: Request):
-    # Return empty list gracefully if subscriber not found
-    sub = database.get_subscriber_by_id(subscriber_id)
-    if not sub:
-        raise HTTPException(status_code=404, detail="Subscriber not found")
+    _assert_subscriber_company(subscriber_id, _caller_company_id(request))
     rows = database.get_acks_for_subscriber(subscriber_id)
     return rows

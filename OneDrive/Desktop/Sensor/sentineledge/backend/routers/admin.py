@@ -72,12 +72,13 @@ class _VerifyIn(BaseModel):
 @router.post(
     "/admin/verify-password",
     summary="Verify admin password",
-    description="Checks whether the supplied password matches ADMIN_PASSWORD. "
-                "No auth header required. Returns {valid: bool}.",
+    description="Checks whether the supplied password matches the authenticated admin's stored password. "
+                "Requires a valid admin session token.",
+    dependencies=[Depends(require_admin)],
 )
 @limiter.limit("10/minute")
 async def verify_password(body: _VerifyIn, request: Request):
-    """Used by the frontend admin modal to verify the password on first entry."""
+    """Used by the frontend admin modal to re-confirm the password for sensitive actions."""
     from utils.security import verify_pin
     return {"valid": verify_pin(body.password, ADMIN_PASSWORD)}
 
@@ -287,9 +288,24 @@ async def admin_login(body: _AdminLoginIn, request: Request):
 
     token = secrets.token_hex(32)   # 64-char hex
     expires_at = datetime.now(timezone.utc) + timedelta(hours=8)
+    client_ip = ip
 
-    # Persist session in PostgreSQL (survives server restarts)
-    database.create_session(token, expires_at)
+    # Resolve the super_admin DB row before creating the session so we can
+    # link admin_id immediately. Look up by role (not name) to survive any
+    # username rename applied by migrations (e.g. "admin" → "superadmin").
+    _linked_aid: int | None = None
+    _linked_company_id: int | None = None
+    try:
+        from database.connection import execute_read as _er2, execute_write as _ew2
+        _sa = _er2("SELECT id, company_id FROM admins WHERE role = 'super_admin' LIMIT 1")
+        if _sa:
+            _linked_aid = _sa[0]["id"]
+            _linked_company_id = _sa[0].get("company_id")
+    except Exception as _exc:
+        logger.warning("login: could not resolve super_admin row: %s", _exc)
+
+    # Persist session with admin_id linked from the start (avoids NULL admin_id window)
+    database.create_session(token, expires_at, _linked_aid)
 
     clear_failed_attempts(username, ip)  # Task 1: clear failures on success
     record_attempt(username, ip, True)   # Task 1: log successful attempt
@@ -299,23 +315,14 @@ async def admin_login(body: _AdminLoginIn, request: Request):
     except Exception:
         pass
 
-    # Update last_login tracking, link session to admin_id, write activity log
-    client_ip = ip
-    try:
-        from database.connection import execute_read, execute_write
-        admin_rows = execute_read("SELECT id, company_id FROM admins WHERE name = %s LIMIT 1", (actual_username,))
-        if admin_rows:
-            _aid = admin_rows[0]["id"]
-            execute_write(
+    # Update last_login + prune stale sessions
+    if _linked_aid is not None:
+        try:
+            _ew2(
                 "UPDATE admins SET last_login_at = NOW(), last_login_ip = %s WHERE id = %s",
-                (client_ip, _aid),
+                (client_ip, _linked_aid),
             )
-            # Task 2C: link session to admin_id + prune to 3 concurrent sessions
-            execute_write(
-                "UPDATE admin_sessions SET admin_id = %s WHERE token = %s",
-                (_aid, token),
-            )
-            execute_write(
+            _ew2(
                 """DELETE FROM admin_sessions
                     WHERE admin_id = %s
                       AND token NOT IN (
@@ -324,11 +331,11 @@ async def admin_login(body: _AdminLoginIn, request: Request):
                            ORDER BY created_at DESC
                            LIMIT 3
                       )""",
-                (_aid, _aid),
+                (_linked_aid, _linked_aid),
             )
-            log_activity(_aid, "login", "admin", f"ip:{client_ip}", admin_rows[0].get("company_id"))
-    except Exception as _exc:
-        logger.warning("login tracking failed: %s", _exc)
+            log_activity(_linked_aid, "login", "admin", f"ip:{client_ip}", _linked_company_id)
+        except Exception as _exc:
+            logger.warning("login tracking failed: %s", _exc)
 
     logger.info("Admin dashboard login: username=%s (session expires in 8h)", actual_username)
     return {"token": token, "username": actual_username}
@@ -756,7 +763,7 @@ def _resolve_admin_identity(token: str):
             logger.debug("_resolve step1 company fallback=%s", company_id)
         return admin_id, company_id
 
-    # Step 2: session exists but admin_id is NULL (legacy session or INSERT failed)
+    # Step 2: session exists but admin_id is NULL — reject rather than fall back to any admin
     sess_rows = execute_read(
         "SELECT id, admin_id FROM admin_sessions WHERE token = %s AND expires_at > NOW() LIMIT 1",
         (token,),
@@ -768,20 +775,19 @@ def _resolve_admin_identity(token: str):
             adm_rows = execute_read(
                 "SELECT id, company_id FROM admins WHERE id = %s LIMIT 1", (s_admin_id,)
             )
+            logger.debug("_resolve step2 adm_rows=%s", adm_rows)
+            if adm_rows:
+                admin_id   = adm_rows[0]["id"]
+                company_id = adm_rows[0].get("company_id")
+                if not company_id:
+                    fallback = execute_read("SELECT id FROM companies ORDER BY id LIMIT 1")
+                    company_id = fallback[0]["id"] if fallback else None
+                    logger.debug("_resolve step2 company fallback=%s", company_id)
+                return admin_id, company_id
         else:
-            # Last resort: only one admin in system → use them
-            adm_rows = execute_read(
-                "SELECT id, company_id FROM admins ORDER BY id LIMIT 1"
-            )
-        logger.debug("_resolve step2 adm_rows=%s", adm_rows)
-        if adm_rows:
-            admin_id   = adm_rows[0]["id"]
-            company_id = adm_rows[0].get("company_id")
-            if not company_id:
-                fallback = execute_read("SELECT id FROM companies ORDER BY id LIMIT 1")
-                company_id = fallback[0]["id"] if fallback else None
-                logger.debug("_resolve step2 company fallback=%s", company_id)
-            return admin_id, company_id
+            # Session has NULL admin_id — broken session, do not authenticate
+            logger.warning("_resolve_admin_identity: session has NULL admin_id — rejecting (token prefix: %s)", token[:8])
+            return None, None
 
     logger.warning("_resolve_admin_identity: token not found or expired")
     return None, None
@@ -994,3 +1000,110 @@ async def test_sms(body: _TestSmsIn):
             status_code=500,
             content={"status": "failed", "error": str(exc)},
         )
+
+
+# ─── Pro-Server EX data-source settings ──────────────────────────────────────
+
+class _ProServerSettingsIn(BaseModel):
+    file_path:     str   = Field("",            max_length=1024)
+    temp_col:      str   = Field("Temperature", max_length=100)
+    date_col:      str   = Field("Date",        max_length=100)
+    time_col:      str   = Field("Time",        max_length=100)
+    timestamp_col: str   = Field("",            max_length=100)
+    poll_interval: float = Field(1.0, ge=0.1, le=60.0)
+
+
+class _ProServerTestIn(BaseModel):
+    file_path: str = Field(..., max_length=1024)
+
+
+@router.get("/admin/proserver/settings", dependencies=[Depends(require_admin)])
+def api_get_proserver_settings():
+    """Return the current Pro-Server EX file path and column settings."""
+    rows = database.execute_read(
+        "SELECT key, value FROM app_settings WHERE key LIKE 'proserver_%'"
+    ) or []
+    out: dict = {
+        "file_path":     "",
+        "temp_col":      "Temperature",
+        "date_col":      "Date",
+        "time_col":      "Time",
+        "timestamp_col": "",
+        "poll_interval": 1.0,
+    }
+    for row in rows:
+        k = row["key"].replace("proserver_", "", 1)
+        v = row["value"]
+        if k == "poll_interval":
+            try:
+                out[k] = float(v)
+            except (ValueError, TypeError):
+                pass
+        elif k in out:
+            out[k] = v
+    return JSONResponse(out)
+
+
+@router.post("/admin/proserver/settings", dependencies=[Depends(require_admin)])
+def api_save_proserver_settings(body: _ProServerSettingsIn):
+    """Save Pro-Server EX settings to DB and hot-reload the reader thread."""
+    vals = {
+        "file_path":     body.file_path.strip(),
+        "temp_col":      body.temp_col.strip() or "Temperature",
+        "date_col":      body.date_col.strip() or "Date",
+        "time_col":      body.time_col.strip() or "Time",
+        "timestamp_col": body.timestamp_col.strip(),
+        "poll_interval": body.poll_interval,
+    }
+    for k, v in vals.items():
+        database.execute_write(
+            """
+            INSERT INTO app_settings (key, value, updated_at)
+            VALUES (%s, %s, NOW())
+            ON CONFLICT (key) DO UPDATE
+              SET value = EXCLUDED.value, updated_at = NOW()
+            """,
+            (f"proserver_{k}", str(v)),
+        )
+
+    import core.excel_sensor as excel_sensor
+    excel_sensor.reload_settings(vals)
+
+    return JSONResponse({"status": "saved", "active": excel_sensor.is_active()})
+
+
+@router.post("/admin/proserver/test", dependencies=[Depends(require_admin)])
+def api_test_proserver(body: _ProServerTestIn):
+    """Read the latest row from the given file and return detected columns."""
+    from pathlib import Path as _Path
+    import core.excel_sensor as excel_sensor
+
+    fp = body.file_path.strip()
+    if not fp:
+        return JSONResponse({"status": "error", "message": "file_path is required"}, status_code=400)
+
+    if not _Path(fp).exists():
+        return JSONResponse({"status": "error", "message": f"File not found: {fp}"})
+
+    # Temporarily swap EXCEL_FILE_PATH so _read_latest_row uses the test path
+    saved_path = excel_sensor.EXCEL_FILE_PATH
+    excel_sensor.EXCEL_FILE_PATH = fp
+    try:
+        row = excel_sensor._read_latest_row()
+    finally:
+        excel_sensor.EXCEL_FILE_PATH = saved_path
+
+    if row is None:
+        return JSONResponse({
+            "status": "error",
+            "message": "File found but could not read data — check format/encoding/permissions",
+        })
+
+    columns = list(row.keys())
+    preview = {k: str(v) for k, v in row.items()}
+    return JSONResponse({
+        "status":     "ok",
+        "message":    f"Read {len(columns)} column(s) successfully",
+        "columns":    columns,
+        "latest_row": preview,
+    })

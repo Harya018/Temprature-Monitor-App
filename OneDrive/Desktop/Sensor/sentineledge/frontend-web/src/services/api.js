@@ -41,9 +41,9 @@ export const adminLogin              = (username, pin)   => req('POST', '/api/ad
 
 // ── Core ──────────────────────────────────────────────────────────────────────
 export const fetchHealth             = ()             => req('GET',  '/api/health',                   undefined, jsonHeaders())
-export const fetchAlerts             = (limit = 50)   => req('GET',  `/api/alerts?limit=${limit}`,    undefined, jsonHeaders())
+export const fetchAlerts             = (limit = 50)   => req('GET',  `/api/alerts?limit=${limit}`,    undefined, adminHeaders())
 export const acknowledgeAlert        = (id, name)     => req('POST', `/api/alerts/${id}/acknowledge`, { acknowledged_by: name })
-export const fetchSubscribers        = ()             => req('GET',  '/api/subscribers',              undefined, jsonHeaders())
+export const fetchSubscribers        = ()             => req('GET',  '/api/subscribers',              undefined, adminHeaders())
 export const addSubscriber           = (data, pwd)    => req('POST', '/api/subscribers',              data, adminHeaders(pwd))
 export const deleteSubscriber        = (id, pwd)      => req('DELETE',`/api/subscribers/${id}`,      undefined, adminHeaders(pwd))
 export const disableSubscriber       = (id, pwd)      => req('PATCH', `/api/subscribers/${id}/disable`, undefined, adminHeaders(pwd))
@@ -75,10 +75,6 @@ export const fetchReceipts       = (limit = 100, channel = 'all', status = 'all'
 // ── Events ────────────────────────────────────────────────────────────────────
 export const fetchEvents         = (limit = 100, type = 'all') =>
   req('GET', `/api/events?limit=${limit}&type=${type}`)
-
-// ── Demo controls (DELETE BEFORE PRODUCTION) ──────────────────────────────────
-export const demoCoolingRun      = ()                 => req('POST', '/api/demo/cooling-run', undefined)
-export const demoReset           = ()                 => req('POST', '/api/demo/reset',       undefined)
 
 // ── Admin utilities ───────────────────────────────────────────────────────────
 export const importCsv            = (filename)         => req('POST', '/api/admin/import-csv',           { filename })

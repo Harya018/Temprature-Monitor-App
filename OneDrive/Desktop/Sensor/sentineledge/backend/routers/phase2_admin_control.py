@@ -8,7 +8,8 @@ Routes:
   POST   /{admin_id}/lock                     Lock admin (is_active=0, invalidate sessions)
   POST   /{admin_id}/unlock                   Unlock admin (is_active=1)
   POST   /{admin_id}/require-approval         Toggle approval requirement
-  POST   /{admin_id}/impersonate              Create impersonation session
+  POST   /{admin_id}/impersonate              Create impersonation session (returns one-time code)
+  POST   /redeem-impersonation               Exchange one-time code for session token
   DELETE /{admin_id}/impersonate              End impersonation
   GET    /approvals                           List approvals (filter by status)
   GET    /approvals/pending                   Pending approvals only
@@ -168,6 +169,19 @@ async def start_impersonation(
         (token, expires_at, admin_id),
     )
 
+    # Store a one-time code in impersonation_codes; the browser tab redeems this
+    # code via POST /redeem-impersonation to get the actual session token.
+    # This keeps the raw token out of the URL (browser history, server logs, referrer).
+    code       = secrets.token_urlsafe(16)
+    code_exp   = datetime.now(timezone.utc) + timedelta(minutes=2)
+    execute_write(
+        """
+        INSERT INTO impersonation_codes (code, token, admin_id, expires_at, used)
+        VALUES (%s, %s, %s, %s, FALSE)
+        """,
+        (code, token, admin_id, code_exp),
+    )
+
     # Record that this admin is currently being impersonated
     execute_write(
         """
@@ -189,15 +203,51 @@ async def start_impersonation(
         sa["id"], admin_id, admin["name"], expires_at.isoformat(),
     )
     return {
-        "impersonation_token": token,
-        "admin_id":            admin_id,
-        "admin_name":          admin["name"],
-        "expires_at":          expires_at.isoformat(),
-        "note": (
-            "Use this token as 'Authorization: Bearer <token>' to act as this admin. "
-            "Valid for 1 hour. All actions are logged as 'superadmin acting as <name>'."
-        ),
+        "impersonation_code": code,
+        "admin_id":           admin_id,
+        "admin_name":         admin["name"],
+        "expires_at":         expires_at.isoformat(),
     }
+
+
+@router.post("/redeem-impersonation", summary="Exchange a one-time impersonation code for a session token")
+async def redeem_impersonation(body: dict):
+    """
+    Called by the new browser tab immediately after opening.
+    Validates the short-lived code and returns the actual session token exactly once.
+    No auth required — the code itself is the credential.
+    """
+    code = (body.get("code") or "").strip()
+    if not code:
+        return JSONResponse(status_code=400, content={"error": "code is required"})
+
+    rows = execute_read(
+        "SELECT code, token, admin_id, expires_at, used FROM impersonation_codes WHERE code = %s",
+        (code,),
+    )
+    if not rows:
+        return JSONResponse(status_code=404, content={"error": "Invalid or expired code"})
+
+    row = rows[0]
+    if row["used"]:
+        return JSONResponse(status_code=410, content={"error": "Code already used"})
+
+    exp = row["expires_at"]
+    if isinstance(exp, str):
+        from datetime import datetime as _dt
+        exp = _dt.fromisoformat(exp)
+    if exp.tzinfo is None:
+        exp = exp.replace(tzinfo=timezone.utc)
+    if datetime.now(timezone.utc) > exp:
+        return JSONResponse(status_code=410, content={"error": "Code has expired"})
+
+    execute_write(
+        "UPDATE impersonation_codes SET used = TRUE WHERE code = %s",
+        (code,),
+    )
+
+    logger.info("Impersonation code redeemed for admin_id %d", row["admin_id"])
+    return {"token": row["token"], "admin_id": row["admin_id"]}
 
 
 @router.delete("/{admin_id}/impersonate", summary="End impersonation for an admin")

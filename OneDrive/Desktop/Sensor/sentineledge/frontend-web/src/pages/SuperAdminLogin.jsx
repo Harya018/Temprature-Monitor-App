@@ -27,6 +27,11 @@ export default function SuperAdminLogin() {
   const navigate    = useNavigate()
 
   useEffect(() => {
+    document.title = 'SentinelEdge — Super Admin Login'
+    return () => { document.title = 'SentinelEdge — Admin Dashboard' }
+  }, [])
+
+  useEffect(() => {
     if (sessionStorage.getItem('admin_token')) {
       navigate('/super-admin', { replace: true })
     }
@@ -71,7 +76,6 @@ export default function SuperAdminLogin() {
       sessionStorage.setItem('admin_token',    data.token)
       sessionStorage.setItem('admin_username', data.username)
       sessionStorage.setItem('authenticated',  'true')
-      sessionStorage.setItem('adminPassword',  password.trim())
       sessionStorage.setItem('login_time',     new Date().toISOString())
 
       navigate('/super-admin', { replace: true })

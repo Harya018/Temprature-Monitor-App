@@ -38,6 +38,7 @@ import core.sensor as sensor
 import core.threshold as threshold
 import core.escalation as escalation
 import core.extra_sensor as extra_sensor  # secondary sensor reader (pH, etc.)
+import core.excel_sensor as excel_sensor  # Excel file reader (pro-server / HMI)
 from core.escalation_policy import run_escalation_check
 from core.anomaly_detector import run_anomaly_detection
 from modules.sms.receiver import run_sms_receiver
@@ -93,6 +94,26 @@ from database.backup import schedule_daily_backup
 from database.retention import schedule_retention_cleanup
 
 logger = get_logger(__name__)
+
+# ── Sentry error tracking ──────────────────────────────────────────────────────
+_SENTRY_DSN = os.getenv("SENTRY_DSN", "")
+if _SENTRY_DSN:
+    try:
+        import sentry_sdk
+        from sentry_sdk.integrations.fastapi import FastApiIntegration
+        from sentry_sdk.integrations.starlette import StarletteIntegration
+        sentry_sdk.init(
+            dsn=_SENTRY_DSN,
+            environment=os.getenv("APP_ENV", "development"),
+            integrations=[StarletteIntegration(), FastApiIntegration()],
+            traces_sample_rate=0.1,
+            send_default_pii=False,
+        )
+        logger.info("Sentry error tracking enabled (env=%s)", os.getenv("APP_ENV"))
+    except Exception as _se:
+        logger.warning("Sentry init failed: %s", _se)
+else:
+    logger.debug("SENTRY_DSN not set — error tracking disabled")
 
 
 # ─── Background tasks ────────────────────────────────────────────────────────
@@ -193,6 +214,103 @@ async def _monthly_quota_reset_task() -> None:
             logger.warning("Monthly quota reset failed: %s", exc)
 
 
+async def _session_cleanup_task() -> None:
+    """Every hour: delete expired admin and subscriber sessions to keep tables lean."""
+    while True:
+        await asyncio.sleep(3600)
+        try:
+            from database.connection import execute_write
+            adm = execute_write(
+                "DELETE FROM admin_sessions WHERE expires_at < NOW() - INTERVAL '7 days'"
+            )
+            sub = execute_write(
+                "DELETE FROM subscriber_sessions WHERE expires_at < NOW() - INTERVAL '7 days'"
+            )
+            logger.info(
+                "Session cleanup: removed %d expired admin session(s), %d subscriber session(s)",
+                adm.rowcount, sub.rowcount,
+            )
+        except Exception as exc:
+            logger.warning("Session cleanup task error: %s", exc)
+
+
+async def _notification_retry_task() -> None:
+    """Every 5 minutes: attempt redelivery of failed notifications in the retry queue."""
+    while True:
+        await asyncio.sleep(300)
+        try:
+            from database.connection import execute_read, execute_write
+            import json as _json
+
+            due = execute_read(
+                """
+                SELECT id, alert_id, subscriber_id, channel, attempt_count, payload
+                  FROM notification_retry_queue
+                 WHERE next_retry_at <= NOW()
+                   AND attempt_count < 5
+                 ORDER BY next_retry_at
+                 LIMIT 20
+                """
+            )
+            for item in due:
+                rid       = item["id"]
+                channel   = item["channel"]
+                attempts  = item["attempt_count"] + 1
+                payload   = item.get("payload") or {}
+                success   = False
+                last_error = None
+
+                try:
+                    if channel == "email":
+                        from modules.email.smtp import send_alert_email
+                        sub_rows = execute_read(
+                            "SELECT email FROM subscribers WHERE id = %s LIMIT 1",
+                            (item["subscriber_id"],),
+                        )
+                        if sub_rows and sub_rows[0].get("email"):
+                            await send_alert_email(
+                                sub_rows[0]["email"],
+                                payload.get("subject", "Alert Retry"),
+                                payload.get("body", ""),
+                            )
+                            success = True
+                    elif channel == "sms":
+                        from modules.sms.sender import send_sms_async
+                        sub_rows = execute_read(
+                            "SELECT phone FROM subscribers WHERE id = %s LIMIT 1",
+                            (item["subscriber_id"],),
+                        )
+                        if sub_rows and sub_rows[0].get("phone"):
+                            await send_sms_async(
+                                sub_rows[0]["phone"],
+                                payload.get("message", ""),
+                            )
+                            success = True
+                except Exception as send_exc:
+                    last_error = str(send_exc)[:500]
+
+                if success:
+                    execute_write(
+                        "DELETE FROM notification_retry_queue WHERE id = %s", (rid,)
+                    )
+                    logger.info("Retry succeeded: queue_id=%d channel=%s", rid, channel)
+                else:
+                    # Exponential back-off: 5m, 10m, 20m, 40m, 80m
+                    backoff_minutes = 5 * (2 ** (attempts - 1))
+                    execute_write(
+                        """
+                        UPDATE notification_retry_queue
+                           SET attempt_count = %s,
+                               next_retry_at = NOW() + (%s || ' minutes')::interval,
+                               last_error    = %s
+                         WHERE id = %s
+                        """,
+                        (attempts, backoff_minutes, last_error, rid),
+                    )
+        except Exception as exc:
+            logger.warning("Notification retry task error: %s", exc)
+
+
 async def _retention_policy_task() -> None:
     """Every 6 hours: apply DB-driven retention policies from the retention_policies table."""
     while True:
@@ -238,6 +356,23 @@ async def lifespan(app: FastAPI):
     from utils.security import migrate_env_admin_password
     migrate_env_admin_password()
 
+    # 1a. Load Pro-Server EX settings from DB (overrides env-var defaults if a
+    #     file path was previously saved via Admin → Settings → Pro-Server EX).
+    try:
+        _ps_rows = database.execute_read(
+            "SELECT key, value FROM app_settings WHERE key LIKE 'proserver_%'"
+        ) or []
+        _ps_vals = {r["key"].replace("proserver_", "", 1): r["value"] for r in _ps_rows}
+        if _ps_vals.get("file_path", "").strip():
+            import core.excel_sensor as _excel_sensor
+            _excel_sensor.reload_settings(_ps_vals)
+            logger.info(
+                "Startup: Pro-Server EX path loaded from DB: %s",
+                _ps_vals["file_path"],
+            )
+    except Exception as _exc:
+        logger.warning("Startup: could not load proserver settings from DB: %s", _exc)
+
     # 2. Clean up any stale sessions from previous server runs
     try:
         from database.queries.sessions import cleanup_expired_sessions
@@ -269,6 +404,8 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(run_escalation_check(),        name="escalation-policy")
     asyncio.create_task(run_anomaly_detection(),       name="anomaly-detector")
     asyncio.create_task(_monthly_quota_reset_task(),   name="monthly-quota-reset")
+    asyncio.create_task(_session_cleanup_task(),       name="session-cleanup")
+    asyncio.create_task(_notification_retry_task(),    name="notification-retry")
 
     try:
         lan_ip = socket.gethostbyname(socket.gethostname())
@@ -358,15 +495,24 @@ Admin endpoints require header:
 configure_cors(app)
 app.add_middleware(BaseHTTPMiddleware, dispatch=log_requests)
 
-# ── Security headers (Task 6) ─────────────────────────────────────────────────
+# ── Security headers ──────────────────────────────────────────────────────────
 class _SecurityHeadersMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request, call_next):
         response = await call_next(request)
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["X-Frame-Options"] = "DENY"
-        response.headers["X-XSS-Protection"] = "1; mode=block"
         response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
         response.headers["Permissions-Policy"] = "geolocation=(), microphone=(), camera=()"
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+        response.headers["Content-Security-Policy"] = (
+            "default-src 'self'; "
+            "script-src 'self' 'unsafe-inline' 'unsafe-eval'; "
+            "style-src 'self' 'unsafe-inline'; "
+            "img-src 'self' data: blob:; "
+            "font-src 'self' data:; "
+            "connect-src 'self' ws: wss:; "
+            "frame-ancestors 'none';"
+        )
         return response
 
 app.add_middleware(_SecurityHeadersMiddleware)
@@ -532,8 +678,40 @@ def _check_extra_param_thresholds(extra_params: dict, breach_dicts: list) -> Non
 
 # ─── WebSocket ───────────────────────────────────────────────────────────────
 
+def _ws_authenticate(token: str) -> dict | None:
+    """Validate a WebSocket Bearer token. Returns {"admin_id", "company_id"} or None."""
+    if not token:
+        return None
+    try:
+        from database.queries.sessions import get_session
+        from database.connection import execute_read
+        session = get_session(token)
+        if session is None:
+            return None
+        admin_id = session.get("admin_id")
+        if admin_id is None:
+            return None
+        rows = execute_read(
+            "SELECT is_active, company_id FROM admins WHERE id = %s LIMIT 1", (admin_id,)
+        )
+        if not rows or rows[0].get("is_active") == 0:
+            return None
+        return {"admin_id": admin_id, "company_id": rows[0].get("company_id")}
+    except Exception as exc:
+        logger.warning("WS auth error: %s", exc)
+        return None
+
+
 @app.websocket("/ws")
-async def websocket_endpoint(ws: WebSocket):
+async def websocket_endpoint(ws: WebSocket, token: str = ""):
+    # Authenticate before accepting the connection
+    admin_ctx = _ws_authenticate(token)
+    if admin_ctx is None:
+        await ws.close(code=4001, reason="Unauthorized")
+        return
+
+    company_id = admin_ctx.get("company_id")
+
     await ws.accept()
     add_connection(ws)
     MODULE_STATUS["websocket"] = "ok"
@@ -541,13 +719,32 @@ async def websocket_endpoint(ws: WebSocket):
     try:
         async for reading in sensor.stream_readings():
 
+            # ── Excel mode: substitute live file values for serial-sensor values ─
+            # When EXCEL_FILE_PATH is set, the excel_sensor background thread
+            # keeps current_temperature / current_timestamp / extra_readings
+            # up to date from the pro-server Excel file.  We use those values
+            # instead of the CSV/serial fallback so each column maps exactly to
+            # the correct parameter (temperature → temp, pH → pH, no interchange).
+            if excel_sensor.is_active() and excel_sensor.current_temperature is not None:
+                reading = {
+                    "temperature": excel_sensor.current_temperature,
+                    "timestamp":   excel_sensor.current_timestamp or reading["timestamp"],
+                    "is_live":     True,
+                }
+            ep = (
+                dict(excel_sensor.extra_readings)
+                if excel_sensor.is_active()
+                else dict(extra_sensor.extra_readings)
+            )
+
             is_valid, reason = validate_reading(reading)
 
             database.insert_reading(
                 reading["temperature"],
                 reading["timestamp"],
                 is_valid=is_valid,
-                extra_params=dict(extra_sensor.extra_readings),
+                extra_params=ep,
+                company_id=company_id,
             )
 
             if not is_valid:
@@ -558,7 +755,7 @@ async def websocket_endpoint(ws: WebSocket):
                     "breaches":         [],
                     "is_valid":         False,
                     "validation_error": reason,
-                    "extra_params":     dict(extra_sensor.extra_readings),
+                    "extra_params":     ep,
                 }
                 await broadcast(payload)
                 continue
@@ -589,7 +786,6 @@ async def websocket_endpoint(ws: WebSocket):
             # ── Custom parameter threshold enforcement ────────────────────────
             # For each live extra_param value, check against company_parameters
             # min/max and fire an alert if it falls outside the configured range.
-            ep = dict(extra_sensor.extra_readings)
             if ep:
                 _check_extra_param_thresholds(ep, breach_dicts)
 

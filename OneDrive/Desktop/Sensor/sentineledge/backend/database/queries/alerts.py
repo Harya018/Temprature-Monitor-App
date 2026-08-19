@@ -57,10 +57,16 @@ def insert_alert(
         return -1
 
 
-def get_alert(alert_id: int) -> Optional[dict]:
-    """Return a single alert by id, or None if not found."""
+def get_alert(alert_id: int, company_id: Optional[int] = None) -> Optional[dict]:
+    """Return a single alert by id, scoped to company_id when provided."""
     try:
-        rows = execute_read("SELECT * FROM alerts WHERE id = %s", (alert_id,))
+        if company_id is not None:
+            rows = execute_read(
+                "SELECT * FROM alerts WHERE id = %s AND company_id = %s",
+                (alert_id, company_id),
+            )
+        else:
+            rows = execute_read("SELECT * FROM alerts WHERE id = %s", (alert_id,))
         return rows[0] if rows else None
     except Exception as exc:
         logger.error("get_alert failed: %s", exc)
@@ -121,9 +127,14 @@ def set_max_escalated(alert_id: int) -> bool:
         return False
 
 
-def get_recent_alerts(limit: int = 50, offset: int = 0) -> list:
-    """Return the most recent `limit` alerts, newest first, starting at `offset`."""
+def get_recent_alerts(limit: int = 50, offset: int = 0, company_id: Optional[int] = None) -> list:
+    """Return the most recent alerts, scoped to company_id when provided."""
     try:
+        if company_id is not None:
+            return execute_read(
+                "SELECT * FROM alerts WHERE company_id = %s ORDER BY id DESC LIMIT %s OFFSET %s",
+                (company_id, limit, offset),
+            )
         return execute_read(
             "SELECT * FROM alerts ORDER BY id DESC LIMIT %s OFFSET %s", (limit, offset)
         )
@@ -145,14 +156,13 @@ def get_alerts_today_count() -> int:
         return 0
 
 
-def delete_alerts_by_period(period: str) -> int:
+def delete_alerts_by_period(period: str, company_id: Optional[int] = None) -> int:
     """
     Delete alerts (and their delivery_receipts) by time period.
 
     period: "1h" | "24h" | "7d" | "30d" | "all"
+    company_id: when provided, only deletes alerts belonging to that company.
     Returns the number of alert rows deleted.
-
-    PostgreSQL: uses NOW() - INTERVAL '...' instead of SQLite datetime().
     """
     PERIOD_MAP = {
         "1h":  "NOW() - INTERVAL '1 hour'",
@@ -165,13 +175,24 @@ def delete_alerts_by_period(period: str) -> int:
     conn = pool.getconn()
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            company_clause = "AND company_id = %s" if company_id is not None else ""
+            company_params = (company_id,) if company_id is not None else ()
+
             if period == "all":
-                cur.execute("SELECT COUNT(*) as cnt FROM alerts")
+                cur.execute(
+                    f"SELECT COUNT(*) as cnt FROM alerts WHERE 1=1 {company_clause}",
+                    company_params,
+                )
                 total = cur.fetchone()["cnt"]
                 cur.execute(
-                    "DELETE FROM delivery_receipts WHERE alert_id IN (SELECT id FROM alerts)"
+                    f"DELETE FROM delivery_receipts WHERE alert_id IN "
+                    f"(SELECT id FROM alerts WHERE 1=1 {company_clause})",
+                    company_params,
                 )
-                cur.execute("DELETE FROM alerts")
+                cur.execute(
+                    f"DELETE FROM alerts WHERE 1=1 {company_clause}",
+                    company_params,
+                )
                 conn.commit()
                 return total
             else:
@@ -180,13 +201,10 @@ def delete_alerts_by_period(period: str) -> int:
                     logger.warning("delete_alerts_by_period: unknown period %s", period)
                     return 0
 
-                # SECURITY: cutoff_expr is sourced from the hardcoded PERIOD_MAP dict above,
-                # never from raw user input. The 'period' key is validated by the router
-                # (only "1h" / "24h" / "7d" / "30d" are accepted) before reaching this
-                # function, so this f-string carries no SQL injection risk.
-                # If this logic ever changes, convert to a parameterized query immediately.
+                # SECURITY: cutoff_expr is from the hardcoded PERIOD_MAP, never raw user input.
                 cur.execute(
-                    f"SELECT id FROM alerts WHERE timestamp::TIMESTAMPTZ < {cutoff_expr}"
+                    f"SELECT id FROM alerts WHERE timestamp::TIMESTAMPTZ < {cutoff_expr} {company_clause}",
+                    company_params,
                 )
                 ids = [row["id"] for row in cur.fetchall()]
 

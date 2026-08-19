@@ -92,7 +92,7 @@ export default function AdminProfilePage() {
         sessionStorage.removeItem('admin_token')
         sessionStorage.removeItem('admin_username')
         sessionStorage.removeItem('authenticated')
-        sessionStorage.removeItem('adminPassword')
+        sessionStorage.removeItem('adminVerified')
         sessionStorage.removeItem('login_time')
         navigate('/', { replace: true })
       }, 2000)

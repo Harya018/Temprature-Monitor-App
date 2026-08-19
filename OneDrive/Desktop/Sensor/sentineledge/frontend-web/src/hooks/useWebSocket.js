@@ -11,11 +11,12 @@
  */
 import { useState, useEffect, useRef, useCallback } from 'react'
 
-/** Derive the correct WebSocket URL from the current page location. */
+/** Derive the correct WebSocket URL, including the admin token if available. */
 function getWsUrl() {
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-  const host     = window.location.host   // includes port if non-standard
-  return `${protocol}//${host}/ws`
+  const host     = window.location.host
+  const token    = sessionStorage.getItem('admin_token') || ''
+  return token ? `${protocol}//${host}/ws?token=${encodeURIComponent(token)}` : `${protocol}//${host}/ws`
 }
 
 const MAX_READINGS = 60
@@ -37,6 +38,16 @@ export default function useWebSocket({ onBreach } = {}) {
 
   const connect = useCallback(() => {
     if (!mountedRef.current) return
+
+    // Don't attempt connection until we have an auth token.
+    // Silently poll every 500 ms so the header never shows RECONNECTING
+    // just because the user hasn't logged in yet.
+    const token = sessionStorage.getItem('admin_token') || ''
+    if (!token) {
+      retryTimer.current = setTimeout(connect, 500)
+      return
+    }
+
     setConnectionStatus('CONNECTING')
 
     try {
@@ -85,7 +96,10 @@ export default function useWebSocket({ onBreach } = {}) {
         wsRef.current = null
 
         retryTimer.current = setTimeout(() => {
-          retryDelay.current = Math.min(retryDelay.current + 1000, MAX_BACKOFF)
+          // Only back off if we have a token but the server keeps rejecting us.
+          // If there's no token, connect() will poll silently and reset delay itself.
+          const hasToken = !!(sessionStorage.getItem('admin_token') || '')
+          if (hasToken) retryDelay.current = Math.min(retryDelay.current + 1000, MAX_BACKOFF)
           connect()
         }, retryDelay.current)
       }

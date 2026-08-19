@@ -19,12 +19,15 @@ from utils.security import hash_pin as _hash_pin_bcrypt, verify_pin as _verify_p
 logger = get_logger(__name__)
 
 
-def get_subscribers_ordered() -> list:
-    """Return ALL subscribers ordered by escalation_order ASC (active + disabled)."""
+def get_subscribers_ordered(company_id=None) -> list:
+    """Return subscribers ordered by escalation_order, scoped to company_id when provided."""
     try:
-        return execute_read(
-            "SELECT * FROM subscribers ORDER BY escalation_order ASC"
-        )
+        if company_id is not None:
+            return execute_read(
+                "SELECT * FROM subscribers WHERE company_id = %s ORDER BY escalation_order ASC",
+                (company_id,),
+            )
+        return execute_read("SELECT * FROM subscribers ORDER BY escalation_order ASC")
     except Exception as exc:
         logger.error("get_subscribers_ordered failed: %s", exc)
         return []
@@ -185,8 +188,11 @@ def clear_fcm_token(subscriber_id: int) -> bool:
 
 
 def delete_subscriber(subscriber_id: int) -> bool:
-    """Hard-delete a subscriber by id. Returns True on success."""
+    """Hard-delete a subscriber and all related data in FK-safe order."""
     try:
+        execute_write("DELETE FROM subscriber_sessions WHERE subscriber_id = %s", (subscriber_id,))
+        execute_write("DELETE FROM notification_acknowledgements WHERE subscriber_id = %s", (subscriber_id,))
+        execute_write("DELETE FROM delivery_records WHERE subscriber_id = %s", (subscriber_id,))
         execute_write("DELETE FROM subscribers WHERE id = %s", (subscriber_id,))
         return True
     except Exception as exc:

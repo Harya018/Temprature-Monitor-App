@@ -2,7 +2,8 @@
 routers/analytics.py — Analytics and CSV import endpoints for SentinelEdge.
 
 Prefix : /api/analytics
-Auth   : require_admin (X-Admin-Password or Bearer token)
+Auth   : require_admin — returns {"admin_id": int, "company_id": int|None}
+         All live-data queries are scoped to the authenticated admin's company_id.
 """
 
 from __future__ import annotations
@@ -28,9 +29,6 @@ logger = get_logger(__name__)
 router = APIRouter(prefix="/api/analytics", tags=["Analytics"])
 
 # ── In-memory analytics cache (TTL = 60 seconds) ──────────────────────────────
-# Each heavy analytics endpoint keeps its own cache dict:
-#   { cache_key: (result, timestamp) }
-# where cache_key is a tuple of the endpoint's query parameters.
 _ANALYTICS_CACHE_TTL = 60  # seconds
 _cache_lock          = threading.Lock()
 _live_trend_cache:  dict[tuple, tuple] = {}
@@ -39,7 +37,6 @@ _hourly_avg_cache:  dict[tuple, tuple] = {}
 
 
 def _cache_get(store: dict, key: tuple):
-    """Return cached value if within TTL, else None."""
     with _cache_lock:
         entry = store.get(key)
     if entry is None:
@@ -51,7 +48,6 @@ def _cache_get(store: dict, key: tuple):
 
 
 def _cache_set(store: dict, key: tuple, result) -> None:
-    """Store result in cache with current timestamp."""
     with _cache_lock:
         store[key] = (result, time.monotonic())
 
@@ -81,7 +77,6 @@ def _parse_dt(s: str) -> Optional[datetime]:
 
 
 def _date_range(from_date: Optional[str], to_date: Optional[str]):
-    """Return (start_str, end_str) inclusive, defaulting to last 7 days."""
     today = date.today()
     try:
         end = datetime.strptime(to_date, "%Y-%m-%d").date() if to_date else today
@@ -95,11 +90,9 @@ def _date_range(from_date: Optional[str], to_date: Optional[str]):
 
 
 def _col_map(headers: list[str], candidates: list[str]) -> Optional[str]:
-    """Return first candidate that appears in headers (case-insensitive)."""
     lc = {h.lower() for h in headers}
     for c in candidates:
         if c.lower() in lc:
-            # Return the original header that matched
             for h in headers:
                 if h.lower() == c.lower():
                     return h
@@ -107,7 +100,6 @@ def _col_map(headers: list[str], candidates: list[str]) -> Optional[str]:
 
 
 def _batch_insert_csv(rows: list[tuple]) -> int:
-    """Insert a list of (recorded_at, date_only, hour, week_number, temperature, pressure) tuples."""
     pool = get_db_pool()
     conn = pool.getconn()
     try:
@@ -129,18 +121,40 @@ def _batch_insert_csv(rows: list[tuple]) -> int:
         pool.putconn(conn)
 
 
+# ── shared query helpers ──────────────────────────────────────────────────────
+
+import re as _re
+
+def _safe_param(name: str) -> bool:
+    return bool(_re.match(r'^[a-zA-Z0-9_ ]{1,100}$', name))
+
+def _live_param_expr(parameter: str) -> Optional[str]:
+    if parameter == "temperature":
+        return "temperature"
+    if _safe_param(parameter):
+        return f"(extra_params->>'{parameter}')::float"
+    return None
+
+def _live_extra_filter(parameter: str) -> str:
+    if parameter == "temperature":
+        return ""
+    return f"AND extra_params ? '{parameter}'"
+
+def _csv_param_col(parameter: str) -> Optional[str]:
+    mapping = {"temperature": "temperature", "pressure": "pressure"}
+    return mapping.get(parameter)
+
+
 # ── CSV import endpoints ───────────────────────────────────────────────────────
 
 @router.post("/csv/import", dependencies=[Depends(require_admin)])
 async def import_csv(file: UploadFile = File(...)):
-    """Import historical sensor data from a CSV file."""
     content = await file.read()
     text = content.decode("utf-8-sig", errors="replace")
     reader = csv.DictReader(io.StringIO(text))
     raw_headers = list(reader.fieldnames or [])
     headers_lc = [h.strip().lower() for h in raw_headers]
 
-    # Detect datetime column
     dt_candidates = [
         "timestamp", "date only", "date_only", "recorded_at",
         "datetime", "date", "time",
@@ -161,7 +175,6 @@ async def import_csv(file: UploadFile = File(...)):
             content={"error": "No datetime column found in CSV headers", "headers": raw_headers},
         )
 
-    # Map optional columns
     def _find(candidates):
         for c in candidates:
             if c.lower() in headers_lc:
@@ -192,17 +205,14 @@ async def import_csv(file: UploadFile = File(...)):
             skipped += 1
             continue
 
-        # Ensure timezone-aware
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
 
         dt_date = dt.date()
 
-        # Hour
         hr_raw = (row.get(hour_col) or "") if hour_col else ""
         hr = int(hr_raw.strip()) if hr_raw.strip().lstrip("-").isdigit() else dt.hour
 
-        # Week number
         wk_raw = (row.get(week_col) or "") if week_col else ""
         wk = int(wk_raw.strip()) if wk_raw.strip().lstrip("-").isdigit() else dt.isocalendar()[1]
 
@@ -231,7 +241,6 @@ async def import_csv(file: UploadFile = File(...)):
                 skipped += len(batch)
                 batch.clear()
 
-    # Flush remainder
     if batch:
         try:
             imported += _batch_insert_csv(batch)
@@ -245,7 +254,6 @@ async def import_csv(file: UploadFile = File(...)):
 
 @router.get("/csv/status", dependencies=[Depends(require_admin)])
 def csv_status():
-    """Return metadata about imported CSV data."""
     rows = execute_read(
         """
         SELECT
@@ -267,53 +275,26 @@ def csv_status():
 
 @router.delete("/csv/clear", dependencies=[Depends(require_admin)])
 def csv_clear():
-    """Delete all imported CSV data."""
     execute_write("TRUNCATE csv_sensor_history RESTART IDENTITY")
     log_activity(0, "csv_cleared", "csv_sensor_history", None)
     return {"cleared": True}
 
 
-# ── shared query helpers ──────────────────────────────────────────────────────
-
-import re as _re
-
-def _safe_param(name: str) -> bool:
-    """Allow only safe parameter names to prevent SQL injection."""
-    return bool(_re.match(r'^[a-zA-Z0-9_ ]{1,100}$', name))
-
-def _live_param_expr(parameter: str) -> Optional[str]:
-    """Return SQL expression for the given parameter from the readings table."""
-    if parameter == "temperature":
-        return "temperature"
-    if _safe_param(parameter):
-        return f"(extra_params->>'{parameter}')::float"
-    return None
-
-def _live_extra_filter(parameter: str) -> str:
-    """Return extra WHERE clause for non-temperature parameters."""
-    if parameter == "temperature":
-        return ""
-    return f"AND extra_params ? '{parameter}'"
-
-def _csv_param_col(parameter: str) -> Optional[str]:
-    mapping = {"temperature": "temperature", "pressure": "pressure"}
-    return mapping.get(parameter)
-
-
 # ── Chart 1 — Live trend ───────────────────────────────────────────────────────
 
-@router.get("/charts/live-trend", dependencies=[Depends(require_admin)])
+@router.get("/charts/live-trend")
 def chart_live_trend(
+    admin: dict = Depends(require_admin),
     parameter: str = Query("temperature"),
     limit: int = Query(60, ge=1, le=500),
     source: str = Query("live"),
     from_date: Optional[str] = Query(None),
     to_date: Optional[str] = Query(None),
 ):
-    _cache_key = (parameter, limit, source, from_date, to_date)
+    company_id = admin.get("company_id")
+    _cache_key = (company_id, parameter, limit, source, from_date, to_date)
     cached = _cache_get(_live_trend_cache, _cache_key)
     if cached is not None:
-        logger.debug("analytics cache HIT: live-trend %s", _cache_key)
         return cached
     start, end = _date_range(from_date, to_date)
     ts_start = f"{start}T00:00:00+00:00"
@@ -326,6 +307,8 @@ def chart_live_trend(
     rows: list[dict] = []
 
     if source in ("live", "both") and live_col:
+        cid_filter = "AND company_id = %s" if company_id else ""
+        cid_params = (company_id,) if company_id else ()
         rows += execute_read(
             f"""
             SELECT ({live_col})::float AS value,
@@ -333,11 +316,12 @@ def chart_live_trend(
             FROM readings
             WHERE is_valid = 1
               {live_filter}
+              {cid_filter}
               AND timestamp::timestamptz BETWEEN %s AND %s
             ORDER BY id DESC
             LIMIT %s
             """,
-            (ts_start, ts_end, limit),
+            (*cid_params, ts_start, ts_end, limit),
         )
 
     if source in ("csv", "both") and csv_col:
@@ -354,7 +338,6 @@ def chart_live_trend(
             (ts_start, ts_end, limit),
         )
 
-    # Merge and sort by time for "both"
     if source == "both":
         rows.sort(key=lambda r: str(r.get("recorded_at", "")), reverse=True)
         rows = rows[:limit]
@@ -369,23 +352,23 @@ def chart_live_trend(
         for r in reversed(rows)
     ]
     _cache_set(_live_trend_cache, _cache_key, result)
-    logger.debug("analytics cache MISS: live-trend %s", _cache_key)
     return result
 
 
 # ── Chart 2 — Daily average ────────────────────────────────────────────────────
 
-@router.get("/charts/daily-avg", dependencies=[Depends(require_admin)])
+@router.get("/charts/daily-avg")
 def chart_daily_avg(
+    admin: dict = Depends(require_admin),
     parameter: str = Query("temperature"),
     source: str = Query("live"),
     from_date: Optional[str] = Query(None),
     to_date: Optional[str] = Query(None),
 ):
-    _cache_key = (parameter, source, from_date, to_date)
+    company_id = admin.get("company_id")
+    _cache_key = (company_id, parameter, source, from_date, to_date)
     cached = _cache_get(_daily_avg_cache, _cache_key)
     if cached is not None:
-        logger.debug("analytics cache HIT: daily-avg %s", _cache_key)
         return cached
     start, end = _date_range(from_date, to_date)
     ts_start = f"{start}T00:00:00+00:00"
@@ -397,6 +380,8 @@ def chart_daily_avg(
     rows: list[dict] = []
 
     if source in ("live", "both") and live_col:
+        cid_filter = "AND company_id = %s" if company_id else ""
+        cid_params = (company_id,) if company_id else ()
         rows += execute_read(
             f"""
             SELECT DATE(timestamp::timestamptz)::text               AS date,
@@ -407,11 +392,12 @@ def chart_daily_avg(
             FROM readings
             WHERE is_valid = 1
               {live_filter}
+              {cid_filter}
               AND timestamp::timestamptz BETWEEN %s AND %s
             GROUP BY DATE(timestamp::timestamptz)
             ORDER BY DATE(timestamp::timestamptz)
             """,
-            (ts_start, ts_end),
+            (*cid_params, ts_start, ts_end),
         )
 
     if source in ("csv", "both") and csv_col:
@@ -449,24 +435,23 @@ def chart_daily_avg(
     else:
         result = rows
     _cache_set(_daily_avg_cache, _cache_key, result)
-    logger.debug("analytics cache MISS: daily-avg %s", _cache_key)
     return result
-
 
 
 # ── Chart 3 — Hourly average ───────────────────────────────────────────────────
 
-@router.get("/charts/hourly-avg", dependencies=[Depends(require_admin)])
+@router.get("/charts/hourly-avg")
 def chart_hourly_avg(
+    admin: dict = Depends(require_admin),
     parameter: str = Query("temperature"),
     source: str = Query("live"),
     from_date: Optional[str] = Query(None),
     to_date: Optional[str] = Query(None),
 ):
-    _cache_key = (parameter, source, from_date, to_date)
+    company_id = admin.get("company_id")
+    _cache_key = (company_id, parameter, source, from_date, to_date)
     cached = _cache_get(_hourly_avg_cache, _cache_key)
     if cached is not None:
-        logger.debug("analytics cache HIT: hourly-avg %s", _cache_key)
         return cached
     start, end = _date_range(from_date, to_date)
     ts_start = f"{start}T00:00:00+00:00"
@@ -478,6 +463,8 @@ def chart_hourly_avg(
     rows: list[dict] = []
 
     if source in ("live", "both") and live_col:
+        cid_filter = "AND company_id = %s" if company_id else ""
+        cid_params = (company_id,) if company_id else ()
         rows += execute_read(
             f"""
             SELECT EXTRACT(HOUR FROM timestamp::timestamptz)::int    AS hour,
@@ -486,11 +473,12 @@ def chart_hourly_avg(
             FROM readings
             WHERE is_valid = 1
               {live_filter}
+              {cid_filter}
               AND timestamp::timestamptz BETWEEN %s AND %s
             GROUP BY EXTRACT(HOUR FROM timestamp::timestamptz)
             ORDER BY hour
             """,
-            (ts_start, ts_end),
+            (*cid_params, ts_start, ts_end),
         )
 
     if source in ("csv", "both") and csv_col:
@@ -524,19 +512,20 @@ def chart_hourly_avg(
     else:
         result = rows
     _cache_set(_hourly_avg_cache, _cache_key, result)
-    logger.debug("analytics cache MISS: hourly-avg %s", _cache_key)
     return result
 
 
 # ── Chart 4 — Weekly average ───────────────────────────────────────────────────
 
-@router.get("/charts/weekly-avg", dependencies=[Depends(require_admin)])
+@router.get("/charts/weekly-avg")
 def chart_weekly_avg(
+    admin: dict = Depends(require_admin),
     parameter: str = Query("temperature"),
     source: str = Query("live"),
     from_date: Optional[str] = Query(None),
     to_date: Optional[str] = Query(None),
 ):
+    company_id = admin.get("company_id")
     start, end = _date_range(from_date, to_date)
     ts_start = f"{start}T00:00:00+00:00"
     ts_end   = f"{end}T23:59:59+00:00"
@@ -547,6 +536,8 @@ def chart_weekly_avg(
     rows: list[dict] = []
 
     if source in ("live", "both") and live_col:
+        cid_filter = "AND company_id = %s" if company_id else ""
+        cid_params = (company_id,) if company_id else ()
         rows += execute_read(
             f"""
             SELECT EXTRACT(WEEK FROM timestamp::timestamptz)::int    AS week_number,
@@ -556,11 +547,12 @@ def chart_weekly_avg(
             FROM readings
             WHERE is_valid = 1
               {live_filter}
+              {cid_filter}
               AND timestamp::timestamptz BETWEEN %s AND %s
             GROUP BY EXTRACT(WEEK FROM timestamp::timestamptz)
             ORDER BY week_number
             """,
-            (ts_start, ts_end),
+            (*cid_params, ts_start, ts_end),
         )
 
     if source in ("csv", "both") and csv_col:
@@ -599,13 +591,15 @@ def chart_weekly_avg(
 
 # ── Chart 5 — Distribution ────────────────────────────────────────────────────
 
-@router.get("/charts/distribution", dependencies=[Depends(require_admin)])
+@router.get("/charts/distribution")
 def chart_distribution(
+    admin: dict = Depends(require_admin),
     parameter: str = Query("temperature"),
     source: str = Query("live"),
     from_date: Optional[str] = Query(None),
     to_date: Optional[str] = Query(None),
 ):
+    company_id = admin.get("company_id")
     start, end = _date_range(from_date, to_date)
     ts_start = f"{start}T00:00:00+00:00"
     ts_end   = f"{end}T23:59:59+00:00"
@@ -632,16 +626,19 @@ def chart_distribution(
     bucket_counts: dict[str, int] = {}
 
     if source in ("live", "both") and live_col:
+        cid_filter = "AND company_id = %s" if company_id else ""
+        cid_params = (company_id,) if company_id else ()
         for r in execute_read(
             f"""
             SELECT {_bucket_sql(live_col)} AS bucket_label, COUNT(*) AS count
             FROM readings
             WHERE is_valid = 1
               {live_filter}
+              {cid_filter}
               AND timestamp::timestamptz BETWEEN %s AND %s
             GROUP BY bucket_label
             """,
-            (ts_start, ts_end),
+            (*cid_params, ts_start, ts_end),
         ):
             bl = r["bucket_label"]
             bucket_counts[bl] = bucket_counts.get(bl, 0) + int(r["count"])
@@ -680,17 +677,22 @@ def chart_distribution(
 
 # ── Chart 6 — Breach frequency ────────────────────────────────────────────────
 
-@router.get("/charts/breach-frequency", dependencies=[Depends(require_admin)])
+@router.get("/charts/breach-frequency")
 def chart_breach_frequency(
+    admin: dict = Depends(require_admin),
     from_date: Optional[str] = Query(None),
     to_date: Optional[str] = Query(None),
 ):
+    company_id = admin.get("company_id")
     start, end = _date_range(from_date, to_date)
     ts_start = f"{start}T00:00:00+00:00"
     ts_end   = f"{end}T23:59:59+00:00"
 
+    cid_filter = "AND company_id = %s" if company_id else ""
+    cid_params = (company_id,) if company_id else ()
+
     rows = execute_read(
-        """
+        f"""
         SELECT
             parameter,
             COUNT(*)                                          AS breach_count,
@@ -699,24 +701,24 @@ def chart_breach_frequency(
             COUNT(*)                                          AS day_count
         FROM alerts
         WHERE timestamp::timestamptz BETWEEN %s AND %s
+          {cid_filter}
         GROUP BY parameter, DATE(timestamp::timestamptz)
         ORDER BY parameter, DATE(timestamp::timestamptz)
         """,
-        (ts_start, ts_end),
+        (ts_start, ts_end, *cid_params),
     )
 
-    # Aggregate per parameter
     by_param: dict[str, dict] = {}
     for r in rows:
         p = r["parameter"]
         if p not in by_param:
             by_param[p] = {
-                "parameter":      p,
-                "breach_count":   0,
+                "parameter":       p,
+                "breach_count":    0,
                 "days_with_breach": 0,
-                "worst_day":      None,
+                "worst_day":       None,
                 "worst_day_count": 0,
-                "days":           [],
+                "days":            [],
             }
         by_param[p]["breach_count"]    += int(r["day_count"])
         by_param[p]["days_with_breach"] += 1
@@ -731,13 +733,13 @@ def chart_breach_frequency(
 
     return [
         {
-            "parameter":       v["parameter"],
-            "breach_count":    v["breach_count"],
-            "days_with_breach":v["days_with_breach"],
-            "avg_per_day":     round(v["breach_count"] / total_days, 2),
-            "worst_day":       v["worst_day"],
-            "worst_day_count": v["worst_day_count"],
-            "daily_series":    v["days"],
+            "parameter":        v["parameter"],
+            "breach_count":     v["breach_count"],
+            "days_with_breach": v["days_with_breach"],
+            "avg_per_day":      round(v["breach_count"] / total_days, 2),
+            "worst_day":        v["worst_day"],
+            "worst_day_count":  v["worst_day_count"],
+            "daily_series":     v["days"],
         }
         for v in by_param.values()
     ]
@@ -745,28 +747,33 @@ def chart_breach_frequency(
 
 # ── Chart 7 — Alert heatmap ───────────────────────────────────────────────────
 
-@router.get("/charts/alert-heatmap", dependencies=[Depends(require_admin)])
+@router.get("/charts/alert-heatmap")
 def chart_alert_heatmap(
+    admin: dict = Depends(require_admin),
     from_date: Optional[str] = Query(None),
     to_date: Optional[str] = Query(None),
 ):
+    company_id = admin.get("company_id")
     start, end = _date_range(from_date, to_date)
     ts_start = f"{start}T00:00:00+00:00"
     ts_end   = f"{end}T23:59:59+00:00"
 
+    cid_filter = "AND company_id = %s" if company_id else ""
+    cid_params = (company_id,) if company_id else ()
+
     rows = execute_read(
-        """
+        f"""
         SELECT
             EXTRACT(HOUR FROM timestamp::timestamptz)::int    AS hour,
-            -- Convert PG DOW (0=Sun) to ISO (0=Mon, 6=Sun)
             ((EXTRACT(DOW FROM timestamp::timestamptz)::int + 6) %% 7) AS day_of_week,
             COUNT(*)                                          AS count
         FROM alerts
         WHERE timestamp::timestamptz BETWEEN %s AND %s
+          {cid_filter}
         GROUP BY hour, day_of_week
         ORDER BY hour, day_of_week
         """,
-        (ts_start, ts_end),
+        (ts_start, ts_end, *cid_params),
     )
 
     return [
@@ -777,18 +784,22 @@ def chart_alert_heatmap(
 
 # ── Chart 8 — Subscriber response times ──────────────────────────────────────
 
-@router.get("/charts/subscriber-response", dependencies=[Depends(require_admin)])
+@router.get("/charts/subscriber-response")
 def chart_subscriber_response(
+    admin: dict = Depends(require_admin),
     from_date: Optional[str] = Query(None),
     to_date: Optional[str] = Query(None),
 ):
+    company_id = admin.get("company_id")
     start, end = _date_range(from_date, to_date)
     ts_start = f"{start}T00:00:00+00:00"
     ts_end   = f"{end}T23:59:59+00:00"
 
-    # Acknowledged alerts with valid response time
+    cid_filter = "AND a.company_id = %s" if company_id else ""
+    cid_params = (company_id,) if company_id else ()
+
     ack_rows = execute_read(
-        """
+        f"""
         SELECT
             acknowledged_by                                              AS name,
             COUNT(*)                                                     AS acknowledged_count,
@@ -807,31 +818,33 @@ def chart_subscriber_response(
                     acknowledged_at::timestamptz - timestamp::timestamptz
                 ))
             )::numeric / 60, 1)                                         AS slowest_minutes
-        FROM alerts
+        FROM alerts a
         WHERE acknowledged = 1
           AND acknowledged_at IS NOT NULL
           AND acknowledged_by IS NOT NULL
           AND timestamp::timestamptz BETWEEN %s AND %s
+          {cid_filter}
           AND EXTRACT(EPOCH FROM (
                 acknowledged_at::timestamptz - timestamp::timestamptz
               )) > 0
         GROUP BY acknowledged_by
         ORDER BY avg_minutes ASC
         """,
-        (ts_start, ts_end),
+        (ts_start, ts_end, *cid_params),
     )
 
-    # Total alerts escalated per subscriber name (from escalation_log + subscribers)
+    sub_cid_filter = "AND s.company_id = %s" if company_id else ""
     total_rows = execute_read(
-        """
+        f"""
         SELECT s.name, COUNT(DISTINCT el.alert_id) AS total_alerts
         FROM subscribers s
         JOIN escalation_log el ON el.subscriber_id = s.id
         JOIN alerts a ON a.id = el.alert_id
         WHERE a.timestamp::timestamptz BETWEEN %s AND %s
+          {sub_cid_filter}
         GROUP BY s.name
         """,
-        (ts_start, ts_end),
+        (ts_start, ts_end, *cid_params),
     )
     totals = {r["name"]: int(r["total_alerts"]) for r in total_rows}
 
@@ -842,14 +855,14 @@ def chart_subscriber_response(
         total = totals.get(name, acked)
         ack_rate = round(100.0 * acked / total, 1) if total > 0 else 100.0
         result.append({
-            "subscriber_id":    i + 1,
-            "name":             name,
-            "avg_minutes":      float(r["avg_minutes"] or 0),
-            "fastest_minutes":  float(r["fastest_minutes"] or 0),
-            "slowest_minutes":  float(r["slowest_minutes"] or 0),
-            "total_alerts":     total,
+            "subscriber_id":      i + 1,
+            "name":               name,
+            "avg_minutes":        float(r["avg_minutes"] or 0),
+            "fastest_minutes":    float(r["fastest_minutes"] or 0),
+            "slowest_minutes":    float(r["slowest_minutes"] or 0),
+            "total_alerts":       total,
             "acknowledged_count": acked,
-            "ack_rate_percent": ack_rate,
+            "ack_rate_percent":   ack_rate,
         })
 
     return result
@@ -857,26 +870,33 @@ def chart_subscriber_response(
 
 # ── Chart 9 — Channel delivery rates ─────────────────────────────────────────
 
-@router.get("/charts/delivery-rates", dependencies=[Depends(require_admin)])
+@router.get("/charts/delivery-rates")
 def chart_delivery_rates(
+    admin: dict = Depends(require_admin),
     from_date: Optional[str] = Query(None),
     to_date: Optional[str] = Query(None),
 ):
+    company_id = admin.get("company_id")
     start, end = _date_range(from_date, to_date)
     ts_start = f"{start}T00:00:00+00:00"
     ts_end   = f"{end}T23:59:59+00:00"
 
+    # Scope by company via JOIN on alerts
+    cid_join   = "JOIN alerts al ON al.id = dr.alert_id AND al.company_id = %s" if company_id else ""
+    cid_params = (company_id,) if company_id else ()
+
     rows = execute_read(
-        """
+        f"""
         SELECT
-            channel,
-            COUNT(*)                                    AS sent,
-            SUM(CASE WHEN success = 1 THEN 1 ELSE 0 END) AS delivered
-        FROM delivery_receipts
-        WHERE sent_at::timestamptz BETWEEN %s AND %s
-        GROUP BY channel
+            dr.channel,
+            COUNT(*)                                      AS sent,
+            SUM(CASE WHEN dr.success = 1 THEN 1 ELSE 0 END) AS delivered
+        FROM delivery_receipts dr
+        {cid_join}
+        WHERE dr.sent_at::timestamptz BETWEEN %s AND %s
+        GROUP BY dr.channel
         """,
-        (ts_start, ts_end),
+        (*cid_params, ts_start, ts_end),
     )
 
     if not rows:
@@ -884,13 +904,12 @@ def chart_delivery_rates(
 
     result: dict = {}
     for r in rows:
-        ch       = str(r.get("channel", "")).lower()
-        sent     = int(r["sent"])
+        ch        = str(r.get("channel", "")).lower()
+        sent      = int(r["sent"])
         delivered = int(r["delivered"])
-        rate     = round(100.0 * delivered / sent, 1) if sent > 0 else 0.0
+        rate      = round(100.0 * delivered / sent, 1) if sent > 0 else 0.0
         result[ch] = {"sent": sent, "failed": sent - delivered, "rate_percent": rate}
 
-    # Ensure all three channels appear in response
     for ch in ("sms", "email", "push"):
         if ch not in result:
             result[ch] = {"sent": 0, "failed": 0, "rate_percent": 0.0}
@@ -900,13 +919,15 @@ def chart_delivery_rates(
 
 # ── Chart 10 — Summary stats ──────────────────────────────────────────────────
 
-@router.get("/charts/summary-stats", dependencies=[Depends(require_admin)])
+@router.get("/charts/summary-stats")
 def chart_summary_stats(
+    admin: dict = Depends(require_admin),
     parameter: str = Query("temperature"),
     source: str = Query("live"),
     from_date: Optional[str] = Query(None),
     to_date: Optional[str] = Query(None),
 ):
+    company_id = admin.get("company_id")
     start, end = _date_range(from_date, to_date)
     ts_start = f"{start}T00:00:00+00:00"
     ts_end   = f"{end}T23:59:59+00:00"
@@ -918,10 +939,12 @@ def chart_summary_stats(
     values: list[float] = []
 
     if source in ("live", "both") and live_col:
+        cid_filter = "AND company_id = %s" if company_id else ""
+        cid_params = (company_id,) if company_id else ()
         for r in execute_read(
             f"SELECT ({live_col})::float AS v FROM readings WHERE is_valid=1 "
-            f"{live_filter} AND timestamp::timestamptz BETWEEN %s AND %s",
-            (ts_start, ts_end),
+            f"{live_filter} {cid_filter} AND timestamp::timestamptz BETWEEN %s AND %s",
+            (*cid_params, ts_start, ts_end),
         ):
             if r["v"] is not None:
                 values.append(float(r["v"]))
@@ -945,15 +968,16 @@ def chart_summary_stats(
     max_val = round(max(values), 2)
     std_val = round(_stats.stdev(values), 2) if len(values) > 1 else 0.0
 
-    # Breach count for this parameter in range
+    cid_filter = "AND company_id = %s" if company_id else ""
+    cid_params = (company_id,) if company_id else ()
+
     breach_rows = execute_read(
-        "SELECT COUNT(*) AS cnt FROM alerts WHERE parameter = %s "
-        "AND timestamp::timestamptz BETWEEN %s AND %s",
-        (parameter, ts_start, ts_end),
+        f"SELECT COUNT(*) AS cnt FROM alerts WHERE parameter = %s "
+        f"AND timestamp::timestamptz BETWEEN %s AND %s {cid_filter}",
+        (parameter, ts_start, ts_end, *cid_params),
     )
     breach_count = int((breach_rows[0] or {}).get("cnt", 0))
 
-    # Fetch threshold to calculate time above threshold
     thr_rows = execute_read(
         "SELECT value FROM company_config WHERE field = %s LIMIT 1",
         (f"{parameter}_high",),
@@ -967,36 +991,39 @@ def chart_summary_stats(
     unit = "°C" if parameter == "temperature" else "hPa" if parameter == "pressure" else ""
 
     return [{
-        "parameter":                parameter,
-        "unit":                     unit,
-        "avg":                      avg_val,
-        "min":                      min_val,
-        "max":                      max_val,
-        "std_dev":                  std_val,
-        "reading_count":            len(values),
-        "breach_count":             breach_count,
+        "parameter":                    parameter,
+        "unit":                         unit,
+        "avg":                          avg_val,
+        "min":                          min_val,
+        "max":                          max_val,
+        "std_dev":                      std_val,
+        "reading_count":                len(values),
+        "breach_count":                 breach_count,
         "time_above_threshold_percent": above_pct,
     }]
 
 
 # ── Incident Report ────────────────────────────────────────────────────────────
 
-@router.get("/alerts/{alert_id}/incident-report", dependencies=[Depends(require_admin)])
-def incident_report(alert_id: int):
-    """
-    Assemble a full incident report for a single alert.
-    Returns alert details, per-channel delivery receipts,
-    policy escalation log, and context sensor readings.
-    """
+@router.get("/alerts/{alert_id}/incident-report")
+def incident_report(
+    alert_id: int,
+    admin: dict = Depends(require_admin),
+):
+    company_id = admin.get("company_id")
+    # Scope alert lookup to the requesting company
+    cid_filter = "AND company_id = %s" if company_id else ""
+    cid_params = (company_id,) if company_id else ()
+
     alert_rows = execute_read(
-        "SELECT * FROM alerts WHERE id = %s LIMIT 1", (alert_id,)
+        f"SELECT * FROM alerts WHERE id = %s {cid_filter} LIMIT 1",
+        (alert_id, *cid_params),
     )
     if not alert_rows:
         return JSONResponse(status_code=404, content={"error": "Alert not found"})
 
     alert = dict(alert_rows[0])
 
-    # Per-channel delivery data (delivery_receipts — NOT alert_delivery_log)
     delivery = execute_read(
         """
         SELECT
@@ -1014,7 +1041,6 @@ def incident_report(alert_id: int):
         (alert_id,),
     )
 
-    # Policy escalation re-notification log
     escalations = execute_read(
         """
         SELECT
@@ -1031,23 +1057,24 @@ def incident_report(alert_id: int):
         (alert_id,),
     )
 
-    # 5 readings before + 5 after the alert timestamp for context
     context_readings: list = []
     try:
+        ctx_cid = "AND company_id = %s" if company_id else ""
+        ctx_params = (company_id,) if company_id else ()
         ctx = execute_read(
-            """
+            f"""
             (SELECT temperature, timestamp, 'before' AS side
                FROM readings
-              WHERE timestamp::timestamptz < %s::timestamptz AND is_valid = 1
+              WHERE timestamp::timestamptz < %s::timestamptz AND is_valid = 1 {ctx_cid}
               ORDER BY timestamp::timestamptz DESC LIMIT 5)
             UNION ALL
             (SELECT temperature, timestamp, 'after' AS side
                FROM readings
-              WHERE timestamp::timestamptz >= %s::timestamptz AND is_valid = 1
+              WHERE timestamp::timestamptz >= %s::timestamptz AND is_valid = 1 {ctx_cid}
               ORDER BY timestamp::timestamptz ASC LIMIT 5)
             ORDER BY timestamp ASC
             """,
-            (alert["timestamp"], alert["timestamp"]),
+            (alert["timestamp"], *ctx_params, alert["timestamp"], *ctx_params),
         )
         context_readings = [dict(r) for r in ctx]
     except Exception as exc:
@@ -1064,23 +1091,18 @@ def incident_report(alert_id: int):
 
 # ── Chart 11 — Breach predictions ────────────────────────────────────────────
 
-@router.get("/charts/predictions", dependencies=[Depends(require_admin)])
+@router.get("/charts/predictions")
 def chart_predictions(
+    admin: dict = Depends(require_admin),
     parameter: str = Query("temperature"),
     source:    str = Query("live"),
 ):
-    """
-    Linear extrapolation over the last 20 readings.
-    Returns predictions only when a breach is estimated within 4 hours.
-    source=csv uses csv_sensor_history; everything else uses the readings table.
-    """
+    company_id = admin.get("company_id")
     live_col    = _live_param_expr(parameter)
     live_filter = _live_extra_filter(parameter)
     csv_col     = _csv_param_col(parameter)
     unit        = "°C" if parameter == "temperature" else "hPa" if parameter == "pressure" else ""
 
-    # Fetch one reading per minute over the last 20 minutes for a meaningful slope.
-    # Rapid readings (multiple per second) collapse into noise without this bucketing.
     if source == "csv" and csv_col:
         rows = execute_read(
             f"""
@@ -1096,16 +1118,19 @@ def chart_predictions(
     else:
         if not live_col:
             return []
+        cid_filter = "AND company_id = %s" if company_id else ""
+        cid_params = (company_id,) if company_id else ()
         rows = execute_read(
             f"""
             SELECT DISTINCT ON (DATE_TRUNC('minute', timestamp::timestamptz))
                    ({live_col})::float AS v,
                    EXTRACT(EPOCH FROM timestamp::timestamptz) AS ts
               FROM readings
-             WHERE is_valid = 1 {live_filter}
+             WHERE is_valid = 1 {live_filter} {cid_filter}
              ORDER BY DATE_TRUNC('minute', timestamp::timestamptz) DESC, timestamp::timestamptz DESC
              LIMIT 20
-            """
+            """,
+            cid_params,
         )
 
     if len(rows) < 3:
@@ -1116,7 +1141,6 @@ def chart_predictions(
     xs  = [p[0] - t0 for p in pts]
     ys  = [p[1]       for p in pts]
 
-    # Linear regression: y = slope * x + intercept
     n    = len(xs)
     sx   = sum(xs)
     sy   = sum(ys)
@@ -1129,14 +1153,12 @@ def chart_predictions(
     slope     = (n * sxy - sx * sy) / denom
     intercept = (sy - slope * sx) / n
 
-    # Fetch thresholds from runtime config (company_config may be empty)
     import config as _cfg
     rt = _cfg.RUNTIME_THRESHOLDS
     if parameter == "temperature":
         thr_high = rt.get("temp_high")
         thr_low  = rt.get("temp_low")
     else:
-        # Pressure thresholds not currently in RUNTIME_THRESHOLDS; try company_config
         thr_rows = execute_read(
             "SELECT field, value FROM company_config WHERE field IN (%s, %s)",
             (f"{parameter}_high", f"{parameter}_low"),
@@ -1145,7 +1167,7 @@ def chart_predictions(
         thr_high = thresholds.get(f"{parameter}_high")
         thr_low  = thresholds.get(f"{parameter}_low")
 
-    now_offset = pts[-1][0] - t0  # seconds since first point
+    now_offset  = pts[-1][0] - t0
     current_val = slope * now_offset + intercept
 
     results = []
@@ -1156,24 +1178,23 @@ def chart_predictions(
             continue
         if abs(slope) < 1e-9:
             continue
-        # Time to reach threshold from current position
-        t_breach = (threshold - intercept) / slope
+        t_breach      = (threshold - intercept) / slope
         secs_from_now = t_breach - now_offset
-        if secs_from_now <= 0 or secs_from_now > 14400:  # must be 0–4 hours
+        if secs_from_now <= 0 or secs_from_now > 14400:
             continue
 
         hours_away = round(secs_from_now / 3600, 2)
         confidence = max(10, min(95, round(100 - hours_away * 15, 0)))
 
         results.append({
-            "parameter":    parameter,
-            "unit":         unit,
-            "current_value": round(current_val, 2),
-            "threshold":    threshold,
-            "direction":    direction,
+            "parameter":       parameter,
+            "unit":            unit,
+            "current_value":   round(current_val, 2),
+            "threshold":       threshold,
+            "direction":       direction,
             "hours_to_breach": hours_away,
-            "confidence_pct": int(confidence),
-            "slope_per_min": round(slope * 60, 4),
+            "confidence_pct":  int(confidence),
+            "slope_per_min":   round(slope * 60, 4),
         })
 
     return results

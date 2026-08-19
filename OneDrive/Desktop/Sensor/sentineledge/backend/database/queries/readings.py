@@ -17,14 +17,15 @@ def insert_reading(
     timestamp: str,
     is_valid: bool = True,
     extra_params: dict = None,
+    company_id: int = None,
 ) -> int:
     """Insert a sensor reading including any extra sensor params. Returns new row id, or -1 on failure."""
     ep = json.dumps(extra_params or {})
     try:
         cur = execute_write(
-            "INSERT INTO readings (temperature, timestamp, is_valid, extra_params) "
-            "VALUES (%s, %s, %s, %s) RETURNING id",
-            (temperature, timestamp, int(is_valid), ep),
+            "INSERT INTO readings (temperature, timestamp, is_valid, extra_params, company_id) "
+            "VALUES (%s, %s, %s, %s, %s) RETURNING id",
+            (temperature, timestamp, int(is_valid), ep, company_id),
         )
         return cur.lastrowid or -1
     except Exception as exc:

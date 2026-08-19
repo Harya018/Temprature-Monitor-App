@@ -24,8 +24,14 @@ bcrypt==4.2.1
 pyotp==2.9.0
 qrcode==7.4.2
 
+# ── Error tracking ───────────────────────────────────────────────────────────
+sentry-sdk[fastapi]==2.8.0
+
 # ── USB temperature sensor ────────────────────────────────────────────────────
 pyserial==3.5
+
+# ── Excel file sensor (pro-server / HMI live data via .xlsx) ─────────────────
+openpyxl==3.1.2
 
 # ── SMS via USB GSM modem (optional, only for SMS_METHOD=gammu) ───────────────
 # Windows: pip install python-gammu   Linux/macOS: pip install gammu

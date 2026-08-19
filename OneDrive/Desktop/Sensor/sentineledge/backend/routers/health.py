@@ -23,9 +23,11 @@ import time
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Request
+from typing import Optional
 
 import config
 from config import MODULE_STATUS
+from middleware.auth import require_admin
 from middleware.rate_limit import limiter
 import database
 
@@ -275,23 +277,53 @@ def _probe_sensor() -> str:
         return "unknown"
 
 
+def _resolve_token(request: Request) -> Optional[dict]:
+    """Return the admin session dict if a valid Bearer token is present, else None."""
+    auth = request.headers.get("Authorization", "")
+    if auth.startswith("Bearer "):
+        token = auth[7:].strip()
+        if token:
+            try:
+                return require_admin(authorization=auth)
+            except Exception:
+                pass
+    return None
+
+
 @router.get("/health")
 @limiter.limit("120/minute")
 async def health(request: Request):
-    """Health check — returns status, timestamp, uptime_seconds, and module probes."""
+    """
+    Health check endpoint.
+
+    Unauthenticated callers (uptime monitors) receive only platform-level
+    status — no sensor data, no alert counts, no module internals.
+
+    Authenticated admins receive the full module detail view.
+    """
+    session = _resolve_token(request)
+    overall = _overall_status()
+    now     = datetime.now(timezone.utc)
+
+    base = {
+        "status":         overall,
+        "timestamp":      now.isoformat(),
+        "uptime_seconds": int((now - _START_TIME).total_seconds()),
+    }
+
+    if session is None:
+        return base
+
     db_status     = _probe_database()
     email_status  = _probe_email()
     sms_status    = _probe_sms()
     ws_status     = _probe_websocket()
     sensor_status = _probe_sensor()
-
-    alerts_today = database.get_alerts_today_count()
+    alerts_today  = database.get_alerts_today_count()
 
     return {
-        "status":         _overall_status(),
-        "timestamp":      datetime.now(timezone.utc).isoformat(),
-        "uptime_seconds": int((datetime.now(timezone.utc) - _START_TIME).total_seconds()),
-        "alerts_today":   alerts_today,
+        **base,
+        "alerts_today": alerts_today,
         "modules": {
             "database":  {"status": db_status},
             "email":     {"status": email_status},

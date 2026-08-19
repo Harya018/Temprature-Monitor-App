@@ -54,7 +54,6 @@ export default function LoginPage() {
       sessionStorage.setItem('admin_token',    data.token)
       sessionStorage.setItem('admin_username', data.username)
       sessionStorage.setItem('authenticated',  'true')
-      sessionStorage.setItem('adminPassword',  pin.trim())
       sessionStorage.setItem('login_time',     new Date().toISOString())
       navigate('/dashboard', { replace: true })
     } catch (err) {

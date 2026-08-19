@@ -16,7 +16,7 @@ from fastapi import Header, HTTPException, status
 
 def require_admin(
     authorization: Optional[str] = Header(default=None),
-) -> bool:
+) -> dict:
     """
     FastAPI dependency — enforces admin auth on protected endpoints.
 
@@ -25,6 +25,7 @@ def require_admin(
 
     Session tokens are validated against the admin_sessions PostgreSQL table.
     Raises HTTP 401 if the token is missing, invalid, or the account is suspended.
+    Returns {"admin_id": int, "company_id": int|None} on success.
     """
     if authorization and authorization.startswith("Bearer "):
         token = authorization[7:].strip()
@@ -36,14 +37,19 @@ def require_admin(
                 if admin_id is not None:
                     from database.connection import execute_read
                     admin_rows = execute_read(
-                        "SELECT is_active FROM admins WHERE id = %s", (admin_id,)
+                        "SELECT is_active, company_id FROM admins WHERE id = %s", (admin_id,)
                     )
-                    if admin_rows and admin_rows[0].get("is_active") == 0:
-                        raise HTTPException(
-                            status_code=status.HTTP_401_UNAUTHORIZED,
-                            detail="Your account has been suspended. Contact your administrator.",
-                        )
-                return True
+                    if admin_rows:
+                        if admin_rows[0].get("is_active") == 0:
+                            raise HTTPException(
+                                status_code=status.HTTP_401_UNAUTHORIZED,
+                                detail="Your account has been suspended. Contact your administrator.",
+                            )
+                        return {
+                            "admin_id":   admin_id,
+                            "company_id": admin_rows[0].get("company_id"),
+                        }
+                return {"admin_id": None, "company_id": None}
 
     raise HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,

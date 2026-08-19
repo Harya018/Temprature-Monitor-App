@@ -49,6 +49,7 @@ function SubAdminLoginPage() {
   const navigate = useNavigate()
 
   useEffect(() => {
+    document.title = 'SentinelEdge — Sub Admin Login'
     if (sessionStorage.getItem('subAdminAuthenticated') === 'true') {
       navigate('/sub-admin/dashboard', { replace: true })
     }
@@ -401,6 +402,45 @@ export default function SubAdminApp() {
   const [alertCount, setAlertCount] = useState(0)
   const [health,     setHealth]     = useState(null)
   const [thresholds, setThresholds] = useState(null)
+
+  // ── Impersonation: super admin opens a new tab with ?imp_code=CODE ─────────
+  // The code is single-use and expires in 2 minutes; we redeem it immediately
+  // to get the actual session token, which is never exposed in the URL.
+  useEffect(() => {
+    const params  = new URLSearchParams(window.location.search)
+    const impCode = params.get('imp_code')
+    const impName = params.get('admin_name')
+    if (!impCode) return
+
+    // Strip params from URL first so they don't linger in history
+    const clean = new URL(window.location.href)
+    clean.searchParams.delete('imp_code')
+    clean.searchParams.delete('admin_name')
+    clean.searchParams.delete('company_id')
+    window.history.replaceState({}, '', clean.toString())
+
+    fetch('/api/super-admin/admin-control/redeem-impersonation', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ code: impCode }),
+    })
+      .then(r => r.ok ? r.json() : Promise.reject(r.status))
+      .then(data => {
+        sessionStorage.setItem('admin_token',           data.token)
+        sessionStorage.setItem('admin_username',        impName || 'admin')
+        sessionStorage.setItem('subAdminAuthenticated', 'true')
+        sessionStorage.setItem('authenticated',         'true')
+      })
+      .catch(() => {
+        // Code was invalid or already used — leave auth state empty so the
+        // normal login page renders instead of an authenticated shell.
+      })
+  }, [])
+
+  useEffect(() => {
+    document.title = 'SentinelEdge — Sub Admin'
+    return () => { document.title = 'SentinelEdge — Admin Dashboard' }
+  }, [])
   const { toasts, addToast, dismiss } = useToast()
   const alarm = useAudioAlarm()
   const { playAlarm } = alarm

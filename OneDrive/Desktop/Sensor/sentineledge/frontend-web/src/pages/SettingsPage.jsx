@@ -326,6 +326,14 @@ export default function SettingsPage() {
   const [existingParams, setExistingParams] = useState([])
   const [deletingId, setDeletingId] = useState(null)
 
+  const [psSettings, setPsSettings] = useState({
+    file_path: '', temp_col: 'Temperature', date_col: 'Date', time_col: 'Time',
+  })
+  const [psSaving,     setPsSaving]     = useState(false)
+  const [psTesting,    setPsTesting]    = useState(false)
+  const [psMsg,        setPsMsg]        = useState(null)
+  const [psTestResult, setPsTestResult] = useState(null)
+
   // Track whether user has touched the inputs so fetches don't overwrite
   const dirtyRef = useRef(false)
 
@@ -353,7 +361,22 @@ export default function SettingsPage() {
     } catch { /* silent */ }
   }, [])
 
-  useEffect(() => { loadThresholds(); loadHealth(); loadParams() }, [loadThresholds, loadHealth, loadParams])
+  const loadPsSettings = useCallback(async () => {
+    try {
+      const res = await fetch('/api/admin/proserver/settings', { headers: _bearerHeaders() })
+      if (res.ok) {
+        const d = await res.json()
+        setPsSettings({
+          file_path: d.file_path || '',
+          temp_col:  d.temp_col  || 'Temperature',
+          date_col:  d.date_col  || 'Date',
+          time_col:  d.time_col  || 'Time',
+        })
+      }
+    } catch { /* silent */ }
+  }, [])
+
+  useEffect(() => { loadThresholds(); loadHealth(); loadParams(); loadPsSettings() }, [loadThresholds, loadHealth, loadParams, loadPsSettings])
 
   const handleDeleteParam = async (param) => {
     if (!window.confirm(`Request deletion of "${param.name}"? Super Admin must approve before it's removed.`)) return
@@ -531,6 +554,57 @@ export default function SettingsPage() {
       setTestSmsMsg({ type: 'error', text: 'Failed: ' + err.message })
       addToast({ type: 'error', message: 'SMS test error: ' + err.message })
     } finally { setTestingSms(false) }
+  }
+
+  const handlePsSave = async () => {
+    setPsSaving(true); setPsMsg(null); setPsTestResult(null)
+    try {
+      const res = await fetch('/api/admin/proserver/settings', {
+        method: 'POST',
+        headers: _bearerHeaders(),
+        body: JSON.stringify({
+          file_path:     psSettings.file_path || '',
+          temp_col:      psSettings.temp_col  || 'Temperature',
+          date_col:      psSettings.date_col  || 'Date',
+          time_col:      psSettings.time_col  || 'Time',
+          timestamp_col: '',
+          poll_interval: 1.0,
+        }),
+      })
+      const data = await res.json()
+      if (res.ok) {
+        const msg = data.active
+          ? '✅ Saved — sensor is now reading the file.'
+          : '✅ Saved — file not yet found (check the path).'
+        setPsMsg({ type: data.active ? 'success' : 'info', text: msg })
+        addToast({ type: 'success', message: 'Pro-Server EX settings saved' })
+      } else {
+        setPsMsg({ type: 'error', text: data.detail || 'Save failed' })
+      }
+    } catch (err) {
+      setPsMsg({ type: 'error', text: err.message })
+    } finally { setPsSaving(false) }
+  }
+
+  const handlePsTest = async () => {
+    if (!psSettings.file_path?.trim()) { setPsMsg({ type: 'error', text: 'Enter a file path first.' }); return }
+    setPsTesting(true); setPsMsg(null); setPsTestResult(null)
+    try {
+      const res = await fetch('/api/admin/proserver/test', {
+        method: 'POST',
+        headers: _bearerHeaders(),
+        body: JSON.stringify({ file_path: psSettings.file_path }),
+      })
+      const data = await res.json()
+      if (data.status === 'ok') {
+        setPsTestResult(data)
+        setPsMsg({ type: 'success', text: data.message })
+      } else {
+        setPsMsg({ type: 'error', text: data.message })
+      }
+    } catch (err) {
+      setPsMsg({ type: 'error', text: err.message })
+    } finally { setPsTesting(false) }
   }
 
   const isOverride = threshData?.source === 'runtime_override'
@@ -926,7 +1000,110 @@ export default function SettingsPage() {
           <AddParameterForm onToast={addToast} onAdded={loadParams} />
         </Section>
 
-        {/* ── Section 7: Admin Info ───────────────────────────────────────── */}
+        {/* ── Section 7: Pro-Server EX Data Source ──────────────────────────── */}
+        <Section title="Pro-Server EX Data Source" icon={Server}>
+          <div className="space-y-4">
+            <p className="text-xs text-gray-500 leading-relaxed">
+              Point to the file Pro-face Pro-Server EX writes to. The server will
+              read the latest row in real time and push it to the dashboard.
+              Supports <strong>.csv</strong> and <strong>.xlsx</strong> files.
+            </p>
+
+            <div>
+              <label className="text-xs font-medium text-gray-600 mb-1 block">
+                File Path <span className="text-gray-400 font-normal">(full path to the file on the server)</span>
+              </label>
+              <input
+                type="text"
+                className="form-input font-mono text-xs"
+                placeholder="C:\ProServer\data\readings.csv"
+                value={psSettings.file_path}
+                onChange={e => setPsSettings(s => ({ ...s, file_path: e.target.value }))}
+              />
+            </div>
+
+            <div className="grid grid-cols-3 gap-3">
+              <div>
+                <label className="text-xs font-medium text-gray-600 mb-1 block">Temperature Column</label>
+                <input
+                  type="text"
+                  className="form-input text-xs"
+                  placeholder="Temperature"
+                  value={psSettings.temp_col}
+                  onChange={e => setPsSettings(s => ({ ...s, temp_col: e.target.value }))}
+                />
+              </div>
+              <div>
+                <label className="text-xs font-medium text-gray-600 mb-1 block">Date Column</label>
+                <input
+                  type="text"
+                  className="form-input text-xs"
+                  placeholder="Date"
+                  value={psSettings.date_col}
+                  onChange={e => setPsSettings(s => ({ ...s, date_col: e.target.value }))}
+                />
+              </div>
+              <div>
+                <label className="text-xs font-medium text-gray-600 mb-1 block">Time Column</label>
+                <input
+                  type="text"
+                  className="form-input text-xs"
+                  placeholder="Time"
+                  value={psSettings.time_col}
+                  onChange={e => setPsSettings(s => ({ ...s, time_col: e.target.value }))}
+                />
+              </div>
+            </div>
+
+            {psTestResult && (
+              <div className="text-xs bg-blue-50 rounded-lg p-3 space-y-2">
+                <div>
+                  <span className="font-semibold text-blue-700">Columns detected: </span>
+                  <span className="text-blue-600">{psTestResult.columns?.join(', ')}</span>
+                </div>
+                <div>
+                  <p className="font-semibold text-blue-700 mb-1">Latest values:</p>
+                  <div className="grid grid-cols-2 gap-x-4 gap-y-0.5">
+                    {Object.entries(psTestResult.latest_row || {}).map(([k, v]) => (
+                      <p key={k} className="text-blue-600">
+                        <span className="font-medium">{k}:</span> {v}
+                      </p>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            )}
+
+            <StatusMsg msg={psMsg} />
+
+            <div className="flex items-center gap-2">
+              <button
+                onClick={handlePsTest}
+                disabled={psTesting || !psSettings.file_path?.trim()}
+                className="btn btn-sm flex items-center gap-1.5"
+                style={{ background: '#2563EB', color: '#fff', border: 'none' }}
+              >
+                {psTesting
+                  ? <><RefreshCw size={13} className="animate-spin" /> Testing…</>
+                  : <><CheckCircle size={13} /> Test File</>
+                }
+              </button>
+              <button
+                onClick={handlePsSave}
+                disabled={psSaving}
+                className="btn btn-sm flex items-center gap-1.5"
+                style={{ background: '#7C3AED', color: '#fff', border: 'none' }}
+              >
+                {psSaving
+                  ? <><RefreshCw size={13} className="animate-spin" /> Saving…</>
+                  : 'Save Settings'
+                }
+              </button>
+            </div>
+          </div>
+        </Section>
+
+        {/* ── Section 8: Admin Info ───────────────────────────────────────── */}
         <Section title="Admin Info" icon={Info}>
           <div className="space-y-3">
             {[

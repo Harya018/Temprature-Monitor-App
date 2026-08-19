@@ -2,8 +2,9 @@
  * src/hooks/useAdmin.js
  *
  * Manages admin password state.
- * Password verified via POST /api/admin/verify-password
- * Stored in sessionStorage as 'adminPassword' for API calls.
+ * Password verified via POST /api/admin/verify-password.
+ * Only a boolean marker ('adminVerified') is persisted — the raw password
+ * is never stored in sessionStorage.
  */
 import { useState, useEffect, useCallback } from 'react'
 import { verifyAdminPassword } from '../services/api.js'
@@ -16,8 +17,8 @@ export default function useAdmin() {
 
   // Restore session on mount
   useEffect(() => {
-    const stored = sessionStorage.getItem('adminPassword')
-    if (stored) setIsAdmin(true)
+    const verified = sessionStorage.getItem('adminVerified')
+    if (verified === '1') setIsAdmin(true)
   }, [])
 
   const openAdminModal  = useCallback(() => { setError(''); setShowModal(true)  }, [])
@@ -29,7 +30,7 @@ export default function useAdmin() {
     try {
       const data = await verifyAdminPassword(password)
       if (data.valid) {
-        sessionStorage.setItem('adminPassword', password)
+        sessionStorage.setItem('adminVerified', '1')
         setIsAdmin(true)
         setShowModal(false)
       } else {
@@ -43,7 +44,7 @@ export default function useAdmin() {
   }, [])
 
   const logout = useCallback(() => {
-    sessionStorage.removeItem('adminPassword')
+    sessionStorage.removeItem('adminVerified')
     setIsAdmin(false)
   }, [])
 

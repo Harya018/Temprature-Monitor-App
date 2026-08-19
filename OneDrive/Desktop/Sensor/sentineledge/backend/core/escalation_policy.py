@@ -64,9 +64,9 @@ async def _check_and_notify_once() -> None:
             SELECT a.id, a.parameter, a.value, a.threshold,
                    a.direction, a.severity, a.timestamp, a.company_id
               FROM alerts a
-             WHERE a.company_id = %%s
+             WHERE a.company_id = %s
                AND a.acknowledged = 0
-               AND a.timestamp::timestamptz < NOW() - INTERVAL '%%s minutes'
+               AND a.timestamp::timestamptz < NOW() - (%s * INTERVAL '1 minute')
                AND a.timestamp::timestamptz > NOW() - INTERVAL '24 hours'
                AND NOT EXISTS (
                        SELECT 1 FROM policy_escalation_log pel

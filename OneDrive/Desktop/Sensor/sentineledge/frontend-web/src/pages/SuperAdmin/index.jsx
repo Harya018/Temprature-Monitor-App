@@ -14,6 +14,8 @@ import {
   Radio, Wrench, CheckCircle, RefreshCw, ClipboardList,
   Lock, Unlock, UserCheck, Copy, BarChart2, CreditCard,
   ShieldAlert, Download, BookOpen, ScrollText, Layers,
+  Thermometer, Bell, Clock, Wifi, Gauge, Droplets,
+  Server, Zap,
 } from 'lucide-react'
 import {
   LineChart, Line, BarChart, Bar, XAxis, YAxis,
@@ -44,7 +46,7 @@ async function api(method, path, body) {
     sessionStorage.removeItem('admin_token')
     sessionStorage.removeItem('admin_username')
     sessionStorage.removeItem('authenticated')
-    sessionStorage.removeItem('adminPassword')
+    sessionStorage.removeItem('adminVerified')
     sessionStorage.removeItem('login_time')
     window.location.replace('/super-admin/login')
     return
@@ -396,7 +398,261 @@ function CommandCenterTab() {
   )
 }
 
+// ─── Platform health helpers ──────────────────────────────────────────────────
+
+function _humanUptime(s) {
+  if (s == null) return '—'
+  const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600)
+  const m = Math.floor((s % 3600) / 60), sec = Math.floor(s % 60)
+  if (d > 0) return `${d}d ${h}h ${m}m`
+  if (h > 0) return `${h}h ${m}m ${sec}s`
+  if (m > 0) return `${m}m ${sec}s`
+  return `${sec}s`
+}
+
+// ─── Platform Health Strip (white cards, dark-blue accents) ──────────────────
+
+function SAHealthStrip({ activeSessions, readingsToday, alertsToday }) {
+  const [uptime, setUptime] = useState(null)
+
+  useEffect(() => {
+    const load = () =>
+      fetch('/api/health').then(r => r.ok ? r.json() : null)
+        .then(d => { if (d?.uptime_seconds != null) setUptime(d.uptime_seconds) })
+        .catch(() => {})
+    load()
+    const t = setInterval(load, 30000)
+    return () => clearInterval(t)
+  }, [])
+
+  const C = '#1E3A8A'          // dark navy text
+  const A = '#3B82F6'          // accent blue
+  const card = {
+    background: '#FFFFFF', border: '1px solid #BFDBFE', borderRadius: 14,
+    padding: '18px 20px', display: 'flex', flexDirection: 'column', gap: 10,
+    boxShadow: '0 1px 4px rgba(30,58,138,0.07)',
+  }
+  const iconBox = { width: 34, height: 34, borderRadius: 9, background: '#EFF6FF', display: 'flex', alignItems: 'center', justifyContent: 'center' }
+  const label   = { fontSize: 11, fontWeight: 700, color: C, textTransform: 'uppercase', letterSpacing: '0.06em' }
+  const bigNum  = { fontSize: 32, fontWeight: 800, lineHeight: 1 }
+  const sub     = { fontSize: 12, color: A }
+  const foot    = { fontSize: 11, color: '#93C5FD', borderTop: '1px solid #DBEAFE', paddingTop: 8, display: 'flex', alignItems: 'center', gap: 6 }
+  const dot     = (col) => ({ width: 7, height: 7, borderRadius: '50%', background: col, flexShrink: 0 })
+
+  const alertCol  = alertsToday > 0 ? '#F59E0B' : '#22C55E'
+
+  return (
+    <div style={{ marginBottom: 24 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 14 }}>
+        <span style={{ fontSize: 13, fontWeight: 700, color: C, letterSpacing: '0.04em' }}>PLATFORM HEALTH</span>
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3,1fr)', gap: 12 }}>
+
+        {/* Active Sessions */}
+        <div style={card}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <span style={label}>Active Sessions</span>
+            <div style={iconBox}><KeyRound size={16} color={A} /></div>
+          </div>
+          <span style={{ ...bigNum, color: C }}>{activeSessions ?? '—'}</span>
+          <span style={sub}>Admin sessions live</span>
+          <div style={foot}>
+            <span style={dot(A)} />
+            <span>{activeSessions > 0 ? `${activeSessions} admin${activeSessions !== 1 ? 's' : ''} online` : 'No active sessions'}</span>
+          </div>
+        </div>
+
+        {/* Readings Today */}
+        <div style={card}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <span style={label}>Readings Today</span>
+            <div style={iconBox}><Activity size={16} color="#8B5CF6" /></div>
+          </div>
+          <span style={{ ...bigNum, color: C }}>{readingsToday ?? '—'}</span>
+          <span style={sub}>Sensor readings logged</span>
+          <div style={foot}>
+            <span style={dot('#8B5CF6')} />
+            <span>Across all companies</span>
+          </div>
+        </div>
+
+        {/* Alerts Today */}
+        <div style={card}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <span style={label}>Alerts Today</span>
+            <div style={iconBox}><Bell size={16} color={alertCol} /></div>
+          </div>
+          <span style={{ ...bigNum, color: alertCol }}>{alertsToday ?? '—'}</span>
+          <span style={sub}>{alertsToday > 0 ? 'Breach events today' : 'All clear today'}</span>
+          <div style={foot}>
+            <span style={dot(alertCol)} />
+            <span>{alertsToday > 0 ? `${alertsToday} alert${alertsToday !== 1 ? 's' : ''} fired` : 'No alerts today'}</span>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  )
+}
+
 // ─── Overview tab ─────────────────────────────────────────────────────────────
+
+const SEV_COLOR = { critical: '#EF4444', warning: '#F59E0B', info: '#3B82F6' }
+
+// ─── Company Health Grid ──────────────────────────────────────────────────────
+
+function fmtAge(minutes) {
+  if (minutes === null || minutes === undefined) return 'never'
+  if (minutes < 1)   return 'just now'
+  if (minutes < 60)  return `${Math.round(minutes)}m ago`
+  if (minutes < 1440) return `${Math.round(minutes / 60)}h ago`
+  return `${Math.round(minutes / 1440)}d ago`
+}
+
+function CompanyHealthGrid({ onNavigate }) {
+  const [companies, setCompanies] = useState([])
+  const [loading,   setLoading]   = useState(true)
+  const [error,     setError]     = useState('')
+
+  const load = useCallback(async () => {
+    try { setCompanies(await get(`${SA}/companies/health`)) }
+    catch (e) { setError(e.message) }
+    finally { setLoading(false) }
+  }, [])
+
+  useEffect(() => {
+    load()
+    const t = setInterval(load, 30000)
+    return () => clearInterval(t)
+  }, [load])
+
+  if (loading) return <Spinner />
+  if (error)   return <Err msg={error} />
+
+  const red    = companies.filter(c => c.health === 'red').length
+  const yellow = companies.filter(c => c.health === 'yellow').length
+  const green  = companies.filter(c => c.health === 'green').length
+
+  const HEALTH = {
+    red:    { border: '#EF4444', bg: '#FEF2F2', dot: '#EF4444', label: 'Critical' },
+    yellow: { border: '#F59E0B', bg: '#FFFBEB', dot: '#F59E0B', label: 'Warning'  },
+    green:  { border: '#22C55E', bg: '#F0FDF4', dot: '#22C55E', label: 'Healthy'  },
+  }
+
+  return (
+    <div className="sa-card" style={{ marginBottom: 16 }}>
+      {/* Header with summary counts */}
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16, flexWrap: 'wrap', gap: 8 }}>
+        <h2 className="sa-card-title" style={{ margin: 0 }}>
+          Company Health Grid
+          <span style={{ fontSize: 12, fontWeight: 400, color: '#9CA3AF', marginLeft: 8 }}>auto-refreshes every 30s</span>
+        </h2>
+        <div style={{ display: 'flex', gap: 10 }}>
+          {[
+            { count: red,    color: '#EF4444', bg: '#FEF2F2', label: 'Critical' },
+            { count: yellow, color: '#F59E0B', bg: '#FFFBEB', label: 'Warning'  },
+            { count: green,  color: '#22C55E', bg: '#F0FDF4', label: 'Healthy'  },
+          ].map(({ count, color, bg, label }) => (
+            <div key={label} style={{ display: 'flex', alignItems: 'center', gap: 5, background: bg, borderRadius: 8, padding: '4px 10px', border: `1px solid ${color}30` }}>
+              <span style={{ width: 8, height: 8, borderRadius: '50%', background: color, display: 'inline-block' }} />
+              <span style={{ fontSize: 13, fontWeight: 700, color }}>{count}</span>
+              <span style={{ fontSize: 11, color: '#6B7280' }}>{label}</span>
+            </div>
+          ))}
+          <button className="sa-btn sm secondary" onClick={load}>↻ Refresh</button>
+        </div>
+      </div>
+
+      {companies.length === 0
+        ? <p style={{ color: '#9CA3AF', textAlign: 'center', padding: 24 }}>No companies yet.</p>
+        : (
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))', gap: 12 }}>
+            {companies.map(c => {
+              const h = HEALTH[c.health] || HEALTH.green
+              return (
+                <div
+                  key={c.id}
+                  onClick={() => onNavigate('companies')}
+                  style={{
+                    background: h.bg,
+                    border: `2px solid ${h.border}`,
+                    borderRadius: 12,
+                    padding: '12px 14px',
+                    cursor: 'pointer',
+                    transition: 'box-shadow 0.15s',
+                    position: 'relative',
+                    overflow: 'hidden',
+                  }}
+                  onMouseEnter={e => e.currentTarget.style.boxShadow = '0 4px 16px rgba(0,0,0,0.12)'}
+                  onMouseLeave={e => e.currentTarget.style.boxShadow = 'none'}
+                >
+                  {/* Colored left strip */}
+                  <div style={{ position: 'absolute', left: 0, top: 0, bottom: 0, width: 4, background: h.dot, borderRadius: '12px 0 0 12px' }} />
+                  <div style={{ paddingLeft: 8 }}>
+                    {/* Company name + status dot */}
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+                      <div style={{ width: 32, height: 32, borderRadius: 8, background: h.dot + '20', display: 'flex', alignItems: 'center', justifyContent: 'center', fontWeight: 800, fontSize: 14, color: h.dot, flexShrink: 0 }}>
+                        {(c.name || '?')[0].toUpperCase()}
+                      </div>
+                      <div style={{ flex: 1, minWidth: 0 }}>
+                        <div style={{ fontWeight: 700, fontSize: 13, color: '#111827', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{c.name}</div>
+                        <div style={{ fontSize: 11, color: '#9CA3AF', fontFamily: 'monospace' }}>{c.slug}</div>
+                      </div>
+                      <div style={{ width: 10, height: 10, borderRadius: '50%', background: h.dot, flexShrink: 0,
+                        boxShadow: c.health === 'red' ? `0 0 6px ${h.dot}` : 'none',
+                        animation: c.health === 'red' ? 'pulse 1.5s infinite' : 'none' }} />
+                    </div>
+
+                    {/* Warnings */}
+                    {c.flatline && (
+                      <div style={{ fontSize: 11, fontWeight: 700, color: '#DC2626', background: '#FEE2E2', borderRadius: 6, padding: '2px 8px', marginBottom: 6, display: 'inline-block' }}>
+                        ⚠ No data for {fmtAge(c.minutes_since_reading)}
+                      </div>
+                    )}
+                    {c.maintenance_mode && (
+                      <div style={{ fontSize: 11, fontWeight: 700, color: '#D97706', background: '#FEF3C7', borderRadius: 6, padding: '2px 8px', marginBottom: 6, display: 'inline-block' }}>
+                        🔧 Maintenance
+                      </div>
+                    )}
+                    {!c.is_active && !c.maintenance_mode && (
+                      <div style={{ fontSize: 11, fontWeight: 700, color: '#6B7280', background: '#F3F4F6', borderRadius: 6, padding: '2px 8px', marginBottom: 6, display: 'inline-block' }}>
+                        Inactive
+                      </div>
+                    )}
+
+                    {/* Stats row */}
+                    <div style={{ display: 'flex', gap: 12, marginTop: 4 }}>
+                      <div style={{ textAlign: 'center' }}>
+                        <div style={{ fontSize: 16, fontWeight: 800, color: c.unack_critical > 0 ? '#EF4444' : c.unack_total > 0 ? '#F59E0B' : '#9CA3AF' }}>{c.unack_total}</div>
+                        <div style={{ fontSize: 10, color: '#9CA3AF' }}>Unacked</div>
+                      </div>
+                      <div style={{ textAlign: 'center' }}>
+                        <div style={{ fontSize: 16, fontWeight: 800, color: '#374151' }}>{c.alerts_today}</div>
+                        <div style={{ fontSize: 10, color: '#9CA3AF' }}>Today</div>
+                      </div>
+                      <div style={{ textAlign: 'center' }}>
+                        <div style={{ fontSize: 16, fontWeight: 800, color: '#374151' }}>{c.subscriber_count}</div>
+                        <div style={{ fontSize: 10, color: '#9CA3AF' }}>Subs</div>
+                      </div>
+                      <div style={{ textAlign: 'center', flex: 1 }}>
+                        <div style={{ fontSize: 11, fontWeight: 600, color: '#6B7280', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                          {c.last_reading_at ? fmtAge(c.minutes_since_reading) : 'No data'}
+                        </div>
+                        <div style={{ fontSize: 10, color: '#9CA3AF' }}>Last reading</div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )
+            })}
+          </div>
+        )
+      }
+    </div>
+  )
+}
+
+// ─── Overview Tab ─────────────────────────────────────────────────────────────
 
 function OverviewTab({ onNavigate }) {
   const [data,    setData]    = useState(null)
@@ -416,18 +672,42 @@ function OverviewTab({ onNavigate }) {
   if (error)   return <Err msg={error} />
   if (!data)   return null
 
-  const stats = [
-    { label: 'Total Companies',    value: data.total_companies,  cls: 'blue'  },
-    { label: 'Active Admins',      value: data.active_admins,    cls: 'green' },
-    { label: 'Total Subscribers',  value: data.total_subscribers,cls: 'blue'  },
-    { label: 'Alerts Today',       value: data.alerts_today,     cls: data.alerts_today > 0 ? 'amber' : '' },
-    { label: 'Alerts This Week',   value: data.alerts_week,      cls: data.alerts_week > 0 ? 'red'   : '' },
+  const statsRow1 = [
+    { label: 'Total Companies',   value: data.total_companies,   cls: 'blue'  },
+    { label: 'Active Admins',     value: data.active_admins,     cls: 'green' },
+    { label: 'Total Subscribers', value: data.total_subscribers, cls: 'blue'  },
+    { label: 'Alerts Today',      value: data.alerts_today,      cls: data.alerts_today > 0 ? 'amber' : '' },
+    { label: 'Alerts This Week',  value: data.alerts_week,       cls: data.alerts_week > 0 ? 'red'   : '' },
   ]
+
+  const companies = data.companies || []
+  const activeCount      = companies.filter(c => !c.maintenance_mode && c.is_active).length
+  const maintenanceCount = companies.filter(c => c.maintenance_mode).length
+  const inactiveCount    = companies.filter(c => !c.maintenance_mode && !c.is_active).length
+  const pieData = [
+    { name: 'Active',      value: activeCount,      fill: '#22C55E' },
+    { name: 'Maintenance', value: maintenanceCount, fill: '#F59E0B' },
+    { name: 'Inactive',    value: inactiveCount,    fill: '#EF4444' },
+  ].filter(d => d.value > 0)
 
   return (
     <>
+      {/* Company Health Grid — CAPTAIN'S RADAR */}
+      <CompanyHealthGrid onNavigate={onNavigate} />
+
+      {/* Subscriber coverage warnings */}
+      <SubscriberCoverageWidget />
+
+      {/* Platform Health strip */}
+      <SAHealthStrip
+        activeSessions={data.active_sessions ?? 0}
+        readingsToday={data.readings_today ?? 0}
+        alertsToday={data.alerts_today ?? 0}
+      />
+
+      {/* Stat grids */}
       <div className="sa-stat-grid">
-        {stats.map(s => (
+        {statsRow1.map(s => (
           <div className="sa-stat" key={s.label}>
             <div className="sa-stat-label">{s.label}</div>
             <div className={`sa-stat-value ${s.cls}`}>{s.value ?? '—'}</div>
@@ -435,36 +715,340 @@ function OverviewTab({ onNavigate }) {
         ))}
       </div>
 
-      <div className="sa-card">
-        <h2 className="sa-card-title">Company Summary</h2>
-        <div className="sa-table-wrap">
-          <table className="sa-table">
-            <thead><tr>
-              <th>Name</th><th>Subscribers</th><th>Alerts Today</th><th>Status</th>
-            </tr></thead>
-            <tbody>
-              {(data.companies || []).length === 0
-                ? <tr><td colSpan={4} className="sa-empty">No companies yet.</td></tr>
-                : (data.companies || []).map(c => (
-                    <tr key={c.id} style={{ cursor: 'pointer' }} onClick={() => onNavigate('companies')}>
-                      <td><strong>{c.name}</strong></td>
-                      <td>{c.subscriber_count}</td>
-                      <td>{c.alerts_today}</td>
-                      <td>{
-                    c.maintenance_mode
-                      ? <Badge label="Maintenance" type="warning" />
-                      : c.is_active
-                        ? <Badge label="Active" type="active" />
-                        : <Badge label="Inactive" type="inactive" />
-                  }</td>
-                    </tr>
-                  ))
-              }
-            </tbody>
-          </table>
+      {/* Company Status Pie Chart */}
+      {pieData.length > 0 && (
+        <div className="sa-card">
+          <h2 className="sa-card-title">Company Status Distribution</h2>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 32 }}>
+            <div style={{ width: 220, height: 220 }}>
+              <ResponsiveContainer width="100%" height="100%">
+                <PieChart>
+                  <Pie
+                    data={pieData}
+                    cx="50%" cy="50%"
+                    innerRadius={60} outerRadius={95}
+                    paddingAngle={pieData.length > 1 ? 4 : 0}
+                    dataKey="value"
+                    label={({ name, value }) => `${name} (${value})`}
+                    labelLine={false}
+                  >
+                    {pieData.map((d, i) => <Cell key={i} fill={d.fill} />)}
+                  </Pie>
+                  <Tooltip formatter={(v, name) => [v, name]} />
+                </PieChart>
+              </ResponsiveContainer>
+            </div>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+              {[
+                { label: 'Active',      count: activeCount,      color: '#22C55E', bg: '#F0FDF4' },
+                { label: 'Maintenance', count: maintenanceCount, color: '#F59E0B', bg: '#FFFBEB' },
+                { label: 'Inactive',    count: inactiveCount,    color: '#EF4444', bg: '#FEF2F2' },
+              ].map(({ label, count, color, bg }) => (
+                <div key={label} style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                  <div style={{ width: 36, height: 36, borderRadius: 8, background: bg, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                    <span style={{ width: 12, height: 12, borderRadius: '50%', background: color, display: 'inline-block' }} />
+                  </div>
+                  <div>
+                    <div style={{ fontSize: 13, fontWeight: 700, color: '#1F2937' }}>{label}</div>
+                    <div style={{ fontSize: 12, color: '#6B7280' }}>{count} {count === 1 ? 'company' : 'companies'}</div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
         </div>
-      </div>
+      )}
     </>
+  )
+}
+
+// ─── CSV Download helper ───────────────────────────────────────────────────────
+
+function downloadCSV(endpoint, filename) {
+  const token = sessionStorage.getItem('admin_token') || ''
+  fetch(endpoint, { headers: { Authorization: `Bearer ${token}` } })
+    .then(res => {
+      if (!res.ok) throw new Error(`Export failed: ${res.status}`)
+      return res.blob()
+    })
+    .then(blob => {
+      const url = URL.createObjectURL(blob)
+      const a   = document.createElement('a')
+      a.href     = url
+      a.download = filename
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+      URL.revokeObjectURL(url)
+    })
+    .catch(err => alert(err.message))
+}
+
+// ─── Subscriber Coverage Widget ────────────────────────────────────────────────
+
+function SubscriberCoverageWidget() {
+  const [rows,    setRows]    = useState([])
+  const [loading, setLoading] = useState(true)
+
+  useEffect(() => {
+    get(`${SA}/subscriber-coverage`)
+      .then(setRows)
+      .catch(() => {})
+      .finally(() => setLoading(false))
+  }, [])
+
+  if (loading) return null
+  if (!rows.length) return null
+
+  const critical = rows.filter(r => r.risk_level === 'critical')
+  const warning  = rows.filter(r => r.risk_level === 'warning')
+
+  return (
+    <div className="sa-card" style={{ border: '1px solid #FCA5A5', background: '#FFF5F5' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
+        <h2 className="sa-card-title" style={{ margin: 0, color: '#B91C1C' }}>
+          ⚠ Subscriber Coverage Gaps ({rows.length})
+        </h2>
+        <span style={{ fontSize: 12, color: '#6B7280' }}>Alerts reach nobody if subscribers = 0</span>
+      </div>
+
+      {critical.length > 0 && (
+        <div style={{ marginBottom: 12 }}>
+          <div style={{ fontSize: 12, fontWeight: 700, color: '#DC2626', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+            Critical — No Subscribers ({critical.length})
+          </div>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+            {critical.map(r => (
+              <div key={r.id} style={{ background: '#FEE2E2', border: '1px solid #FCA5A5', borderRadius: 8, padding: '6px 12px', fontSize: 13 }}>
+                <span style={{ fontWeight: 700, color: '#B91C1C' }}>{r.name}</span>
+                <span style={{ color: '#DC2626', marginLeft: 6 }}>{r.risk_label}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {warning.length > 0 && (
+        <div>
+          <div style={{ fontSize: 12, fontWeight: 700, color: '#B45309', marginBottom: 6, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
+            Warning — Single Subscriber ({warning.length})
+          </div>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+            {warning.map(r => (
+              <div key={r.id} style={{ background: '#FEF3C7', border: '1px solid #FCD34D', borderRadius: 8, padding: '6px 12px', fontSize: 13 }}>
+                <span style={{ fontWeight: 700, color: '#92400E' }}>{r.name}</span>
+                <span style={{ color: '#B45309', marginLeft: 6 }}>{r.risk_label}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+// ─── New Company Wizard ────────────────────────────────────────────────────────
+
+const WIZARD_STEPS = ['Company Details', 'First Admin', 'Add Subscriber', 'Review & Enable']
+
+function NewCompanyWizard({ onClose, onComplete }) {
+  const [step,      setStep]      = useState(0)
+  const [loading,   setLoading]   = useState(false)
+  const [error,     setError]     = useState('')
+  const [companyId, setCompanyId] = useState(null)
+  const [adminId,   setAdminId]   = useState(null)
+
+  // Step 0 — company
+  const [cName,     setCName]     = useState('')
+  const [cSlug,     setCSlug]     = useState('')
+  const [cDesc,     setCDesc]     = useState('')
+  const [cTier,     setCTier]     = useState('basic')
+
+  // Step 1 — admin
+  const [aName,     setAName]     = useState('')
+  const [aEmail,    setAEmail]    = useState('')
+  const [aPass,     setAPass]     = useState('')
+
+  // Step 2 — subscriber
+  const [sPhone,    setSPhone]    = useState('')
+  const [sEmail,    setSEmail]    = useState('')
+  const [sName,     setSName]     = useState('')
+  const [skipSub,   setSkipSub]   = useState(false)
+
+  const autoSlug = (name) => name.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '')
+
+  const handleNameChange = (v) => {
+    setCName(v)
+    if (!cSlug || cSlug === autoSlug(cName)) setCSlug(autoSlug(v))
+  }
+
+  const go = async () => {
+    setError(''); setLoading(true)
+    try {
+      if (step === 0) {
+        const res = await post(`${SA}/wizard/company`, { name: cName, slug: cSlug, description: cDesc, tier: cTier })
+        setCompanyId(res.id)
+        setStep(1)
+      } else if (step === 1) {
+        const res = await post(`${SA}/wizard/admin`, { company_id: companyId, name: aName, email: aEmail, password: aPass })
+        setAdminId(res.id)
+        setStep(2)
+      } else if (step === 2) {
+        if (!skipSub) {
+          await post(`${SA}/wizard/subscriber`, { company_id: companyId, phone: sPhone || null, email: sEmail || null, name: sName || null })
+        }
+        setStep(3)
+      } else if (step === 3) {
+        await post(`${SA}/wizard/enable/${companyId}`, {})
+        onComplete?.()
+        onClose()
+      }
+    } catch (e) {
+      setError(e.message || 'Request failed')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const canAdvance = () => {
+    if (step === 0) return cName.trim().length >= 2 && cSlug.trim().length >= 2
+    if (step === 1) return aName.trim() && aEmail.trim() && aPass.trim().length >= 6
+    if (step === 2) return skipSub || sPhone.trim() || sEmail.trim()
+    return true
+  }
+
+  const iLabel = ['Create Company', 'Create Admin', skipSub ? 'Skip & Continue' : 'Add Subscriber', 'Enable & Finish']
+
+  return (
+    <Modal
+      title="New Company Wizard"
+      onClose={onClose}
+      footer={
+        <div style={{ display: 'flex', justifyContent: 'space-between', width: '100%' }}>
+          <button className="sa-btn secondary" onClick={onClose}>Cancel</button>
+          <button className="sa-btn primary" onClick={go} disabled={loading || !canAdvance()}>
+            {loading ? 'Working…' : iLabel[step]}
+          </button>
+        </div>
+      }
+    >
+      {/* Progress bar */}
+      <div style={{ display: 'flex', gap: 4, marginBottom: 24 }}>
+        {WIZARD_STEPS.map((label, i) => (
+          <div key={i} style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 4 }}>
+            <div style={{ width: '100%', height: 4, borderRadius: 2, background: i <= step ? '#1D4ED8' : '#E5E7EB', transition: 'background 0.3s' }} />
+            <span style={{ fontSize: 10, color: i === step ? '#1D4ED8' : '#9CA3AF', fontWeight: i === step ? 700 : 400 }}>
+              {i + 1}. {label}
+            </span>
+          </div>
+        ))}
+      </div>
+
+      {error && <Err msg={error} />}
+
+      {/* Step 0 — Company Details */}
+      {step === 0 && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+          <div>
+            <label className="sa-label">Company Name *</label>
+            <input className="sa-input" value={cName} onChange={e => handleNameChange(e.target.value)} placeholder="Acme Corp" />
+          </div>
+          <div>
+            <label className="sa-label">Slug (URL-safe ID) *</label>
+            <input className="sa-input" value={cSlug} onChange={e => setCSlug(autoSlug(e.target.value))} placeholder="acme-corp" style={{ fontFamily: 'monospace' }} />
+          </div>
+          <div>
+            <label className="sa-label">Description</label>
+            <input className="sa-input" value={cDesc} onChange={e => setCDesc(e.target.value)} placeholder="Optional description" />
+          </div>
+          <div>
+            <label className="sa-label">Tier</label>
+            <select className="sa-input" value={cTier} onChange={e => setCTier(e.target.value)}>
+              <option value="basic">Basic</option>
+              <option value="pro">Pro</option>
+              <option value="enterprise">Enterprise</option>
+            </select>
+          </div>
+          <p style={{ fontSize: 12, color: '#6B7280', margin: 0, background: '#F9FAFB', borderRadius: 6, padding: '8px 10px' }}>
+            The company will be created as <strong>disabled</strong> until the wizard completes. No alerts will fire until you enable it on step 4.
+          </p>
+        </div>
+      )}
+
+      {/* Step 1 — Admin */}
+      {step === 1 && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+          <div style={{ background: '#EFF6FF', borderRadius: 8, padding: '8px 12px', fontSize: 13, color: '#1D4ED8', marginBottom: 4 }}>
+            Creating first admin for <strong>{cName}</strong>
+          </div>
+          <div>
+            <label className="sa-label">Admin Name *</label>
+            <input className="sa-input" value={aName} onChange={e => setAName(e.target.value)} placeholder="John Smith" />
+          </div>
+          <div>
+            <label className="sa-label">Email (login) *</label>
+            <input className="sa-input" type="email" value={aEmail} onChange={e => setAEmail(e.target.value)} placeholder="john@acmecorp.com" />
+          </div>
+          <div>
+            <label className="sa-label">Password * (min 6 chars)</label>
+            <input className="sa-input" type="password" value={aPass} onChange={e => setAPass(e.target.value)} placeholder="••••••••" />
+          </div>
+        </div>
+      )}
+
+      {/* Step 2 — Subscriber */}
+      {step === 2 && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+          <div style={{ background: '#FFF7ED', borderRadius: 8, padding: '8px 12px', fontSize: 13, color: '#92400E', marginBottom: 4 }}>
+            Subscribers receive alerts (SMS/email). A company with 0 subscribers won't notify anyone.
+          </div>
+          <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: 13, color: '#374151' }}>
+            <input type="checkbox" checked={skipSub} onChange={e => setSkipSub(e.target.checked)} />
+            Skip for now (add subscribers later in admin dashboard)
+          </label>
+          {!skipSub && (
+            <>
+              <div>
+                <label className="sa-label">Subscriber Name</label>
+                <input className="sa-input" value={sName} onChange={e => setSName(e.target.value)} placeholder="Jane Doe" />
+              </div>
+              <div>
+                <label className="sa-label">Phone (for SMS)</label>
+                <input className="sa-input" value={sPhone} onChange={e => setSPhone(e.target.value)} placeholder="+1234567890" />
+              </div>
+              <div>
+                <label className="sa-label">Email</label>
+                <input className="sa-input" type="email" value={sEmail} onChange={e => setSEmail(e.target.value)} placeholder="jane@acmecorp.com" />
+              </div>
+            </>
+          )}
+        </div>
+      )}
+
+      {/* Step 3 — Review & Enable */}
+      {step === 3 && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+          <div style={{ background: '#F0FDF4', border: '1px solid #86EFAC', borderRadius: 10, padding: 16 }}>
+            <div style={{ fontWeight: 700, color: '#15803D', marginBottom: 12, fontSize: 14 }}>✓ Setup Complete — Ready to enable</div>
+            {[
+              ['Company',    cName, '#1D4ED8'],
+              ['Slug',       cSlug, '#6B7280'],
+              ['Tier',       cTier, '#374151'],
+              ['Admin',      `${aName} (${aEmail})`, '#374151'],
+              ['Subscriber', skipSub ? 'None (skipped)' : (sName || sPhone || sEmail || '—'), '#374151'],
+            ].map(([label, val, color]) => (
+              <div key={label} style={{ display: 'flex', justifyContent: 'space-between', padding: '6px 0', borderBottom: '1px solid #BBF7D0', fontSize: 13 }}>
+                <span style={{ color: '#6B7280', fontWeight: 600 }}>{label}</span>
+                <span style={{ color, fontWeight: 600 }}>{val}</span>
+              </div>
+            ))}
+          </div>
+          <p style={{ fontSize: 13, color: '#374151', margin: 0 }}>
+            Clicking <strong>Enable & Finish</strong> will activate the company. Sensors can start sending data and admins can log in immediately.
+          </p>
+        </div>
+      )}
+    </Modal>
   )
 }
 
@@ -544,18 +1128,311 @@ function CompanyFormModal({ company, onClose, onSaved }) {
   )
 }
 
+// ─── Company Detail View ──────────────────────────────────────────────────────
+
+function CompanyDetailView({ companyId, onBack }) {
+  const [data,    setData]    = useState(null)
+  const [loading, setLoading] = useState(true)
+  const [error,   setError]   = useState('')
+  const [tab,     setTab]     = useState('profile')
+
+  const load = useCallback(async () => {
+    setLoading(true); setError('')
+    try { setData(await get(`${SA}/companies/${companyId}/detail`)) }
+    catch (e) { setError(e.message) }
+    finally { setLoading(false) }
+  }, [companyId])
+
+  useEffect(() => { load() }, [load])
+
+  if (loading) return <><button className="sa-back-btn" onClick={onBack}>← Back</button><Spinner /></>
+  if (error)   return <><button className="sa-back-btn" onClick={onBack}>← Back</button><Err msg={error} /></>
+
+  const { company: c, admins, subscribers, parameters, alert_stats, reading_stats, sessions, recent_alerts } = data
+
+  const field = (label, value) => (
+    <div key={label} style={{ padding: '10px 0', borderBottom: '1px solid #F3F4F6' }}>
+      <div style={{ fontSize: 11, fontWeight: 600, color: '#9CA3AF', textTransform: 'uppercase', letterSpacing: '0.05em', marginBottom: 3 }}>{label}</div>
+      <div style={{ fontSize: 14, color: '#111827', fontWeight: 500, wordBreak: 'break-all' }}>{value ?? '—'}</div>
+    </div>
+  )
+
+  const SEV = { critical: '#EF4444', warning: '#F59E0B', info: '#3B82F6' }
+
+  return (
+    <>
+      <button className="sa-back-btn" onClick={onBack}>← Back to Companies</button>
+
+      {/* Hero header */}
+      <div className="sa-card" style={{ marginBottom: 16 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 16, marginBottom: 20 }}>
+          <div style={{ width: 52, height: 52, borderRadius: 14, background: '#EFF6FF', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 22, fontWeight: 800, color: '#1D4ED8' }}>
+            {(c.name || '?')[0].toUpperCase()}
+          </div>
+          <div style={{ flex: 1 }}>
+            <h2 style={{ margin: 0, fontSize: 20, fontWeight: 700, color: '#111827' }}>{c.name}</h2>
+            <div style={{ display: 'flex', gap: 8, marginTop: 6, flexWrap: 'wrap', alignItems: 'center' }}>
+              <code style={{ fontSize: 12, background: '#F3F4F6', padding: '2px 8px', borderRadius: 6, color: '#6B7280' }}>{c.slug}</code>
+              {c.maintenance_mode
+                ? <Badge label="Maintenance" type="warning" />
+                : c.is_active ? <Badge label="Active" type="active" /> : <Badge label="Inactive" type="inactive" />
+              }
+              <span style={{ fontSize: 12, color: '#9CA3AF' }}>Tier: <strong style={{ color: '#374151' }}>{c.tier_name}</strong></span>
+              <span style={{ fontSize: 12, color: '#9CA3AF' }}>ID: <strong style={{ color: '#374151' }}>#{c.id}</strong></span>
+            </div>
+          </div>
+          {/* Quick stats strip */}
+          <div style={{ display: 'flex', gap: 20 }}>
+            {[
+              { label: 'Admins',      val: admins.length,      col: '#3B82F6' },
+              { label: 'Subscribers', val: subscribers.length, col: '#8B5CF6' },
+              { label: 'Parameters',  val: parameters.length,  col: '#10B981' },
+              { label: 'Alerts Today',val: alert_stats.alerts_today ?? 0, col: alert_stats.alerts_today > 0 ? '#F59E0B' : '#22C55E' },
+            ].map(({ label, val, col }) => (
+              <div key={label} style={{ textAlign: 'center' }}>
+                <div style={{ fontSize: 22, fontWeight: 800, color: col }}>{val}</div>
+                <div style={{ fontSize: 11, color: '#9CA3AF', marginTop: 2 }}>{label}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+
+        {/* Tabs */}
+        <div className="sa-tabs">
+          {[
+            { id: 'profile',     label: 'Profile'     },
+            { id: 'admins',      label: `Admins (${admins.length})`           },
+            { id: 'subscribers', label: `Subscribers (${subscribers.length})` },
+            { id: 'parameters',  label: `Parameters (${parameters.length})`   },
+            { id: 'stats',       label: 'Stats & Alerts' },
+            { id: 'sessions',    label: `Sessions (${sessions.length})`       },
+          ].map(t => (
+            <button key={t.id} className={`sa-tab ${tab === t.id ? 'active' : ''}`} onClick={() => setTab(t.id)}>
+              {t.label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* ── Profile tab ── */}
+      {tab === 'profile' && (
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+          <div className="sa-card">
+            <h3 style={{ margin: '0 0 12px', fontSize: 14, fontWeight: 700, color: '#374151' }}>Identity</h3>
+            {field('Company ID', `#${c.id}`)}
+            {field('Name', c.name)}
+            {field('Slug / URL key', c.slug)}
+            {field('Domain', `${c.slug}.sentineledge.app`)}
+            {field('Description', c.description || 'No description set')}
+            {field('Created At', c.created_at ? new Date(c.created_at).toLocaleString() : '—')}
+            {field('Subscription Tier', c.tier_name)}
+          </div>
+          <div className="sa-card">
+            <h3 style={{ margin: '0 0 12px', fontSize: 14, fontWeight: 700, color: '#374151' }}>Configuration</h3>
+            {field('Status', c.maintenance_mode ? 'Maintenance' : c.is_active ? 'Active' : 'Inactive')}
+            {field('Maintenance Reason', c.maintenance_reason || 'N/A')}
+            {field('Max Subscribers', c.max_subscribers)}
+            {field('Max Devices', c.max_devices)}
+            {field('Allowed Channels', c.allowed_channels)}
+            {field('SMS Used (this month)', c.sms_used)}
+            {field('Email Used (this month)', c.email_used)}
+            {field('Push Used (this month)', c.push_used)}
+          </div>
+        </div>
+      )}
+
+      {/* ── Admins tab ── */}
+      {tab === 'admins' && (
+        <div className="sa-card">
+          <h3 style={{ margin: '0 0 12px', fontSize: 14, fontWeight: 700, color: '#374151' }}>Admins ({admins.length})</h3>
+          <div className="sa-table-wrap">
+            <table className="sa-table">
+              <thead><tr><th>ID</th><th>Name</th><th>Email</th><th>Role</th><th>Status</th><th>Last Login</th><th>Last IP</th><th>Created</th></tr></thead>
+              <tbody>
+                {admins.length === 0
+                  ? <tr><td colSpan={8} className="sa-empty">No admins assigned.</td></tr>
+                  : admins.map(a => (
+                    <tr key={a.id}>
+                      <td style={{ color: '#9CA3AF', fontSize: 12 }}>#{a.id}</td>
+                      <td><strong>{a.name}</strong></td>
+                      <td style={{ fontSize: 12 }}>{a.email || '—'}</td>
+                      <td><Badge label={a.role} type={a.role} /></td>
+                      <td>{a.is_active ? <Badge label="Active" type="active" /> : <Badge label="Inactive" type="inactive" />}</td>
+                      <td style={{ fontSize: 12, color: '#6B7280' }}>{a.last_login_at ? new Date(a.last_login_at).toLocaleString() : 'Never'}</td>
+                      <td style={{ fontSize: 12, color: '#6B7280', fontFamily: 'monospace' }}>{a.last_login_ip || '—'}</td>
+                      <td style={{ fontSize: 12, color: '#6B7280' }}>{a.created_at ? new Date(a.created_at).toLocaleDateString() : '—'}</td>
+                    </tr>
+                  ))
+                }
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {/* ── Subscribers tab ── */}
+      {tab === 'subscribers' && (
+        <div className="sa-card">
+          <h3 style={{ margin: '0 0 12px', fontSize: 14, fontWeight: 700, color: '#374151' }}>Subscribers ({subscribers.length})</h3>
+          <div className="sa-table-wrap">
+            <table className="sa-table">
+              <thead><tr><th>ID</th><th>Name</th><th>Phone</th><th>Email</th><th>Escalation Order</th><th>Status</th><th>Joined</th></tr></thead>
+              <tbody>
+                {subscribers.length === 0
+                  ? <tr><td colSpan={7} className="sa-empty">No subscribers.</td></tr>
+                  : subscribers.map(s => (
+                    <tr key={s.id}>
+                      <td style={{ color: '#9CA3AF', fontSize: 12 }}>#{s.id}</td>
+                      <td><strong>{s.name}</strong></td>
+                      <td style={{ fontSize: 12 }}>{s.phone || '—'}</td>
+                      <td style={{ fontSize: 12 }}>{s.email || '—'}</td>
+                      <td style={{ textAlign: 'center' }}>{s.escalation_order}</td>
+                      <td>{s.is_active ? <Badge label="Active" type="active" /> : <Badge label="Inactive" type="inactive" />}</td>
+                      <td style={{ fontSize: 12, color: '#6B7280' }}>{s.created_at ? new Date(s.created_at).toLocaleDateString() : '—'}</td>
+                    </tr>
+                  ))
+                }
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {/* ── Parameters tab ── */}
+      {tab === 'parameters' && (
+        <div className="sa-card">
+          <h3 style={{ margin: '0 0 12px', fontSize: 14, fontWeight: 700, color: '#374151' }}>Custom Parameters ({parameters.length})</h3>
+          <div className="sa-table-wrap">
+            <table className="sa-table">
+              <thead><tr><th>ID</th><th>Name</th><th>Unit</th><th>Min</th><th>Max</th><th>Status</th><th>Created</th></tr></thead>
+              <tbody>
+                {parameters.length === 0
+                  ? <tr><td colSpan={7} className="sa-empty">No custom parameters. Only built-in Temperature.</td></tr>
+                  : parameters.map(p => (
+                    <tr key={p.id}>
+                      <td style={{ color: '#9CA3AF', fontSize: 12 }}>#{p.id}</td>
+                      <td><strong>{p.name}</strong></td>
+                      <td>{p.unit || '—'}</td>
+                      <td>{p.min_value ?? '—'}</td>
+                      <td>{p.max_value ?? '—'}</td>
+                      <td>{p.is_active ? <Badge label="Active" type="active" /> : <Badge label="Inactive" type="inactive" />}</td>
+                      <td style={{ fontSize: 12, color: '#6B7280' }}>{p.created_at ? new Date(p.created_at).toLocaleDateString() : '—'}</td>
+                    </tr>
+                  ))
+                }
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {/* ── Stats & Alerts tab ── */}
+      {tab === 'stats' && (
+        <>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3,1fr)', gap: 12, marginBottom: 16 }}>
+            {[
+              { label: 'Total Alerts',    val: alert_stats.total_alerts   ?? 0, col: '#374151' },
+              { label: 'Alerts Today',    val: alert_stats.alerts_today   ?? 0, col: alert_stats.alerts_today   > 0 ? '#F59E0B' : '#22C55E' },
+              { label: 'Alerts This Week',val: alert_stats.alerts_week    ?? 0, col: alert_stats.alerts_week    > 0 ? '#F59E0B' : '#22C55E' },
+              { label: 'Critical Alerts', val: alert_stats.critical       ?? 0, col: alert_stats.critical       > 0 ? '#EF4444' : '#22C55E' },
+              { label: 'Warning Alerts',  val: alert_stats.warning        ?? 0, col: alert_stats.warning        > 0 ? '#F59E0B' : '#22C55E' },
+              { label: 'Acknowledged',    val: alert_stats.acknowledged   ?? 0, col: '#3B82F6' },
+              { label: 'Total Readings',  val: reading_stats.total_readings ?? 0, col: '#374151' },
+              { label: 'Readings Today',  val: reading_stats.readings_today ?? 0, col: '#3B82F6' },
+              { label: 'Last Reading',    val: reading_stats.last_reading_at ? new Date(reading_stats.last_reading_at).toLocaleString() : 'Never', col: '#374151' },
+              { label: 'Min Temperature', val: reading_stats.min_temp != null ? `${reading_stats.min_temp}°C` : '—', col: '#3B82F6' },
+              { label: 'Max Temperature', val: reading_stats.max_temp != null ? `${reading_stats.max_temp}°C` : '—', col: '#EF4444' },
+              { label: 'Avg Temperature', val: reading_stats.avg_temp != null ? `${reading_stats.avg_temp}°C` : '—', col: '#374151' },
+            ].map(({ label, val, col }) => (
+              <div key={label} className="sa-stat">
+                <div className="sa-stat-label">{label}</div>
+                <div className="sa-stat-value" style={{ color: col }}>{val}</div>
+              </div>
+            ))}
+          </div>
+
+          <div className="sa-card">
+            <h3 style={{ margin: '0 0 12px', fontSize: 14, fontWeight: 700, color: '#374151' }}>Recent Alerts (last 10)</h3>
+            <div className="sa-table-wrap">
+              <table className="sa-table">
+                <thead><tr><th>ID</th><th>Parameter</th><th>Value</th><th>Threshold</th><th>Direction</th><th>Severity</th><th>Time</th><th>Ack</th></tr></thead>
+                <tbody>
+                  {recent_alerts.length === 0
+                    ? <tr><td colSpan={8} className="sa-empty">No alerts.</td></tr>
+                    : recent_alerts.map(a => (
+                      <tr key={a.id}>
+                        <td style={{ color: '#9CA3AF', fontSize: 12 }}>#{a.id}</td>
+                        <td><strong>{a.parameter}</strong></td>
+                        <td>{a.value != null ? Number(a.value).toFixed(2) : '—'}</td>
+                        <td>{a.threshold != null ? Number(a.threshold).toFixed(2) : '—'}</td>
+                        <td>{a.direction}</td>
+                        <td>
+                          <span style={{ fontSize: 11, fontWeight: 700, padding: '2px 8px', borderRadius: 12,
+                            background: (SEV[a.severity] || '#6B7280') + '20', color: SEV[a.severity] || '#6B7280', textTransform: 'capitalize' }}>
+                            {a.severity}
+                          </span>
+                        </td>
+                        <td style={{ fontSize: 12, color: '#6B7280', whiteSpace: 'nowrap' }}>{a.timestamp ? new Date(a.timestamp).toLocaleString() : '—'}</td>
+                        <td>{a.acknowledged ? <Badge label="Yes" type="active" /> : <Badge label="No" type="inactive" />}</td>
+                      </tr>
+                    ))
+                  }
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </>
+      )}
+
+      {/* ── Sessions tab ── */}
+      {tab === 'sessions' && (
+        <div className="sa-card">
+          <h3 style={{ margin: '0 0 12px', fontSize: 14, fontWeight: 700, color: '#374151' }}>Active Admin Sessions ({sessions.length})</h3>
+          <div className="sa-table-wrap">
+            <table className="sa-table">
+              <thead><tr><th>Admin</th><th>Role</th><th>Started</th><th>Expires</th><th>Last Active</th></tr></thead>
+              <tbody>
+                {sessions.length === 0
+                  ? <tr><td colSpan={5} className="sa-empty">No active sessions.</td></tr>
+                  : sessions.map(s => (
+                    <tr key={s.id}>
+                      <td><strong>{s.admin_name}</strong></td>
+                      <td><Badge label={s.admin_role} type={s.admin_role} /></td>
+                      <td style={{ fontSize: 12, color: '#6B7280' }}>{s.created_at ? new Date(s.created_at).toLocaleString() : '—'}</td>
+                      <td style={{ fontSize: 12, color: '#6B7280' }}>{s.expires_at ? new Date(s.expires_at).toLocaleString() : '—'}</td>
+                      <td style={{ fontSize: 12, color: '#6B7280' }}>{s.last_used_at ? new Date(s.last_used_at).toLocaleString() : '—'}</td>
+                    </tr>
+                  ))
+                }
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+    </>
+  )
+}
+
+// ─── Companies tab ────────────────────────────────────────────────────────────
+
 function CompaniesTab({ onViewAdmins }) {
-  const [companies, setCompanies] = useState([])
-  const [loading,   setLoading]   = useState(true)
-  const [error,     setError]     = useState('')
-  const [formTarget, setFormTarget] = useState(undefined)  // undefined=closed, null=new, obj=edit
+  const [companies,  setCompanies]  = useState([])
+  const [loading,    setLoading]    = useState(true)
+  const [error,      setError]      = useState('')
+  const [formTarget, setFormTarget] = useState(undefined)
   const [delTarget,  setDelTarget]  = useState(null)
   const [delErr,     setDelErr]     = useState('')
   const [delLoading, setDelLoading] = useState(false)
   const [toast,      setToast]      = useState('')
+  const [detailId,   setDetailId]   = useState(null)
+  const [showWizard, setShowWizard] = useState(false)
+
+  // ── Bulk selection ──────────────────────────────────────────────────────────
+  const [selected,    setSelected]    = useState(new Set())
+  const [bulkLoading, setBulkLoading] = useState(false)
 
   const load = useCallback(async () => {
-    setLoading(true); setError('')
+    setLoading(true); setError(''); setSelected(new Set())
     try { setCompanies(await get(`${SA}/companies`)) }
     catch (e) { setError(e.message) }
     finally { setLoading(false) }
@@ -563,7 +1440,7 @@ function CompaniesTab({ onViewAdmins }) {
 
   useEffect(() => { load() }, [load])
 
-  const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(''), 3000) }
+  const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(''), 3500) }
 
   const handleToggle = async (c) => {
     try { await patch(`${SA}/companies/${c.id}/toggle`); load(); showToast(`${c.name} ${c.is_active ? 'disabled' : 'enabled'}`) }
@@ -577,27 +1454,106 @@ function CompaniesTab({ onViewAdmins }) {
     finally { setDelLoading(false) }
   }
 
+  const toggleSelect = (id) => setSelected(prev => {
+    const next = new Set(prev)
+    next.has(id) ? next.delete(id) : next.add(id)
+    return next
+  })
+
+  const toggleAll = () => {
+    if (selected.size === companies.length) setSelected(new Set())
+    else setSelected(new Set(companies.map(c => c.id)))
+  }
+
+  const runBulk = async (action) => {
+    if (!selected.size) return
+    setBulkLoading(true)
+    try {
+      await post(`${SA}/companies/bulk`, { ids: [...selected], action })
+      showToast(`Bulk ${action} applied to ${selected.size} companies`)
+      load()
+    } catch (e) { setError(e.message) }
+    finally { setBulkLoading(false) }
+  }
+
+  if (detailId) {
+    return <CompanyDetailView companyId={detailId} onBack={() => setDetailId(null)} />
+  }
+
+  const BULK_ACTIONS = [
+    { action: 'enable',           label: 'Enable Selected' },
+    { action: 'disable',          label: 'Disable Selected' },
+    { action: 'maintenance_on',   label: 'Maintenance On' },
+    { action: 'maintenance_off',  label: 'Maintenance Off' },
+  ]
+
   return (
     <>
       {toast && <div style={{ position: 'fixed', top: 20, right: 20, background: '#D1FAE5', color: '#065F46', padding: '10px 18px', borderRadius: 8, fontWeight: 600, fontSize: 13, zIndex: 2000 }}>{toast}</div>}
 
+      {/* Bulk action bar */}
+      {selected.size > 0 && (
+        <div style={{ position: 'sticky', top: 0, zIndex: 100, background: '#1D4ED8', color: '#fff', padding: '10px 18px', borderRadius: 10, marginBottom: 12, display: 'flex', alignItems: 'center', gap: 12, boxShadow: '0 4px 16px rgba(29,78,216,0.35)' }}>
+          <span style={{ fontWeight: 700, fontSize: 14 }}>{selected.size} selected</span>
+          <div style={{ display: 'flex', gap: 8, marginLeft: 'auto', flexWrap: 'wrap' }}>
+            {BULK_ACTIONS.map(({ action, label }) => (
+              <button key={action} disabled={bulkLoading}
+                onClick={() => runBulk(action)}
+                style={{ background: 'rgba(255,255,255,0.15)', border: '1px solid rgba(255,255,255,0.3)', color: '#fff', borderRadius: 6, padding: '5px 12px', fontSize: 12, fontWeight: 600, cursor: 'pointer' }}>
+                {label}
+              </button>
+            ))}
+            <button onClick={() => setSelected(new Set())}
+              style={{ background: 'transparent', border: 'none', color: 'rgba(255,255,255,0.7)', fontSize: 12, cursor: 'pointer', padding: '5px 8px' }}>
+              ✕ Clear
+            </button>
+          </div>
+        </div>
+      )}
+
       <div className="sa-card">
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16, flexWrap: 'wrap', gap: 10 }}>
           <h2 className="sa-card-title" style={{ margin: 0 }}>Companies ({companies.length})</h2>
-          <button className="sa-btn primary" onClick={() => setFormTarget(null)}>+ New Company</button>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <button className="sa-btn secondary sm"
+              onClick={() => downloadCSV(`${SA}/export/companies.csv`, 'companies.csv')}>
+              ⬇ Export CSV
+            </button>
+            <button className="sa-btn primary" onClick={() => setShowWizard(true)}>+ New Company</button>
+          </div>
         </div>
         {error && <Err msg={error} />}
         <div className="sa-table-wrap">
           <table className="sa-table">
             <thead><tr>
+              <th style={{ width: 36 }}>
+                <input type="checkbox"
+                  checked={companies.length > 0 && selected.size === companies.length}
+                  onChange={toggleAll}
+                  title="Select all"
+                />
+              </th>
               <th>Name</th><th>Slug</th><th>Status</th><th>Subscribers</th><th>Admins</th><th>Alerts Today</th><th>Actions</th>
             </tr></thead>
             <tbody>
-              {loading ? <tr><td colSpan={7} className="sa-empty"><Spinner /></td></tr>
-               : companies.length === 0 ? <tr><td colSpan={7} className="sa-empty">No companies yet.</td></tr>
+              {loading ? <tr><td colSpan={8} className="sa-empty"><Spinner /></td></tr>
+               : companies.length === 0 ? <tr><td colSpan={8} className="sa-empty">No companies yet.</td></tr>
                : companies.map(c => (
-                <tr key={c.id}>
-                  <td><strong>{c.name}</strong></td>
+                <tr key={c.id} style={{ background: selected.has(c.id) ? 'rgba(219,234,254,0.5)' : undefined }}>
+                  <td style={{ textAlign: 'center' }}>
+                    <input type="checkbox"
+                      checked={selected.has(c.id)}
+                      onChange={() => toggleSelect(c.id)}
+                    />
+                  </td>
+                  <td>
+                    <button
+                      style={{ background: 'none', border: 'none', cursor: 'pointer', padding: 0, fontWeight: 700, fontSize: 14, color: '#1D4ED8', textDecoration: 'underline', textUnderlineOffset: 3 }}
+                      onClick={() => setDetailId(c.id)}
+                    >
+                      {c.name}
+                    </button>
+                  </td>
                   <td style={{ fontFamily: 'monospace', color: '#6B7280', fontSize: 13 }}>{c.slug}</td>
                   <td>{
                     c.maintenance_mode
@@ -624,7 +1580,14 @@ function CompaniesTab({ onViewAdmins }) {
         </div>
       </div>
 
-      {formTarget !== undefined && (
+      {showWizard && (
+        <NewCompanyWizard
+          onClose={() => setShowWizard(false)}
+          onComplete={load}
+        />
+      )}
+
+      {formTarget !== undefined && formTarget !== null && (
         <CompanyFormModal company={formTarget} onClose={() => setFormTarget(undefined)} onSaved={load} />
       )}
 
@@ -981,30 +1944,59 @@ function LockAdminModal({ admin, onClose, onDone }) {
   )
 }
 
-// Impersonation token modal
-function ImpersonateModal({ admin, token, expiresAt, onClose }) {
-  const [copied, setCopied] = useState(false)
-  const copy = () => {
-    navigator.clipboard.writeText(token).then(() => { setCopied(true); setTimeout(() => setCopied(false), 2000) })
+// Impersonation modal — opens the admin dashboard as that user in a new tab
+function ImpersonateModal({ admin, code, expiresAt, onClose }) {
+  const [opened, setOpened] = useState(false)
+
+  const openDashboard = () => {
+    const params = new URLSearchParams({
+      imp_code:   code,
+      admin_name: admin.name,
+      ...(admin.company_id ? { company_id: admin.company_id } : {}),
+    })
+    // The new tab redeems the one-time code via POST to get the actual session token.
+    window.open(`/sub-admin/dashboard?${params}`, '_blank', 'noopener,noreferrer')
+    setOpened(true)
   }
+
   return (
-    <Modal title={`Impersonating ${admin.name}`} onClose={onClose}
-      footer={<button className="sa-btn primary" onClick={onClose}>Done</button>}
+    <Modal title={`Login As — ${admin.name}`} onClose={onClose}
+      footer={
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button className="sa-btn secondary" onClick={onClose}>Close</button>
+          <button className="sa-btn primary" onClick={openDashboard}>
+            {opened ? '↗ Open Again' : '↗ Open Admin Dashboard'}
+          </button>
+        </div>
+      }
     >
-      <p style={{ color: '#374151', margin: '0 0 12px', fontSize: 13 }}>
-        Use this token as <code>Authorization: Bearer &lt;token&gt;</code> to act as <strong>{admin.name}</strong>.
-        Valid for 1 hour (until {new Date(expiresAt).toLocaleTimeString()}).
-      </p>
-      <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 12 }}>
-        <input className="sa-input" readOnly value={token}
-          style={{ fontFamily: 'monospace', fontSize: 12 }} onClick={e => e.target.select()} />
-        <button className="sa-btn sm secondary" onClick={copy} style={{ flexShrink: 0 }}>
-          {copied ? '✓' : <Copy size={13} />}
-        </button>
+      {/* Context banner */}
+      <div style={{ background: '#EFF6FF', border: '1px solid #BFDBFE', borderRadius: 8, padding: '10px 14px', marginBottom: 16, display: 'flex', gap: 10, alignItems: 'flex-start' }}>
+        <div style={{ width: 36, height: 36, borderRadius: 8, background: '#1D4ED8', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#fff', fontWeight: 800, fontSize: 15, flexShrink: 0 }}>
+          {(admin.name || '?')[0].toUpperCase()}
+        </div>
+        <div>
+          <div style={{ fontWeight: 700, fontSize: 13, color: '#1E3A8A' }}>{admin.name}</div>
+          <div style={{ fontSize: 12, color: '#3B82F6' }}>
+            {admin.role} · {admin.company_name || 'Unassigned'}
+          </div>
+          <div style={{ fontSize: 11, color: '#6B7280', marginTop: 2 }}>
+            Session valid until {new Date(expiresAt).toLocaleTimeString()}
+          </div>
+        </div>
       </div>
-      <p style={{ fontSize: 12, color: '#6B7280', margin: 0 }}>
-        All actions taken with this token are logged as "superadmin acting as {admin.name}".
+
+      <p style={{ color: '#374151', fontSize: 13, margin: '0 0 12px' }}>
+        Click <strong>Open Admin Dashboard</strong> to view the platform exactly as <strong>{admin.name}</strong> sees it.
+        All actions are logged with a note that the super admin was acting on their behalf.
       </p>
+
+      {opened && (
+        <div style={{ background: '#F0FDF4', border: '1px solid #86EFAC', borderRadius: 8, padding: '8px 12px', marginBottom: 12, fontSize: 12, color: '#15803D', fontWeight: 600 }}>
+          ✓ Dashboard opened in new tab. Close that tab when done.
+        </div>
+      )}
+
     </Modal>
   )
 }
@@ -1057,7 +2049,7 @@ function AdminsTab({ onViewDetail }) {
   const handleImpersonate = async (a) => {
     try {
       const data = await post(`${AC}/${a.id}/impersonate`)
-      setImpersonateResult({ admin: a, token: data.impersonation_token, expiresAt: data.expires_at })
+      setImpersonateResult({ admin: a, code: data.impersonation_code, expiresAt: data.expires_at })
     } catch (e) { setError(e.message) }
   }
 
@@ -1132,7 +2124,7 @@ function AdminsTab({ onViewDetail }) {
       {impersonateResult && (
         <ImpersonateModal
           admin={impersonateResult.admin}
-          token={impersonateResult.token}
+          code={impersonateResult.code}
           expiresAt={impersonateResult.expiresAt}
           onClose={() => setImpersonateResult(null)}
         />
@@ -1266,72 +2258,203 @@ function CompanyParametersTab() {
 // ─── Global Alerts tab ────────────────────────────────────────────────────────
 
 function AlertsTab() {
-  const [alerts,   setAlerts]   = useState([])
-  const [loading,  setLoading]  = useState(true)
-  const [error,    setError]    = useState('')
-  const [limit,    setLimit]    = useState(100)
-  const [company,  setCompany]  = useState('')
-  const [companies,setCompanies]= useState([])
+  const [alerts,    setAlerts]    = useState([])
+  const [companies, setCompanies] = useState([])
+  const [loading,   setLoading]   = useState(true)
+  const [error,     setError]     = useState('')
+  const [filter,    setFilter]    = useState('all')    // all | unacked | critical | warning
+  const [company,   setCompany]   = useState('')
+  const [acking,    setAcking]    = useState(null)     // alert id being acked
+  const [toast,     setToast]     = useState('')
+
+  const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(''), 3000) }
 
   const load = useCallback(async () => {
     setLoading(true); setError('')
     try {
-      const [a, c] = await Promise.all([get(`${SA}/alerts?limit=${limit}`), get(`${SA}/companies`)])
-      setAlerts(a); setCompanies(c)
+      const params = new URLSearchParams({ limit: 200 })
+      if (company) params.set('company_id', company)
+      if (filter === 'unacked')  params.set('unack_only', 'true')
+      if (filter === 'critical') params.set('severity', 'critical')
+      if (filter === 'warning')  params.set('severity', 'warning')
+      const [a, c] = await Promise.all([
+        get(`${SA}/alerts/triage?${params}`),
+        get(`${SA}/companies`),
+      ])
+      setAlerts(Array.isArray(a) ? a : [])
+      setCompanies(Array.isArray(c) ? c : [])
     } catch (e) { setError(e.message) }
     finally { setLoading(false) }
-  }, [limit])
+  }, [filter, company])
 
   useEffect(() => { load() }, [load])
 
-  const filtered = company ? alerts.filter(a => String(a.company_id) === company) : alerts
-
   const autoRef = useRef()
   useEffect(() => {
-    autoRef.current = setInterval(load, 30000)
+    autoRef.current = setInterval(load, 15000)
     return () => clearInterval(autoRef.current)
   }, [load])
 
+  const handleAck = async (alertId) => {
+    setAcking(alertId)
+    try {
+      await post(`${SA}/alerts/${alertId}/acknowledge`, {})
+      showToast(`Alert #${alertId} acknowledged`)
+      load()
+    } catch (e) { setError(e.message) }
+    finally { setAcking(null) }
+  }
+
+  const unackedCount    = alerts.filter(a => !a.acknowledged).length
+  const criticalUnacked = alerts.filter(a => !a.acknowledged && a.severity === 'critical').length
+  const companiesHit    = new Set(alerts.filter(a => !a.acknowledged).map(a => a.company_id)).size
+
+  const SEV_STYLE = {
+    critical: { bg: '#FEF2F2', border: '#FCA5A5', text: '#DC2626', rowBg: '#FFF5F5' },
+    warning:  { bg: '#FFFBEB', border: '#FDE68A', text: '#D97706', rowBg: '#FFFDF5' },
+    info:     { bg: '#EFF6FF', border: '#BFDBFE', text: '#2563EB', rowBg: '#FAFBFF' },
+  }
+
+  const fmtOpen = (min) => {
+    if (!min && min !== 0) return '—'
+    if (min < 1)  return '<1m'
+    if (min < 60) return `${Math.round(min)}m`
+    if (min < 1440) return `${Math.round(min/60)}h ${Math.round(min%60)}m`
+    return `${Math.round(min/1440)}d`
+  }
+
   return (
-    <div className="sa-card">
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16, flexWrap: 'wrap', gap: 8 }}>
-        <h2 className="sa-card-title" style={{ margin: 0 }}>Global Alerts</h2>
-        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-          <select className="sa-select" style={{ width: 'auto', padding: '6px 10px', fontSize: 13 }} value={company} onChange={e => setCompany(e.target.value)}>
-            <option value="">All companies</option>
-            {companies.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
-          </select>
-          <select className="sa-select" style={{ width: 'auto', padding: '6px 10px', fontSize: 13 }} value={limit} onChange={e => setLimit(+e.target.value)}>
-            {[50, 100, 250, 500].map(n => <option key={n} value={n}>Last {n}</option>)}
-          </select>
-          <button className="sa-btn sm secondary" onClick={load}>↻ Refresh</button>
+    <>
+      {toast && <div style={{ position:'fixed', top:20, right:20, background:'#D1FAE5', color:'#065F46', padding:'10px 18px', borderRadius:8, fontWeight:600, fontSize:13, zIndex:2000 }}>{toast}</div>}
+
+      {/* Command strip */}
+      <div style={{ display:'grid', gridTemplateColumns:'repeat(3,1fr)', gap:12, marginBottom:16 }}>
+        {[
+          { label:'Unacknowledged', val: unackedCount,    color: unackedCount    > 0 ? '#EF4444' : '#22C55E' },
+          { label:'Critical Unacked',val: criticalUnacked, color: criticalUnacked > 0 ? '#EF4444' : '#22C55E' },
+          { label:'Companies Affected', val: companiesHit, color: companiesHit   > 0 ? '#F59E0B' : '#22C55E' },
+        ].map(({ label, val, color }) => (
+          <div key={label} className="sa-stat" style={{ borderLeft: `4px solid ${color}` }}>
+            <div className="sa-stat-label">{label}</div>
+            <div className="sa-stat-value" style={{ color }}>{val}</div>
+          </div>
+        ))}
+      </div>
+
+      <div className="sa-card">
+        {/* Filters */}
+        <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:16, flexWrap:'wrap', gap:8 }}>
+          <div style={{ display:'flex', gap:6, flexWrap:'wrap' }}>
+            <h2 className="sa-card-title" style={{ margin:0, marginRight:8 }}>Alert Triage</h2>
+            {[
+              { id:'all',      label:'All'       },
+              { id:'unacked',  label:`Unacked (${unackedCount})` },
+              { id:'critical', label:'Critical'  },
+              { id:'warning',  label:'Warning'   },
+            ].map(f => (
+              <button key={f.id} className={`sa-btn sm ${filter === f.id ? 'primary' : 'secondary'}`}
+                onClick={() => { setFilter(f.id); setCompany('') }}>{f.label}</button>
+            ))}
+          </div>
+          <div style={{ display:'flex', gap:8, alignItems:'center' }}>
+            <select className="sa-select" style={{ width:'auto', padding:'6px 10px', fontSize:13 }}
+              value={company} onChange={e => setCompany(e.target.value)}>
+              <option value="">All companies</option>
+              {companies.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+            </select>
+            <button className="sa-btn sm secondary"
+              onClick={() => downloadCSV(`${SA}/export/alerts.csv`, 'alerts.csv')}>
+              ⬇ Export
+            </button>
+            <button className="sa-btn sm secondary" onClick={load}>↻ Refresh</button>
+          </div>
+        </div>
+
+        {error && <Err msg={error} />}
+
+        <div className="sa-table-wrap">
+          <table className="sa-table">
+            <thead>
+              <tr>
+                <th>Severity</th>
+                <th>Company</th>
+                <th>Parameter</th>
+                <th>Value</th>
+                <th>Threshold</th>
+                <th>Open For</th>
+                <th>Time</th>
+                <th>Ack</th>
+              </tr>
+            </thead>
+            <tbody>
+              {loading
+                ? <tr><td colSpan={8} className="sa-empty"><Spinner /></td></tr>
+                : alerts.length === 0
+                  ? <tr><td colSpan={8} className="sa-empty">No alerts match the current filter.</td></tr>
+                  : alerts.map(a => {
+                      const ss = SEV_STYLE[a.severity] || SEV_STYLE.info
+                      const rowStyle = !a.acknowledged
+                        ? { background: ss.rowBg, borderLeft: `3px solid ${ss.text}` }
+                        : { opacity: 0.65 }
+                      return (
+                        <tr key={a.id} style={rowStyle}>
+                          <td>
+                            <span style={{
+                              fontSize: 11, fontWeight: 700, padding: '3px 9px', borderRadius: 12,
+                              background: ss.bg, color: ss.text, border: `1px solid ${ss.border}`,
+                              textTransform: 'capitalize',
+                            }}>
+                              {a.severity === 'critical' && !a.acknowledged ? '🔴 ' : a.severity === 'warning' && !a.acknowledged ? '🟡 ' : ''}
+                              {a.severity}
+                            </span>
+                          </td>
+                          <td>
+                            <span style={{ background:'#EEF2FF', color:'#4338CA', padding:'2px 8px', borderRadius:4, fontSize:12, fontWeight:600 }}>
+                              {a.company_name}
+                            </span>
+                          </td>
+                          <td style={{ textTransform:'capitalize', fontWeight:600 }}>{a.parameter}</td>
+                          <td style={{ fontWeight:700, color: a.acknowledged ? '#374151' : ss.text }}>
+                            {typeof a.value === 'number' ? a.value.toFixed(2) : a.value ?? '—'}
+                          </td>
+                          <td style={{ color:'#6B7280', fontSize:12 }}>{a.threshold ?? '—'}</td>
+                          <td>
+                            {!a.acknowledged ? (
+                              <span style={{
+                                fontSize: 12, fontWeight: 700,
+                                color: a.minutes_open > 60 ? '#DC2626' : a.minutes_open > 15 ? '#D97706' : '#059669',
+                              }}>
+                                {fmtOpen(a.minutes_open)}
+                              </span>
+                            ) : <span style={{ color:'#9CA3AF', fontSize:12 }}>—</span>}
+                          </td>
+                          <td style={{ fontSize:12, color:'#6B7280', whiteSpace:'nowrap' }}>
+                            {a.timestamp ? new Date(a.timestamp).toLocaleString() : '—'}
+                          </td>
+                          <td>
+                            {a.acknowledged
+                              ? <span style={{ color:'#059669', fontWeight:700, fontSize:13 }}>✓ Done</span>
+                              : (
+                                <button
+                                  className="sa-btn sm primary"
+                                  disabled={acking === a.id}
+                                  onClick={() => handleAck(a.id)}
+                                  style={{ fontSize: 11, padding: '3px 10px' }}
+                                >
+                                  {acking === a.id ? '…' : 'Ack'}
+                                </button>
+                              )
+                            }
+                          </td>
+                        </tr>
+                      )
+                    })
+              }
+            </tbody>
+          </table>
         </div>
       </div>
-      {error && <Err msg={error} />}
-      <div className="sa-table-wrap">
-        <table className="sa-table">
-          <thead><tr>
-            <th>Company</th><th>Parameter</th><th>Value</th><th>Threshold</th><th>Severity</th><th>Time</th><th>Acknowledged</th>
-          </tr></thead>
-          <tbody>
-            {loading ? <tr><td colSpan={7} className="sa-empty"><Spinner /></td></tr>
-             : filtered.length === 0 ? <tr><td colSpan={7} className="sa-empty">No alerts.</td></tr>
-             : filtered.map(a => (
-                <tr key={a.id}>
-                  <td><span style={{ background: '#EEF2FF', color: '#4338CA', padding: '2px 8px', borderRadius: 4, fontSize: 12, fontWeight: 600 }}>{a.company_name}</span></td>
-                  <td style={{ textTransform: 'capitalize' }}>{a.parameter}</td>
-                  <td style={{ fontWeight: 700 }}>{typeof a.value === 'number' ? a.value.toFixed(2) : a.value}</td>
-                  <td>{a.threshold}</td>
-                  <td><Badge label={a.severity} type={a.severity} /></td>
-                  <td style={{ fontSize: 12, color: '#6B7280' }}>{a.timestamp ? new Date(a.timestamp).toLocaleString() : '—'}</td>
-                  <td style={{ textAlign: 'center' }}>{a.acknowledged ? <span style={{ color: '#059669', fontWeight: 700 }}>✓</span> : <span style={{ color: '#9CA3AF' }}>—</span>}</td>
-                </tr>
-              ))
-            }
-          </tbody>
-        </table>
-      </div>
-    </div>
+    </>
   )
 }
 
@@ -1562,32 +2685,50 @@ function ApprovalsTab({ onCountChange }) {
         <div className="sa-table-wrap">
           <table className="sa-table">
             <thead><tr>
-              <th>#</th><th>Admin</th><th>Company</th><th>Action</th><th>Status</th><th>Submitted</th><th>Actions</th>
+              <th>#</th><th>Admin</th><th>Company</th><th>Action</th><th>Status</th><th>Waiting</th><th>Submitted</th><th>Actions</th>
             </tr></thead>
             <tbody>
               {loading
-                ? <tr><td colSpan={7} className="sa-empty"><Spinner /></td></tr>
+                ? <tr><td colSpan={8} className="sa-empty"><Spinner /></td></tr>
                 : rows.length === 0
-                  ? <tr><td colSpan={7} className="sa-empty">No {filter} approvals.</td></tr>
-                  : rows.map(r => (
-                      <tr key={r.id}>
-                        <td style={{ color:'#9CA3AF', fontSize:12 }}>#{r.id}</td>
-                        <td><strong>{r.admin_name}</strong></td>
-                        <td>{r.company_name || <span style={{ color:'#9CA3AF' }}>—</span>}</td>
-                        <td style={{ fontFamily:'monospace', fontSize:12 }}>{r.action_type}</td>
-                        <td><span style={{ fontWeight:700, color:statusColor(r.status), fontSize:12, textTransform:'uppercase' }}>{r.status}</span></td>
-                        <td style={{ fontSize:12, color:'#6B7280' }}>{r.created_at ? new Date(r.created_at).toLocaleString() : '—'}</td>
-                        <td>
-                          {r.status === 'pending' && (
-                            <div style={{ display:'flex', gap:6 }}>
-                              <button className="sa-btn sm primary" onClick={() => { setModal({ type:'approve', row:r }); setNote('') }}>Approve</button>
-                              <button className="sa-btn sm danger"   onClick={() => { setModal({ type:'reject',  row:r }); setNote('') }}>Reject</button>
-                            </div>
-                          )}
-                          {r.review_note && <div style={{ fontSize:11, color:'#6B7280', marginTop:4 }}>{r.review_note}</div>}
-                        </td>
-                      </tr>
-                    ))
+                  ? <tr><td colSpan={8} className="sa-empty">No {filter} approvals.</td></tr>
+                  : rows.map(r => {
+                      const ageMs  = r.created_at ? Date.now() - new Date(r.created_at).getTime() : 0
+                      const ageH   = ageMs / 3600000
+                      const ageMin = Math.round(ageMs / 60000)
+                      const slaColor = ageH > 24 ? '#DC2626' : ageH > 4 ? '#D97706' : '#059669'
+                      const slaBg    = ageH > 24 ? '#FEE2E2' : ageH > 4 ? '#FEF3C7' : '#D1FAE5'
+                      const slaLabel = ageMin < 60
+                        ? `${ageMin}m`
+                        : ageH < 24 ? `${Math.round(ageH)}h ${Math.round(ageMin % 60)}m`
+                        : `${Math.round(ageH / 24)}d ${Math.round(ageH % 24)}h`
+                      return (
+                        <tr key={r.id} style={r.status === 'pending' && ageH > 24 ? { background:'#FFF5F5' } : {}}>
+                          <td style={{ color:'#9CA3AF', fontSize:12 }}>#{r.id}</td>
+                          <td><strong>{r.admin_name}</strong></td>
+                          <td>{r.company_name || <span style={{ color:'#9CA3AF' }}>—</span>}</td>
+                          <td style={{ fontFamily:'monospace', fontSize:12 }}>{r.action_type}</td>
+                          <td><span style={{ fontWeight:700, color:statusColor(r.status), fontSize:12, textTransform:'uppercase' }}>{r.status}</span></td>
+                          <td>
+                            {r.status === 'pending' ? (
+                              <span style={{ fontSize:12, fontWeight:700, color: slaColor, background: slaBg, padding:'2px 8px', borderRadius:8 }}>
+                                {slaLabel} old{ageH > 24 ? ' ⚠' : ''}
+                              </span>
+                            ) : <span style={{ color:'#9CA3AF', fontSize:12 }}>—</span>}
+                          </td>
+                          <td style={{ fontSize:12, color:'#6B7280' }}>{r.created_at ? new Date(r.created_at).toLocaleString() : '—'}</td>
+                          <td>
+                            {r.status === 'pending' && (
+                              <div style={{ display:'flex', gap:6 }}>
+                                <button className="sa-btn sm primary" onClick={() => { setModal({ type:'approve', row:r }); setNote('') }}>Approve</button>
+                                <button className="sa-btn sm danger"   onClick={() => { setModal({ type:'reject',  row:r }); setNote('') }}>Reject</button>
+                              </div>
+                            )}
+                            {r.review_note && <div style={{ fontSize:11, color:'#6B7280', marginTop:4 }}>{r.review_note}</div>}
+                          </td>
+                        </tr>
+                      )
+                    })
               }
             </tbody>
           </table>
@@ -4699,6 +5840,7 @@ const CAT_COLORS = {
 }
 
 function AuditTab() {
+  const [subTab,     setSubTab]     = useState('classic')
   const [rows,       setRows]       = useState([])
   const [summary,    setSummary]    = useState(null)
   const [total,      setTotal]      = useState(0)
@@ -4737,6 +5879,23 @@ function AuditTab() {
 
   return (
     <div>
+      {/* Sub-tab switcher */}
+      <div style={{ display: 'flex', gap: 8, marginBottom: 20 }}>
+        {[
+          { id: 'classic',  label: 'Summary & Log' },
+          { id: 'advanced', label: '🔍 Advanced Explorer' },
+        ].map(t => (
+          <button key={t.id}
+            className={`sa-btn ${subTab === t.id ? 'primary' : 'secondary'}`}
+            onClick={() => setSubTab(t.id)}>
+            {t.label}
+          </button>
+        ))}
+      </div>
+
+      {subTab === 'advanced' && <AdvancedAuditExplorer />}
+
+      {subTab === 'classic' && <>
       {/* Summary strip */}
       {summary && (
         <div style={{ display:'grid', gridTemplateColumns:'repeat(3,1fr)', gap:12, marginBottom:20 }}>
@@ -4901,14 +6060,1935 @@ function AuditTab() {
           </div>
         )}
       </div>
+      </>}
     </div>
   )
 }
 
+
+// ─── Tier 3: Advanced Audit Explorer ─────────────────────────────────────────
+
+function AdvancedAuditExplorer() {
+  const [rows,      setRows]      = useState([])
+  const [total,     setTotal]     = useState(0)
+  const [pages,     setPages]     = useState(1)
+  const [page,      setPage]      = useState(1)
+  const [cats,      setCats]      = useState([])
+  const [loading,   setLoading]   = useState(false)
+  const [error,     setError]     = useState('')
+
+  // Filters
+  const [search,    setSearch]    = useState('')
+  const [company,   setCompany]   = useState('')
+  const [category,  setCategory]  = useState('')
+  const [severity,  setSeverity]  = useState('')
+  const [dateFrom,  setDateFrom]  = useState('')
+  const [dateTo,    setDateTo]    = useState('')
+  const [companies, setCompanies] = useState([])
+
+  useEffect(() => {
+    get(`${SA}/companies`).then(c => setCompanies(Array.isArray(c) ? c : [])).catch(() => {})
+  }, [])
+
+  const load = useCallback(async (p = 1) => {
+    setLoading(true); setError('')
+    try {
+      const params = new URLSearchParams({ page: p, limit: 50 })
+      if (search)   params.set('search',     search)
+      if (company)  params.set('company_id', company)
+      if (category) params.set('category',   category)
+      if (severity) params.set('severity',   severity)
+      if (dateFrom) params.set('date_from',  dateFrom)
+      if (dateTo)   params.set('date_to',    dateTo)
+      const d = await get(`${SA}/audit?${params}`)
+      setRows(d.rows || [])
+      setTotal(d.total || 0)
+      setPages(d.pages || 1)
+      setPage(p)
+      setCats(d.categories || [])
+    } catch (e) { setError(e.message) }
+    finally { setLoading(false) }
+  }, [search, company, category, severity, dateFrom, dateTo])
+
+  useEffect(() => { load(1) }, [load])
+
+  const SEV = {
+    critical: { bg: '#FEF2F2', text: '#DC2626' },
+    warning:  { bg: '#FFFBEB', text: '#D97706' },
+    high:     { bg: '#FEF2F2', text: '#DC2626' },
+    medium:   { bg: '#FFFBEB', text: '#D97706' },
+    low:      { bg: '#F0FDF4', text: '#059669' },
+    info:     { bg: '#EFF6FF', text: '#2563EB' },
+  }
+
+  return (
+    <div className="sa-card">
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14 }}>
+        <h2 className="sa-card-title" style={{ margin: 0 }}>
+          Advanced Audit Explorer {total > 0 && <span style={{ color: '#6B7280', fontWeight: 400, fontSize: 13 }}>({total} entries)</span>}
+        </h2>
+        <button className="sa-btn sm secondary"
+          onClick={() => downloadCSV(`${SA}/export/audit.csv${company ? `?company_id=${company}` : ''}`, 'audit.csv')}>
+          ⬇ Export CSV
+        </button>
+      </div>
+
+      {/* Filter row */}
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 14, alignItems: 'center' }}>
+        <input className="sa-input" placeholder="Search actions…" value={search}
+          onChange={e => setSearch(e.target.value)}
+          onKeyDown={e => e.key === 'Enter' && load(1)}
+          style={{ maxWidth: 220 }} />
+        <select className="sa-input" value={company} onChange={e => setCompany(e.target.value)} style={{ maxWidth: 160 }}>
+          <option value="">All companies</option>
+          {companies.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+        </select>
+        <select className="sa-input" value={category} onChange={e => setCategory(e.target.value)} style={{ maxWidth: 140 }}>
+          <option value="">All categories</option>
+          {cats.map(c => <option key={c} value={c}>{c}</option>)}
+        </select>
+        <select className="sa-input" value={severity} onChange={e => setSeverity(e.target.value)} style={{ maxWidth: 130 }}>
+          <option value="">All severities</option>
+          {['critical','high','medium','low','info'].map(s => <option key={s} value={s}>{s}</option>)}
+        </select>
+        <input type="date" className="sa-input" value={dateFrom} onChange={e => setDateFrom(e.target.value)} style={{ maxWidth: 145 }} />
+        <span style={{ color: '#9CA3AF', fontSize: 12 }}>→</span>
+        <input type="date" className="sa-input" value={dateTo}   onChange={e => setDateTo(e.target.value)}   style={{ maxWidth: 145 }} />
+        <button className="sa-btn sm primary" onClick={() => load(1)}>Search</button>
+        <button className="sa-btn sm secondary" onClick={() => {
+          setSearch(''); setCompany(''); setCategory(''); setSeverity('')
+          setDateFrom(''); setDateTo('')
+        }}>Clear</button>
+      </div>
+
+      {error && <Err msg={error} />}
+
+      {loading ? <Spinner /> : (
+        <div className="sa-table-wrap">
+          <table className="sa-table">
+            <thead><tr>
+              <th>Time</th><th>Severity</th><th>Category</th><th>Action</th>
+              <th>Admin</th><th>Company</th><th>IP</th><th>Details</th>
+            </tr></thead>
+            <tbody>
+              {rows.length === 0
+                ? <tr><td colSpan={8} className="sa-empty">No entries found</td></tr>
+                : rows.map(r => {
+                    const sc = SEV[r.severity] || SEV.info
+                    return (
+                      <tr key={r.id}>
+                        <td style={{ fontFamily: 'monospace', fontSize: 11, whiteSpace: 'nowrap' }}>
+                          {r.created_at ? new Date(r.created_at).toLocaleString('en-IN', { hour12: false }) : '—'}
+                        </td>
+                        <td>
+                          <span style={{ background: sc.bg, color: sc.text, padding: '1px 6px', borderRadius: 8, fontSize: 10, fontWeight: 700 }}>
+                            {r.severity}
+                          </span>
+                        </td>
+                        <td style={{ fontSize: 12, color: CAT_COLORS[r.category] || '#6B7280', fontWeight: 600 }}>{r.category}</td>
+                        <td style={{ fontFamily: 'monospace', fontSize: 12 }}>{r.action}</td>
+                        <td style={{ fontSize: 12 }}>{r.admin_name || '—'}</td>
+                        <td style={{ fontSize: 12 }}>{r.company_name || '—'}</td>
+                        <td style={{ fontFamily: 'monospace', fontSize: 11, color: '#6B7280' }}>{r.ip_address || '—'}</td>
+                        <td style={{ fontSize: 11, maxWidth: 200, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+                          title={r.details || ''}>{r.details || '—'}</td>
+                      </tr>
+                    )
+                  })
+              }
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {/* Pagination */}
+      {pages > 1 && (
+        <div style={{ display: 'flex', gap: 8, justifyContent: 'center', marginTop: 14, alignItems: 'center', fontSize: 13 }}>
+          <button className="sa-btn secondary" disabled={page <= 1} onClick={() => load(page - 1)}>← Prev</button>
+          <span style={{ color: '#6B7280' }}>Page {page} of {pages}</span>
+          <button className="sa-btn secondary" disabled={page >= pages} onClick={() => load(page + 1)}>Next →</button>
+        </div>
+      )}
+    </div>
+  )
+}
+
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// TIER 4 FRONTEND — Operations Automation & Intelligence
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// ─── Tier 4 helpers ───────────────────────────────────────────────────────────
+
+const INC_STATUS = {
+  open:          { bg: '#FEF2F2', text: '#DC2626', label: 'Open'          },
+  investigating: { bg: '#FFF7ED', text: '#EA580C', label: 'Investigating' },
+  resolved:      { bg: '#F0FDF4', text: '#16A34A', label: 'Resolved'      },
+  closed:        { bg: '#F9FAFB', text: '#6B7280', label: 'Closed'        },
+}
+
+const INC_SEV = {
+  critical: { bg: '#FEF2F2', text: '#DC2626' },
+  high:     { bg: '#FFF4ED', text: '#EA580C' },
+  medium:   { bg: '#FFFBEB', text: '#D97706' },
+  low:      { bg: '#F0FDF4', text: '#16A34A' },
+}
+
+const SLA_GRADE = {
+  A: { bg: '#F0FDF4', text: '#15803D', border: '#86EFAC' },
+  B: { bg: '#EFF6FF', text: '#1D4ED8', border: '#93C5FD' },
+  C: { bg: '#FFFBEB', text: '#92400E', border: '#FCD34D' },
+  D: { bg: '#FFF4ED', text: '#C2410C', border: '#FDBA74' },
+  F: { bg: '#FEF2F2', text: '#B91C1C', border: '#FCA5A5' },
+}
+
+function IncStatusBadge({ status }) {
+  const s = INC_STATUS[status] || INC_STATUS.open
+  return (
+    <span style={{ background: s.bg, color: s.text, borderRadius: 6, padding: '2px 8px', fontSize: 11, fontWeight: 700 }}>
+      {s.label}
+    </span>
+  )
+}
+
+function SlaGradeBadge({ grade }) {
+  const g = SLA_GRADE[grade] || SLA_GRADE.F
+  return (
+    <span style={{ background: g.bg, color: g.text, border: `1px solid ${g.border}`, borderRadius: 6, padding: '3px 10px', fontSize: 13, fontWeight: 800 }}>
+      {grade}
+    </span>
+  )
+}
+
+
+// ─── Tier 4: Maintenance Windows ──────────────────────────────────────────────
+
+function MaintenanceTab() {
+  const [windows,   setWindows]   = useState([])
+  const [companies, setCompanies] = useState([])
+  const [loading,   setLoading]   = useState(true)
+  const [showForm,  setShowForm]  = useState(false)
+  const [toast,     setToast]     = useState('')
+  const [applying,  setApplying]  = useState(false)
+  const [applyResult, setApplyResult] = useState(null)
+  const [showPast,  setShowPast]  = useState(false)
+
+  const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(''), 4000) }
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    try {
+      const [w, c] = await Promise.all([
+        get(`${SA}/maintenance-windows?include_past=${showPast}`),
+        get(`${SA}/companies`),
+      ])
+      setWindows(Array.isArray(w) ? w : [])
+      setCompanies(Array.isArray(c) ? c : [])
+    } catch { /* silent */ }
+    finally { setLoading(false) }
+  }, [showPast])
+
+  useEffect(() => { load() }, [load])
+
+  const handleCancel = async (w) => {
+    if (!window.confirm(`Cancel maintenance window for ${w.company_name}?`)) return
+    try {
+      await del(`${SA}/maintenance-windows/${w.id}`)
+      showToast('Window cancelled')
+      load()
+    } catch (e) { alert(e.message) }
+  }
+
+  const handleApply = async () => {
+    setApplying(true); setApplyResult(null)
+    try {
+      const res = await post(`${SA}/maintenance-windows/apply`, {})
+      setApplyResult(res)
+      showToast(`Applied: ${res.entered_maintenance.length} entered, ${res.exited_maintenance.length} exited`)
+      load()
+    } catch (e) { alert(e.message) }
+    finally { setApplying(false) }
+  }
+
+  const active   = windows.filter(w => w.window_status === 'active')
+  const upcoming = windows.filter(w => w.window_status === 'upcoming')
+  const expired  = windows.filter(w => w.window_status === 'expired')
+
+  const STATUS_STYLE = {
+    active:   { bg: '#FFF7ED', border: '#FDBA74', dot: '#F97316', label: 'ACTIVE'   },
+    upcoming: { bg: '#EFF6FF', border: '#93C5FD', dot: '#3B82F6', label: 'UPCOMING' },
+    expired:  { bg: '#F9FAFB', border: '#E5E7EB', dot: '#9CA3AF', label: 'EXPIRED'  },
+  }
+
+  const WindowCard = ({ w }) => {
+    const st = STATUS_STYLE[w.window_status] || STATUS_STYLE.expired
+    return (
+      <div style={{ background: st.bg, border: `1px solid ${st.border}`, borderRadius: 10, padding: 14, display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12 }}>
+        <div style={{ flex: 1 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+            <span style={{ width: 8, height: 8, borderRadius: '50%', background: st.dot, display: 'inline-block', ...(w.window_status === 'active' ? { animation: 'pulse 1.5s infinite' } : {}) }} />
+            <span style={{ fontWeight: 800, fontSize: 14, color: '#1F2937' }}>{w.company_name}</span>
+            <span style={{ fontSize: 10, fontWeight: 700, background: st.dot, color: '#fff', borderRadius: 4, padding: '1px 6px' }}>{st.label}</span>
+          </div>
+          {w.reason && <p style={{ fontSize: 12, color: '#6B7280', margin: '0 0 6px' }}>{w.reason}</p>}
+          <div style={{ fontSize: 12, color: '#374151', display: 'flex', gap: 16, flexWrap: 'wrap' }}>
+            <span>Start: <strong>{new Date(w.start_at).toLocaleString()}</strong></span>
+            <span>End: <strong>{new Date(w.end_at).toLocaleString()}</strong></span>
+            <span style={{ color: '#9CA3AF' }}>by {w.created_by_name || 'system'}</span>
+          </div>
+        </div>
+        {w.window_status !== 'expired' && (
+          <button className="sa-btn sm danger" onClick={() => handleCancel(w)}>Cancel</button>
+        )}
+      </div>
+    )
+  }
+
+  return (
+    <>
+      {toast && <div style={{ position:'fixed', top:20, right:20, background:'#D1FAE5', color:'#065F46', padding:'10px 18px', borderRadius:8, fontWeight:600, fontSize:13, zIndex:2000 }}>{toast}</div>}
+
+      {/* Header */}
+      <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:16, flexWrap:'wrap', gap:10 }}>
+        <div>
+          <h2 style={{ margin:0, fontSize:18, fontWeight:800, color:'#1F2937' }}>Maintenance Windows</h2>
+          <p style={{ margin:'4px 0 0', fontSize:13, color:'#6B7280' }}>Schedule alert suppression windows per company. Alerts fire as normal outside windows.</p>
+        </div>
+        <div style={{ display:'flex', gap:8 }}>
+          <button className="sa-btn secondary" onClick={handleApply} disabled={applying}>
+            {applying ? '…' : '▶ Sync Now'}
+          </button>
+          <button className="sa-btn secondary sm"
+            onClick={() => downloadCSV(`${SA}/export/maintenance.csv`, 'maintenance.csv')}>
+            ⬇ Export
+          </button>
+          <button className="sa-btn primary" onClick={() => setShowForm(true)}>+ Schedule Window</button>
+        </div>
+      </div>
+
+      {/* Apply result */}
+      {applyResult && (
+        <div className="sa-card" style={{ marginBottom:12, background:'#F0FDF4', border:'1px solid #86EFAC' }}>
+          <div style={{ fontWeight:700, color:'#15803D', marginBottom:6 }}>Sync complete</div>
+          {applyResult.entered_maintenance.length > 0 && (
+            <div style={{ fontSize:13, color:'#374151' }}>
+              Entered maintenance: <strong>{applyResult.entered_maintenance.join(', ')}</strong>
+            </div>
+          )}
+          {applyResult.exited_maintenance.length > 0 && (
+            <div style={{ fontSize:13, color:'#374151' }}>
+              Exited maintenance: <strong>{applyResult.exited_maintenance.join(', ')}</strong>
+            </div>
+          )}
+          {applyResult.entered_maintenance.length === 0 && applyResult.exited_maintenance.length === 0 && (
+            <div style={{ fontSize:13, color:'#6B7280' }}>No changes — all companies already in correct state.</div>
+          )}
+        </div>
+      )}
+
+      {/* Summary strip */}
+      <div style={{ display:'grid', gridTemplateColumns:'repeat(3,1fr)', gap:12, marginBottom:20 }}>
+        {[
+          { label:'Active Now',  val: active.length,   color:'#F97316' },
+          { label:'Upcoming',    val: upcoming.length,  color:'#3B82F6' },
+          { label:'Total Shown', val: windows.length,   color:'#6B7280' },
+        ].map(s => (
+          <div key={s.label} className="sa-stat" style={{ borderLeft:`4px solid ${s.color}` }}>
+            <div className="sa-stat-label">{s.label}</div>
+            <div className="sa-stat-value" style={{ color:s.color }}>{s.val}</div>
+          </div>
+        ))}
+      </div>
+
+      {loading ? <Spinner /> : (
+        <>
+          {active.length > 0 && (
+            <div style={{ marginBottom:20 }}>
+              <div style={{ fontSize:12, fontWeight:700, color:'#F97316', textTransform:'uppercase', letterSpacing:'0.05em', marginBottom:8 }}>Active Now</div>
+              <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
+                {active.map(w => <WindowCard key={w.id} w={w} />)}
+              </div>
+            </div>
+          )}
+          {upcoming.length > 0 && (
+            <div style={{ marginBottom:20 }}>
+              <div style={{ fontSize:12, fontWeight:700, color:'#3B82F6', textTransform:'uppercase', letterSpacing:'0.05em', marginBottom:8 }}>Upcoming</div>
+              <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
+                {upcoming.map(w => <WindowCard key={w.id} w={w} />)}
+              </div>
+            </div>
+          )}
+          {active.length === 0 && upcoming.length === 0 && (
+            <div style={{ textAlign:'center', padding:40, color:'#9CA3AF', fontSize:14 }}>
+              No active or upcoming maintenance windows.
+            </div>
+          )}
+          {/* Past toggle */}
+          <div style={{ marginTop:12 }}>
+            <button className="sa-btn sm secondary" onClick={() => setShowPast(p => !p)}>
+              {showPast ? '▲ Hide past windows' : '▼ Show past/expired windows'}
+            </button>
+            {showPast && expired.length > 0 && (
+              <div style={{ marginTop:12, display:'flex', flexDirection:'column', gap:8, opacity:0.7 }}>
+                {expired.map(w => <WindowCard key={w.id} w={w} />)}
+              </div>
+            )}
+          </div>
+        </>
+      )}
+
+      {showForm && (
+        <ScheduleWindowModal companies={companies} onClose={() => setShowForm(false)} onSaved={load} />
+      )}
+    </>
+  )
+}
+
+function ScheduleWindowModal({ companies, onClose, onSaved }) {
+  const [companyId, setCompanyId] = useState('')
+  const [startAt,   setStartAt]   = useState('')
+  const [endAt,     setEndAt]     = useState('')
+  const [reason,    setReason]    = useState('')
+  const [loading,   setLoading]   = useState(false)
+  const [error,     setError]     = useState('')
+
+  // Default start = now, end = 2h from now (local ISO)
+  useEffect(() => {
+    const now = new Date(); now.setSeconds(0, 0)
+    const end = new Date(now.getTime() + 2 * 60 * 60 * 1000)
+    const toLocal = (d) => new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16)
+    setStartAt(toLocal(now))
+    setEndAt(toLocal(end))
+  }, [])
+
+  const handleSave = async () => {
+    if (!companyId) return setError('Select a company')
+    if (!startAt || !endAt) return setError('Set start and end times')
+    setLoading(true); setError('')
+    try {
+      await post(`${SA}/maintenance-windows`, {
+        company_id: Number(companyId),
+        start_at:   new Date(startAt).toISOString(),
+        end_at:     new Date(endAt).toISOString(),
+        reason:     reason.trim() || null,
+      })
+      onSaved?.()
+      onClose()
+    } catch (e) { setError(e.message) }
+    finally { setLoading(false) }
+  }
+
+  return (
+    <Modal title="Schedule Maintenance Window" onClose={onClose}
+      footer={
+        <div style={{ display:'flex', gap:8 }}>
+          <button className="sa-btn secondary" onClick={onClose}>Cancel</button>
+          <button className="sa-btn primary" onClick={handleSave} disabled={loading}>
+            {loading ? 'Scheduling…' : 'Schedule Window'}
+          </button>
+        </div>
+      }
+    >
+      <div style={{ display:'flex', flexDirection:'column', gap:14 }}>
+        {error && <Err msg={error} />}
+        <div>
+          <label className="sa-label">Company *</label>
+          <select className="sa-input" value={companyId} onChange={e => setCompanyId(e.target.value)}>
+            <option value="">Select company…</option>
+            {companies.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+          </select>
+        </div>
+        <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:12 }}>
+          <div>
+            <label className="sa-label">Start *</label>
+            <input className="sa-input" type="datetime-local" value={startAt} onChange={e => setStartAt(e.target.value)} />
+          </div>
+          <div>
+            <label className="sa-label">End *</label>
+            <input className="sa-input" type="datetime-local" value={endAt} onChange={e => setEndAt(e.target.value)} />
+          </div>
+        </div>
+        <div>
+          <label className="sa-label">Reason (optional)</label>
+          <input className="sa-input" value={reason} onChange={e => setReason(e.target.value)} placeholder="Planned firmware upgrade, network maintenance…" />
+        </div>
+        <div style={{ background:'#FFF7ED', border:'1px solid #FED7AA', borderRadius:8, padding:'8px 12px', fontSize:12, color:'#92400E' }}>
+          ⚠ During the window the company will be in Maintenance mode — alerts are generated but suppressed from escalation. Click <strong>Sync Now</strong> on the main page to activate windows immediately.
+        </div>
+      </div>
+    </Modal>
+  )
+}
+
+
+// ─── Tier 4: Incident Management ─────────────────────────────────────────────
+
+function IncidentsTab() {
+  const [incidents,  setIncidents]  = useState([])
+  const [companies,  setCompanies]  = useState([])
+  const [admins,     setAdmins]     = useState([])
+  const [loading,    setLoading]    = useState(true)
+  const [showForm,   setShowForm]   = useState(false)
+  const [detailId,   setDetailId]   = useState(null)
+  const [toast,      setToast]      = useState('')
+  const [statusFilter, setStatusFilter] = useState('')
+  const [sevFilter,    setSevFilter]    = useState('')
+
+  const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(''), 4000) }
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    try {
+      const params = new URLSearchParams({ limit: 100 })
+      if (statusFilter) params.set('status', statusFilter)
+      if (sevFilter)    params.set('severity', sevFilter)
+      const [inc, co, adm] = await Promise.all([
+        get(`${SA}/incidents?${params}`),
+        get(`${SA}/companies`),
+        get(`${SA}/admins`),
+      ])
+      setIncidents(Array.isArray(inc) ? inc : [])
+      setCompanies(Array.isArray(co)  ? co  : [])
+      setAdmins(Array.isArray(adm)    ? adm : [])
+    } catch { /* silent */ }
+    finally { setLoading(false) }
+  }, [statusFilter, sevFilter])
+
+  useEffect(() => { load() }, [load])
+
+  const quickStatus = async (inc, newStatus) => {
+    try {
+      await patch(`${SA}/incidents/${inc.id}`, { status: newStatus })
+      showToast(`#${inc.id} marked ${newStatus}`)
+      load()
+    } catch (e) { alert(e.message) }
+  }
+
+  const handleDelete = async (inc) => {
+    if (!window.confirm(`Delete incident "${inc.title}"?`)) return
+    try {
+      await del(`${SA}/incidents/${inc.id}`)
+      showToast('Incident deleted')
+      load()
+    } catch (e) { alert(e.message) }
+  }
+
+  if (detailId !== null) {
+    return <IncidentDetailView incidentId={detailId} onBack={() => setDetailId(null)} onRefresh={load} admins={admins} />
+  }
+
+  const openCount = incidents.filter(i => i.status === 'open').length
+  const invCount  = incidents.filter(i => i.status === 'investigating').length
+
+  return (
+    <>
+      {toast && <div style={{ position:'fixed', top:20, right:20, background:'#D1FAE5', color:'#065F46', padding:'10px 18px', borderRadius:8, fontWeight:600, fontSize:13, zIndex:2000 }}>{toast}</div>}
+
+      {/* Command strip */}
+      <div style={{ display:'grid', gridTemplateColumns:'repeat(4,1fr)', gap:12, marginBottom:16 }}>
+        {[
+          { label:'Open',          val: openCount,            color:'#DC2626' },
+          { label:'Investigating', val: invCount,             color:'#EA580C' },
+          { label:'Total',         val: incidents.length,     color:'#6B7280' },
+          { label:'Resolved',      val: incidents.filter(i => i.status === 'resolved').length, color:'#16A34A' },
+        ].map(s => (
+          <div key={s.label} className="sa-stat" style={{ borderLeft:`4px solid ${s.color}` }}>
+            <div className="sa-stat-label">{s.label}</div>
+            <div className="sa-stat-value" style={{ color:s.color }}>{s.val}</div>
+          </div>
+        ))}
+      </div>
+
+      <div className="sa-card">
+        {/* Filters */}
+        <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:16, flexWrap:'wrap', gap:10 }}>
+          <h2 className="sa-card-title" style={{ margin:0 }}>Incidents ({incidents.length})</h2>
+          <div style={{ display:'flex', gap:8, flexWrap:'wrap', alignItems:'center' }}>
+            <select className="sa-input" value={statusFilter} onChange={e => setStatusFilter(e.target.value)} style={{ maxWidth:140 }}>
+              <option value="">All statuses</option>
+              {Object.entries(INC_STATUS).map(([k,v]) => <option key={k} value={k}>{v.label}</option>)}
+            </select>
+            <select className="sa-input" value={sevFilter} onChange={e => setSevFilter(e.target.value)} style={{ maxWidth:130 }}>
+              <option value="">All severities</option>
+              {Object.keys(INC_SEV).map(k => <option key={k} value={k}>{k}</option>)}
+            </select>
+            <button className="sa-btn sm secondary"
+              onClick={() => downloadCSV(`${SA}/export/incidents.csv`, 'incidents.csv')}>
+              ⬇ Export
+            </button>
+            <button className="sa-btn primary" onClick={() => setShowForm(true)}>+ New Incident</button>
+          </div>
+        </div>
+
+        {loading ? <Spinner /> : incidents.length === 0 ? (
+          <div style={{ textAlign:'center', padding:40, color:'#9CA3AF' }}>No incidents found.</div>
+        ) : (
+          <div className="sa-table-wrap">
+            <table className="sa-table">
+              <thead><tr>
+                <th>#</th><th>Severity</th><th>Status</th><th>Title</th>
+                <th>Company</th><th>Assignee</th><th>Alerts</th><th>Notes</th><th>Created</th><th>Actions</th>
+              </tr></thead>
+              <tbody>
+                {incidents.map(inc => {
+                  const sev = INC_SEV[inc.severity] || INC_SEV.medium
+                  return (
+                    <tr key={inc.id} style={{ background: inc.status === 'open' ? '#FFFBFB' : undefined }}>
+                      <td style={{ fontFamily:'monospace', fontSize:12, color:'#6B7280' }}>#{inc.id}</td>
+                      <td>
+                        <span style={{ background:sev.bg, color:sev.text, padding:'2px 7px', borderRadius:6, fontSize:11, fontWeight:700 }}>
+                          {inc.severity}
+                        </span>
+                      </td>
+                      <td><IncStatusBadge status={inc.status} /></td>
+                      <td>
+                        <button
+                          style={{ background:'none', border:'none', cursor:'pointer', padding:0, fontWeight:700, fontSize:13, color:'#1D4ED8', textAlign:'left', textDecoration:'underline', textUnderlineOffset:3 }}
+                          onClick={() => setDetailId(inc.id)}>
+                          {inc.title}
+                        </button>
+                      </td>
+                      <td style={{ fontSize:12 }}>{inc.company_name || '—'}</td>
+                      <td style={{ fontSize:12 }}>{inc.assignee_name || <span style={{ color:'#9CA3AF' }}>unassigned</span>}</td>
+                      <td style={{ textAlign:'center', fontSize:12 }}>{inc.alert_count}</td>
+                      <td style={{ textAlign:'center', fontSize:12 }}>{inc.note_count}</td>
+                      <td style={{ fontSize:11, color:'#6B7280', whiteSpace:'nowrap' }}>
+                        {inc.created_at ? new Date(inc.created_at).toLocaleDateString() : '—'}
+                      </td>
+                      <td>
+                        <div style={{ display:'flex', gap:4, flexWrap:'wrap' }}>
+                          {inc.status === 'open' && (
+                            <button className="sa-btn sm secondary" onClick={() => quickStatus(inc, 'investigating')}>Investigate</button>
+                          )}
+                          {inc.status === 'investigating' && (
+                            <button className="sa-btn sm secondary" onClick={() => quickStatus(inc, 'resolved')}>Resolve</button>
+                          )}
+                          {inc.status !== 'closed' && inc.status !== 'open' && (
+                            <button className="sa-btn sm secondary" onClick={() => quickStatus(inc, 'closed')}>Close</button>
+                          )}
+                          <button className="sa-btn sm danger" onClick={() => handleDelete(inc)}>✕</button>
+                        </div>
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      {showForm && (
+        <NewIncidentModal companies={companies} admins={admins}
+          onClose={() => setShowForm(false)} onSaved={load} />
+      )}
+    </>
+  )
+}
+
+function IncidentDetailView({ incidentId, onBack, onRefresh, admins }) {
+  const [data,    setData]    = useState(null)
+  const [loading, setLoading] = useState(true)
+  const [note,    setNote]    = useState('')
+  const [addingNote, setAddingNote] = useState(false)
+  const [tab,     setTab]     = useState('timeline')
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    try { setData(await get(`${SA}/incidents/${incidentId}`)) }
+    catch { /* silent */ }
+    finally { setLoading(false) }
+  }, [incidentId])
+
+  useEffect(() => { load() }, [load])
+
+  const submitNote = async () => {
+    if (!note.trim()) return
+    setAddingNote(true)
+    try {
+      await post(`${SA}/incidents/${incidentId}/notes`, { note: note.trim() })
+      setNote('')
+      load()
+      onRefresh?.()
+    } catch (e) { alert(e.message) }
+    finally { setAddingNote(false) }
+  }
+
+  const quickUpdate = async (fields) => {
+    try {
+      await patch(`${SA}/incidents/${incidentId}`, fields)
+      load(); onRefresh?.()
+    } catch (e) { alert(e.message) }
+  }
+
+  if (loading) return <><button className="sa-back-btn" onClick={onBack}>← Back to Incidents</button><Spinner /></>
+  if (!data)   return <><button className="sa-back-btn" onClick={onBack}>← Back to Incidents</button><Err msg="Failed to load" /></>
+
+  const sev = INC_SEV[data.severity] || INC_SEV.medium
+
+  return (
+    <>
+      <button className="sa-back-btn" onClick={onBack}>← Back to Incidents</button>
+
+      {/* Hero header */}
+      <div className="sa-card" style={{ marginBottom:16 }}>
+        <div style={{ display:'flex', justifyContent:'space-between', alignItems:'flex-start', gap:16, flexWrap:'wrap' }}>
+          <div style={{ flex:1 }}>
+            <div style={{ display:'flex', gap:10, alignItems:'center', marginBottom:8, flexWrap:'wrap' }}>
+              <span style={{ fontSize:12, color:'#9CA3AF', fontFamily:'monospace' }}>INC-{data.id}</span>
+              <span style={{ background:sev.bg, color:sev.text, padding:'2px 8px', borderRadius:6, fontSize:11, fontWeight:700 }}>{data.severity}</span>
+              <IncStatusBadge status={data.status} />
+            </div>
+            <h2 style={{ margin:'0 0 6px', fontSize:20, fontWeight:800, color:'#1F2937' }}>{data.title}</h2>
+            {data.description && <p style={{ margin:0, fontSize:13, color:'#6B7280' }}>{data.description}</p>}
+          </div>
+          {/* Quick actions */}
+          <div style={{ display:'flex', flexDirection:'column', gap:8, alignItems:'flex-end', flexShrink:0 }}>
+            <div style={{ display:'flex', gap:6 }}>
+              {data.status === 'open'          && <button className="sa-btn sm secondary" onClick={() => quickUpdate({ status:'investigating' })}>→ Investigate</button>}
+              {data.status === 'investigating' && <button className="sa-btn sm primary"   onClick={() => quickUpdate({ status:'resolved' })}>✓ Resolve</button>}
+              {['open','investigating'].includes(data.status) && <button className="sa-btn sm secondary" onClick={() => quickUpdate({ status:'closed' })}>Close</button>}
+            </div>
+            <div style={{ display:'flex', gap:6 }}>
+              <select className="sa-input" style={{ fontSize:12, padding:'4px 8px', width:160 }}
+                value={data.assignee_id || ''}
+                onChange={e => quickUpdate({ assignee_id: e.target.value ? Number(e.target.value) : null })}>
+                <option value="">Unassigned</option>
+                {admins.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
+              </select>
+            </div>
+            <div style={{ fontSize:12, color:'#9CA3AF' }}>
+              {data.company_name && <span>Company: <strong style={{ color:'#374151' }}>{data.company_name}</strong></span>}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Sub-tabs */}
+      <div style={{ display:'flex', gap:8, marginBottom:16 }}>
+        {[
+          { id:'timeline', label:`Timeline (${data.notes?.length || 0})` },
+          { id:'alerts',   label:`Linked Alerts (${data.linked_alerts?.length || 0})` },
+        ].map(t => (
+          <button key={t.id}
+            className={`sa-btn ${tab === t.id ? 'primary' : 'secondary'}`}
+            onClick={() => setTab(t.id)}>
+            {t.label}
+          </button>
+        ))}
+      </div>
+
+      {tab === 'timeline' && (
+        <div className="sa-card">
+          {/* Notes timeline */}
+          {data.notes?.length === 0 && (
+            <p style={{ color:'#9CA3AF', fontSize:13, textAlign:'center', padding:'20px 0' }}>No notes yet. Add the first update below.</p>
+          )}
+          <div style={{ display:'flex', flexDirection:'column', gap:0, marginBottom:20 }}>
+            {/* Create event */}
+            <div style={{ display:'flex', gap:12, padding:'10px 0', borderBottom:'1px solid #F3F4F6' }}>
+              <div style={{ width:28, height:28, borderRadius:'50%', background:'#DBEAFE', display:'flex', alignItems:'center', justifyContent:'center', fontSize:12, fontWeight:700, color:'#1D4ED8', flexShrink:0 }}>✦</div>
+              <div style={{ flex:1 }}>
+                <div style={{ fontSize:12, fontWeight:700, color:'#374151' }}>Incident created by {data.created_by_name || 'system'}</div>
+                <div style={{ fontSize:11, color:'#9CA3AF' }}>{data.created_at ? new Date(data.created_at).toLocaleString() : '—'}</div>
+              </div>
+            </div>
+            {/* Notes */}
+            {(data.notes || []).map((n, i) => (
+              <div key={n.id} style={{ display:'flex', gap:12, padding:'10px 0', borderBottom:'1px solid #F3F4F6' }}>
+                <div style={{ width:28, height:28, borderRadius:'50%', background:'#F3F4F6', display:'flex', alignItems:'center', justifyContent:'center', fontSize:12, fontWeight:700, color:'#374151', flexShrink:0 }}>
+                  {(n.author_name || '?')[0].toUpperCase()}
+                </div>
+                <div style={{ flex:1 }}>
+                  <div style={{ fontSize:12, fontWeight:700, color:'#374151' }}>{n.author_name || 'System'}</div>
+                  <div style={{ fontSize:13, color:'#1F2937', margin:'4px 0', whiteSpace:'pre-wrap' }}>{n.note}</div>
+                  <div style={{ fontSize:11, color:'#9CA3AF' }}>{n.created_at ? new Date(n.created_at).toLocaleString() : '—'}</div>
+                </div>
+              </div>
+            ))}
+            {/* Resolved event */}
+            {data.resolved_at && (
+              <div style={{ display:'flex', gap:12, padding:'10px 0' }}>
+                <div style={{ width:28, height:28, borderRadius:'50%', background:'#DCFCE7', display:'flex', alignItems:'center', justifyContent:'center', fontSize:13, flexShrink:0 }}>✓</div>
+                <div>
+                  <div style={{ fontSize:12, fontWeight:700, color:'#16A34A' }}>Incident resolved</div>
+                  <div style={{ fontSize:11, color:'#9CA3AF' }}>{new Date(data.resolved_at).toLocaleString()}</div>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Add note */}
+          {!['closed'].includes(data.status) && (
+            <div style={{ borderTop:'1px solid #F3F4F6', paddingTop:14 }}>
+              <label className="sa-label">Add note</label>
+              <textarea
+                className="sa-input"
+                value={note}
+                onChange={e => setNote(e.target.value)}
+                rows={3}
+                placeholder="Status update, action taken, root cause…"
+                style={{ resize:'vertical', marginBottom:8 }}
+              />
+              <button className="sa-btn primary" onClick={submitNote} disabled={addingNote || !note.trim()}>
+                {addingNote ? 'Adding…' : 'Add Note'}
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+
+      {tab === 'alerts' && (
+        <div className="sa-card">
+          {!data.linked_alerts?.length ? (
+            <p style={{ color:'#9CA3AF', fontSize:13, textAlign:'center', padding:'20px 0' }}>No alerts linked to this incident.</p>
+          ) : (
+            <div className="sa-table-wrap">
+              <table className="sa-table">
+                <thead><tr>
+                  <th>Alert ID</th><th>Parameter</th><th>Value</th><th>Threshold</th><th>Severity</th><th>Company</th><th>Time</th><th>Acked</th>
+                </tr></thead>
+                <tbody>
+                  {data.linked_alerts.map(a => {
+                    const sc = INC_SEV[a.severity?.toLowerCase()] || INC_SEV.medium
+                    return (
+                      <tr key={a.id}>
+                        <td style={{ fontFamily:'monospace', fontSize:12 }}>#{a.id}</td>
+                        <td style={{ fontWeight:600 }}>{a.parameter}</td>
+                        <td>{a.value?.toFixed(2)}</td>
+                        <td>{a.threshold?.toFixed(2)}</td>
+                        <td><span style={{ background:sc.bg, color:sc.text, padding:'2px 6px', borderRadius:6, fontSize:11, fontWeight:700 }}>{a.severity}</span></td>
+                        <td style={{ fontSize:12 }}>{a.company_name}</td>
+                        <td style={{ fontSize:11, color:'#6B7280' }}>{a.timestamp ? new Date(a.timestamp).toLocaleString() : '—'}</td>
+                        <td>{a.acknowledged ? <span style={{ color:'#16A34A', fontWeight:700 }}>✓</span> : <span style={{ color:'#EF4444' }}>✕</span>}</td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
+    </>
+  )
+}
+
+function NewIncidentModal({ companies, admins, onClose, onSaved }) {
+  const [companyId,   setCompanyId]   = useState('')
+  const [title,       setTitle]       = useState('')
+  const [description, setDescription] = useState('')
+  const [severity,    setSeverity]    = useState('medium')
+  const [assigneeId,  setAssigneeId]  = useState('')
+  const [loading,     setLoading]     = useState(false)
+  const [error,       setError]       = useState('')
+
+  const handleSave = async () => {
+    if (!title.trim()) return setError('Title required')
+    setLoading(true); setError('')
+    try {
+      await post(`${SA}/incidents`, {
+        company_id:  companyId  ? Number(companyId)  : null,
+        assignee_id: assigneeId ? Number(assigneeId) : null,
+        title:       title.trim(),
+        description: description.trim() || null,
+        severity,
+      })
+      onSaved?.()
+      onClose()
+    } catch (e) { setError(e.message) }
+    finally { setLoading(false) }
+  }
+
+  return (
+    <Modal title="New Incident" onClose={onClose}
+      footer={
+        <div style={{ display:'flex', gap:8 }}>
+          <button className="sa-btn secondary" onClick={onClose}>Cancel</button>
+          <button className="sa-btn primary" onClick={handleSave} disabled={loading}>
+            {loading ? 'Creating…' : 'Create Incident'}
+          </button>
+        </div>
+      }
+    >
+      <div style={{ display:'flex', flexDirection:'column', gap:12 }}>
+        {error && <Err msg={error} />}
+        <div>
+          <label className="sa-label">Title *</label>
+          <input className="sa-input" value={title} onChange={e => setTitle(e.target.value)} placeholder="Brief description of the incident" />
+        </div>
+        <div>
+          <label className="sa-label">Description</label>
+          <textarea className="sa-input" value={description} onChange={e => setDescription(e.target.value)} rows={3} placeholder="What happened, when, initial impact…" style={{ resize:'vertical' }} />
+        </div>
+        <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:12 }}>
+          <div>
+            <label className="sa-label">Severity</label>
+            <select className="sa-input" value={severity} onChange={e => setSeverity(e.target.value)}>
+              {Object.keys(INC_SEV).map(k => <option key={k} value={k}>{k}</option>)}
+            </select>
+          </div>
+          <div>
+            <label className="sa-label">Company</label>
+            <select className="sa-input" value={companyId} onChange={e => setCompanyId(e.target.value)}>
+              <option value="">None (platform-wide)</option>
+              {companies.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+            </select>
+          </div>
+        </div>
+        <div>
+          <label className="sa-label">Assignee</label>
+          <select className="sa-input" value={assigneeId} onChange={e => setAssigneeId(e.target.value)}>
+            <option value="">Unassigned</option>
+            {admins.filter(a => a.role === 'super_admin' || a.role === 'admin').map(a => (
+              <option key={a.id} value={a.id}>{a.name} ({a.role})</option>
+            ))}
+          </select>
+        </div>
+      </div>
+    </Modal>
+  )
+}
+
+
+// ─── Tier 4: SLA Performance Dashboard ───────────────────────────────────────
+
+function SLATab() {
+  const [subTab, setSubTab] = useState('leaderboard')
+  return (
+    <div>
+      <div style={{ display:'flex', gap:8, marginBottom:20 }}>
+        {[
+          { id:'leaderboard', label:'SLA Leaderboard'      },
+          { id:'anomaly',     label:'Anomaly Detection'    },
+        ].map(t => (
+          <button key={t.id}
+            className={`sa-btn ${subTab === t.id ? 'primary' : 'secondary'}`}
+            onClick={() => setSubTab(t.id)}>
+            {t.label}
+          </button>
+        ))}
+      </div>
+      {subTab === 'leaderboard' && <SLALeaderboard />}
+      {subTab === 'anomaly'     && <AnomalyDetectionPanel />}
+    </div>
+  )
+}
+
+function SLALeaderboard() {
+  const [data,    setData]    = useState(null)
+  const [loading, setLoading] = useState(true)
+  const [days,    setDays]    = useState(30)
+  const [error,   setError]   = useState('')
+
+  const load = useCallback(async () => {
+    setLoading(true); setError('')
+    try { setData(await get(`${SA}/sla/leaderboard?days=${days}`)) }
+    catch (e) { setError(e.message) }
+    finally { setLoading(false) }
+  }, [days])
+
+  useEffect(() => { load() }, [load])
+
+  if (loading) return <Spinner />
+  if (error)   return <Err msg={error} />
+  if (!data)   return null
+
+  const companies = data.companies || []
+  const avgScore  = companies.length ? Math.round(companies.reduce((s, c) => s + c.sla_score, 0) / companies.length) : 0
+  const avgAck    = companies.filter(c => c.avg_ack_minutes !== null).length
+    ? Math.round(companies.filter(c => c.avg_ack_minutes !== null).reduce((s, c) => s + Number(c.avg_ack_minutes), 0) / companies.filter(c => c.avg_ack_minutes !== null).length)
+    : null
+
+  const gradeCounts = { A: 0, B: 0, C: 0, D: 0, F: 0 }
+  companies.forEach(c => { if (gradeCounts[c.sla_grade] !== undefined) gradeCounts[c.sla_grade]++ })
+
+  return (
+    <>
+      {/* Period selector */}
+      <div style={{ display:'flex', gap:8, alignItems:'center', marginBottom:16 }}>
+        <span style={{ fontSize:13, color:'#6B7280', fontWeight:600 }}>Period:</span>
+        {[7, 14, 30, 60].map(d => (
+          <button key={d} className={`sa-btn sm ${days === d ? 'primary' : 'secondary'}`} onClick={() => setDays(d)}>{d}d</button>
+        ))}
+      </div>
+
+      {/* Fleet stats */}
+      <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fill, minmax(150px, 1fr))', gap:12, marginBottom:20 }}>
+        <div className="sa-stat" style={{ borderLeft:'4px solid #1D4ED8' }}>
+          <div className="sa-stat-label">Fleet Avg Score</div>
+          <div className="sa-stat-value" style={{ color: avgScore >= 75 ? '#059669' : avgScore >= 50 ? '#D97706' : '#DC2626' }}>{avgScore}%</div>
+        </div>
+        <div className="sa-stat" style={{ borderLeft:'4px solid #7C3AED' }}>
+          <div className="sa-stat-label">Avg Ack Time</div>
+          <div className="sa-stat-value" style={{ color:'#7C3AED' }}>{avgAck !== null ? `${avgAck}m` : '—'}</div>
+        </div>
+        {Object.entries(gradeCounts).map(([g, n]) => {
+          const gc = SLA_GRADE[g]
+          return (
+            <div key={g} className="sa-stat" style={{ borderLeft:`4px solid ${gc.border}` }}>
+              <div className="sa-stat-label">Grade {g}</div>
+              <div className="sa-stat-value" style={{ color: gc.text }}>{n}</div>
+            </div>
+          )
+        })}
+      </div>
+
+      {/* Leaderboard table */}
+      <div className="sa-card">
+        <h2 className="sa-card-title">Company SLA Leaderboard — {days}-day window</h2>
+        <div className="sa-table-wrap">
+          <table className="sa-table">
+            <thead><tr>
+              <th>#</th><th>Company</th><th>Grade</th><th>Score</th>
+              <th>Ack Rate</th><th>Avg Ack</th><th>Median Ack</th>
+              <th>Total Alerts</th><th>Unacked</th><th>Critical Acked</th>
+            </tr></thead>
+            <tbody>
+              {companies.length === 0
+                ? <tr><td colSpan={10} className="sa-empty">No data for this period</td></tr>
+                : companies.map((c, i) => (
+                  <tr key={c.company_id}>
+                    <td style={{ color:'#9CA3AF', fontSize:12 }}>{i + 1}</td>
+                    <td style={{ fontWeight:700 }}>{c.company_name}</td>
+                    <td><SlaGradeBadge grade={c.sla_grade} /></td>
+                    <td style={{ fontWeight:700, color: c.sla_score >= 75 ? '#059669' : c.sla_score >= 50 ? '#D97706' : '#DC2626' }}>
+                      {c.sla_score}%
+                    </td>
+                    <td style={{ textAlign:'center' }}>
+                      <span style={{ color: c.ack_rate >= 80 ? '#059669' : c.ack_rate >= 50 ? '#D97706' : '#DC2626', fontWeight:700 }}>
+                        {c.ack_rate}%
+                      </span>
+                    </td>
+                    <td style={{ textAlign:'center', color: c.avg_ack_minutes > 60 ? '#DC2626' : '#374151' }}>
+                      {c.avg_ack_minutes != null ? `${c.avg_ack_minutes}m` : <span style={{ color:'#9CA3AF' }}>—</span>}
+                    </td>
+                    <td style={{ textAlign:'center', color:'#6B7280' }}>
+                      {c.median_ack_minutes != null ? `${c.median_ack_minutes}m` : <span style={{ color:'#9CA3AF' }}>—</span>}
+                    </td>
+                    <td style={{ textAlign:'center' }}>{c.total_alerts}</td>
+                    <td style={{ textAlign:'center', color: c.unacked_alerts > 0 ? '#DC2626' : '#059669', fontWeight: c.unacked_alerts > 0 ? 700 : 400 }}>
+                      {c.unacked_alerts}
+                    </td>
+                    <td style={{ textAlign:'center' }}>
+                      {c.critical_total > 0
+                        ? <span style={{ color: c.critical_acked === c.critical_total ? '#059669' : '#DC2626' }}>
+                            {c.critical_acked}/{c.critical_total}
+                          </span>
+                        : <span style={{ color:'#9CA3AF' }}>—</span>
+                      }
+                    </td>
+                  </tr>
+                ))
+              }
+            </tbody>
+          </table>
+        </div>
+
+        {/* Score legend */}
+        <div style={{ marginTop:14, display:'flex', gap:12, flexWrap:'wrap' }}>
+          {Object.entries(SLA_GRADE).map(([g, s]) => (
+            <div key={g} style={{ display:'flex', alignItems:'center', gap:6, fontSize:12 }}>
+              <span style={{ background:s.bg, color:s.text, border:`1px solid ${s.border}`, borderRadius:4, padding:'1px 7px', fontWeight:700 }}>{g}</span>
+              <span style={{ color:'#6B7280' }}>{{ A:' ≥90%', B:' ≥75%', C:' ≥60%', D:' ≥40%', F:' <40%' }[g]}</span>
+            </div>
+          ))}
+        </div>
+      </div>
+    </>
+  )
+}
+
+function AnomalyDetectionPanel() {
+  const [data,      setData]      = useState(null)
+  const [loading,   setLoading]   = useState(false)
+  const [error,     setError]     = useState('')
+  const [window_d,  setWindowD]   = useState(7)
+  const [baseline,  setBaseline]  = useState(30)
+  const [threshold, setThreshold] = useState(2.0)
+
+  const load = useCallback(async () => {
+    setLoading(true); setError('')
+    try {
+      setData(await get(`${SA}/anomaly-detection?window=${window_d}&baseline=${baseline}&threshold=${threshold}`))
+    } catch (e) { setError(e.message) }
+    finally { setLoading(false) }
+  }, [window_d, baseline, threshold])
+
+  useEffect(() => { load() }, [load])
+
+  if (loading) return <Spinner />
+  if (error)   return <Err msg={error} />
+  if (!data)   return null
+
+  const { anomalies = [], all_companies = [], fleet_stats = {} } = data
+
+  return (
+    <>
+      {/* Controls */}
+      <div className="sa-card" style={{ marginBottom:16 }}>
+        <h2 className="sa-card-title">Statistical Anomaly Detection</h2>
+        <p style={{ fontSize:13, color:'#6B7280', margin:'0 0 14px' }}>
+          Compares each company's recent alert rate against the fleet average. Z-score &gt; {threshold} triggers an anomaly flag.
+        </p>
+        <div style={{ display:'flex', gap:12, flexWrap:'wrap', alignItems:'center' }}>
+          <div style={{ display:'flex', gap:8, alignItems:'center' }}>
+            <label style={{ fontSize:12, color:'#6B7280', fontWeight:600 }}>Recent window:</label>
+            {[3, 7, 14].map(d => (
+              <button key={d} className={`sa-btn sm ${window_d === d ? 'primary' : 'secondary'}`} onClick={() => setWindowD(d)}>{d}d</button>
+            ))}
+          </div>
+          <div style={{ display:'flex', gap:8, alignItems:'center' }}>
+            <label style={{ fontSize:12, color:'#6B7280', fontWeight:600 }}>Baseline:</label>
+            {[14, 30, 60].map(d => (
+              <button key={d} className={`sa-btn sm ${baseline === d ? 'primary' : 'secondary'}`} onClick={() => setBaseline(d)}>{d}d</button>
+            ))}
+          </div>
+          <div style={{ display:'flex', gap:8, alignItems:'center' }}>
+            <label style={{ fontSize:12, color:'#6B7280', fontWeight:600 }}>Z threshold:</label>
+            {[1.5, 2.0, 2.5, 3.0].map(t => (
+              <button key={t} className={`sa-btn sm ${threshold === t ? 'primary' : 'secondary'}`} onClick={() => setThreshold(t)}>{t}</button>
+            ))}
+          </div>
+          <button className="sa-btn sm secondary" onClick={load}>↻ Re-run</button>
+        </div>
+
+        {fleet_stats.n && (
+          <div style={{ marginTop:12, display:'flex', gap:16, fontSize:12, color:'#6B7280', flexWrap:'wrap' }}>
+            <span>Fleet size: <strong>{fleet_stats.n}</strong></span>
+            <span>Mean daily alerts: <strong>{fleet_stats.mean_daily}</strong></span>
+            <span>Std dev: <strong>{fleet_stats.std_daily}</strong></span>
+          </div>
+        )}
+      </div>
+
+      {anomalies.length === 0 ? (
+        <div style={{ background:'#F0FDF4', border:'1px solid #86EFAC', borderRadius:10, padding:24, textAlign:'center' }}>
+          <div style={{ fontSize:24, marginBottom:8 }}>✓</div>
+          <div style={{ fontWeight:700, color:'#15803D', fontSize:15, marginBottom:4 }}>No anomalies detected</div>
+          <div style={{ fontSize:13, color:'#6B7280' }}>All companies are within {threshold} standard deviations of the fleet average.</div>
+        </div>
+      ) : (
+        <>
+          <div style={{ background:'#FFF7ED', border:'1px solid #FCD34D', borderRadius:10, padding:'10px 16px', marginBottom:16, fontSize:13, color:'#92400E', fontWeight:600 }}>
+            ⚠ {anomalies.length} {anomalies.length === 1 ? 'company' : 'companies'} flagged as anomalous
+          </div>
+          <div style={{ display:'flex', flexDirection:'column', gap:10 }}>
+            {anomalies.map(a => (
+              <div key={a.company_id} className="sa-card" style={{ padding:14, borderLeft:`4px solid ${a.direction === 'spike' ? '#EF4444' : '#3B82F6'}` }}>
+                <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', gap:12, flexWrap:'wrap' }}>
+                  <div>
+                    <div style={{ display:'flex', gap:10, alignItems:'center', marginBottom:4 }}>
+                      <span style={{ fontWeight:800, fontSize:14 }}>{a.company_name}</span>
+                      <span style={{ fontSize:11, fontWeight:700, background: a.direction === 'spike' ? '#FEF2F2' : '#EFF6FF', color: a.direction === 'spike' ? '#DC2626' : '#1D4ED8', padding:'2px 8px', borderRadius:4 }}>
+                        {a.direction === 'spike' ? '▲ SPIKE' : '▼ QUIET'}
+                      </span>
+                      <span style={{ fontSize:12, color:'#6B7280' }}>Z = {a.z_score > 0 ? '+' : ''}{a.z_score}</span>
+                    </div>
+                    <div style={{ fontSize:12, color:'#6B7280', display:'flex', gap:16, flexWrap:'wrap' }}>
+                      <span>Recent ({window_d}d): <strong>{a.recent_daily}/day</strong></span>
+                      <span>Baseline ({baseline}d): <strong>{a.baseline_daily}/day</strong></span>
+                      <span>Fleet avg: <strong>{a.mean_daily}/day</strong></span>
+                      <span>Critical alerts: <strong style={{ color: a.recent_critical > 0 ? '#DC2626' : undefined }}>{a.recent_critical}</strong></span>
+                    </div>
+                  </div>
+                  <div style={{ textAlign:'right', flexShrink:0 }}>
+                    <div style={{ fontSize:20, fontWeight:900, color: a.direction === 'spike' ? '#DC2626' : '#3B82F6' }}>
+                      {Math.abs(a.z_score)}σ
+                    </div>
+                    <div style={{ fontSize:11, color:'#9CA3AF' }}>standard deviations</div>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+
+          {/* Full fleet mini-table */}
+          <div className="sa-card" style={{ marginTop:16 }}>
+            <h2 className="sa-card-title">All Companies — Alert Rate ({window_d}d)</h2>
+            <div className="sa-table-wrap">
+              <table className="sa-table">
+                <thead><tr>
+                  <th>Company</th><th>Recent /day</th><th>Baseline /day</th><th>Z-score</th><th>Critical</th><th>Status</th>
+                </tr></thead>
+                <tbody>
+                  {[...all_companies].sort((a, b) => Math.abs(b.z_score) - Math.abs(a.z_score)).map(r => (
+                    <tr key={r.company_id} style={{ background: r.anomaly ? (r.direction === 'spike' ? '#FFF5F5' : '#F5F8FF') : undefined }}>
+                      <td style={{ fontWeight: r.anomaly ? 700 : 400 }}>{r.company_name}</td>
+                      <td style={{ textAlign:'center' }}>{r.recent_daily}</td>
+                      <td style={{ textAlign:'center', color:'#9CA3AF' }}>{r.baseline_daily}</td>
+                      <td style={{ textAlign:'center', fontWeight:700, color: Math.abs(r.z_score) >= threshold ? (r.z_score > 0 ? '#DC2626' : '#1D4ED8') : '#374151' }}>
+                        {r.z_score > 0 ? '+' : ''}{r.z_score}
+                      </td>
+                      <td style={{ textAlign:'center', color: r.recent_critical > 0 ? '#DC2626' : undefined }}>{r.recent_critical}</td>
+                      <td>{r.anomaly
+                        ? <span style={{ color: r.direction === 'spike' ? '#DC2626' : '#1D4ED8', fontWeight:700, fontSize:11 }}>
+                            {r.direction === 'spike' ? '▲ Spike' : '▼ Quiet'}
+                          </span>
+                        : <span style={{ color:'#9CA3AF', fontSize:11 }}>Normal</span>
+                      }</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </>
+      )}
+    </>
+  )
+}
+
+
+// ─── Tier 3: Platform Health Monitor ─────────────────────────────────────────
+
+function PlatformHealthTab() {
+  const [data,    setData]    = useState(null)
+  const [loading, setLoading] = useState(true)
+  const [error,   setError]   = useState('')
+
+  const load = useCallback(async () => {
+    setLoading(true); setError('')
+    try { setData(await get(`${SA}/platform/health`)) }
+    catch (e) { setError(e.message) }
+    finally { setLoading(false) }
+  }, [])
+
+  useEffect(() => {
+    load()
+    const t = setInterval(load, 30000)
+    return () => clearInterval(t)
+  }, [load])
+
+  if (loading) return <Spinner />
+  if (error)   return <Err msg={error} />
+  if (!data)   return null
+
+  const pool   = data.db_pool || {}
+  const mods   = data.module_status || {}
+  const poolPct = pool.max_conn ? Math.round((pool.used / pool.max_conn) * 100) : 0
+
+  const vitals = [
+    { label: 'Active Sessions',      value: data.active_sessions,         color: '#1D4ED8' },
+    { label: 'Readings / Last Hour', value: data.readings_last_hour,      color: '#059669' },
+    { label: 'Alerts / Last Hour',   value: data.alerts_last_hour,        color: data.alerts_last_hour > 0 ? '#D97706' : '#059669' },
+    { label: 'Unacked Critical',     value: data.unacked_critical,        color: data.unacked_critical > 0 ? '#DC2626' : '#059669' },
+    { label: 'Audit Errors / 1h',    value: data.audit_errors_last_hour,  color: data.audit_errors_last_hour > 0 ? '#DC2626' : '#059669' },
+  ]
+
+  return (
+    <>
+      {/* Vitals strip */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(170px, 1fr))', gap: 12, marginBottom: 20 }}>
+        {vitals.map(v => (
+          <div key={v.label} className="sa-stat" style={{ borderLeft: `4px solid ${v.color}` }}>
+            <div className="sa-stat-label">{v.label}</div>
+            <div className="sa-stat-value" style={{ color: v.color }}>{v.value ?? '—'}</div>
+          </div>
+        ))}
+      </div>
+
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+        {/* DB Pool */}
+        <div className="sa-card">
+          <h2 className="sa-card-title">Database Connection Pool</h2>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+            {[
+              ['Min connections',  pool.min_conn],
+              ['Max connections',  pool.max_conn],
+              ['Currently in use', pool.used],
+              ['Free / waiting',   pool.free],
+            ].map(([label, val]) => (
+              <div key={label} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, padding: '6px 0', borderBottom: '1px solid #F3F4F6' }}>
+                <span style={{ color: '#6B7280' }}>{label}</span>
+                <span style={{ fontWeight: 700 }}>{val ?? '—'}</span>
+              </div>
+            ))}
+            {/* Pool utilisation bar */}
+            <div>
+              <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, color: '#6B7280', marginBottom: 4 }}>
+                <span>Pool utilisation</span>
+                <span style={{ fontWeight: 700, color: poolPct > 80 ? '#DC2626' : '#059669' }}>{poolPct}%</span>
+              </div>
+              <div style={{ height: 8, background: '#F3F4F6', borderRadius: 4, overflow: 'hidden' }}>
+                <div style={{ height: '100%', width: `${poolPct}%`, background: poolPct > 80 ? '#EF4444' : '#10B981', borderRadius: 4, transition: 'width 0.5s' }} />
+              </div>
+            </div>
+          </div>
+        </div>
+
+        {/* Module statuses */}
+        <div className="sa-card">
+          <h2 className="sa-card-title">Module Status</h2>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            {Object.entries(mods).map(([mod, status]) => {
+              const ok = status === 'ok' || status === 'connected'
+              return (
+                <div key={mod} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontSize: 13, padding: '6px 0', borderBottom: '1px solid #F3F4F6' }}>
+                  <span style={{ color: '#374151', fontWeight: 600, textTransform: 'capitalize' }}>{mod.replace(/_/g, ' ')}</span>
+                  <span style={{ display: 'flex', alignItems: 'center', gap: 6, color: ok ? '#059669' : '#DC2626', fontWeight: 700 }}>
+                    <span style={{ width: 8, height: 8, borderRadius: '50%', background: ok ? '#10B981' : '#EF4444', display: 'inline-block' }} />
+                    {ok ? 'OK' : String(status).slice(0, 30)}
+                  </span>
+                </div>
+              )
+            })}
+          </div>
+        </div>
+      </div>
+
+      {/* Server time */}
+      <div style={{ marginTop: 12, fontSize: 12, color: '#9CA3AF', textAlign: 'right' }}>
+        Server UTC: {data.server_time_utc ? new Date(data.server_time_utc).toLocaleString() : '—'}
+        {' · '}
+        <button className="sa-btn sm secondary" onClick={load} style={{ fontSize: 11 }}>↻ Refresh</button>
+      </div>
+    </>
+  )
+}
+
+
+// ─── Tier 3: Advanced Audit Explorer (upgrade) ────────────────────────────────
+// This overrides the existing AuditTab further up in this file — the switch
+// statement now routes 'audit' → AuditTab (old, kept) and only the new tab ids
+// route here. Actually we'll shadow-replace by defining NEW components for the
+// new tabs and leave existing AuditTab untouched. The real "advanced" audit is
+// available under a new sub-tab inside the existing AuditTab below — we add
+// a AdvancedAuditPanel sub-section inside the existing AuditTab by patching it.
+// For cleanliness, the cross-company analytics upgrade is a new component.
+
+function CrossCompanyAnalyticsPanel() {
+  const [activeMetric, setActiveMetric] = useState('alerts')
+  const [days,         setDays]         = useState(7)
+  const [topRows,      setTopRows]      = useState([])
+  const [platform,     setPlatform]     = useState(null)
+  const [compareIds,   setCompareIds]   = useState('')
+  const [compareData,  setCompareData]  = useState([])
+  const [loading,      setLoading]      = useState(false)
+  const [error,        setError]        = useState('')
+
+  const loadTop = useCallback(async () => {
+    setLoading(true); setError('')
+    try {
+      const [top, plat] = await Promise.all([
+        get(`${SA}/analytics/top-companies?metric=${activeMetric}&days=${days}&limit=10`),
+        get(`${SA}/analytics/platform?days=${days}`),
+      ])
+      setTopRows(top.rows || [])
+      setPlatform(plat)
+    } catch (e) { setError(e.message) }
+    finally { setLoading(false) }
+  }, [activeMetric, days])
+
+  useEffect(() => { loadTop() }, [loadTop])
+
+  const runCompare = async () => {
+    if (!compareIds.trim()) return
+    setLoading(true); setError('')
+    try {
+      const d = await get(`${SA}/analytics/compare?ids=${encodeURIComponent(compareIds)}&days=${days}`)
+      setCompareData(Array.isArray(d) ? d : [])
+    } catch (e) { setError(e.message) }
+    finally { setLoading(false) }
+  }
+
+  const METRICS = [
+    { id: 'alerts',   label: 'Most Alerts',   color: '#EF4444' },
+    { id: 'readings', label: 'Most Readings',  color: '#1D4ED8' },
+    { id: 'sessions', label: 'Most Sessions',  color: '#059669' },
+  ]
+  const metricColor = METRICS.find(m => m.id === activeMetric)?.color || '#1D4ED8'
+
+  return (
+    <>
+      {error && <Err msg={error} />}
+
+      {/* Controls */}
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 16, flexWrap: 'wrap' }}>
+        <span style={{ fontSize: 13, color: '#6B7280', fontWeight: 600 }}>Rank by:</span>
+        {METRICS.map(m => (
+          <button key={m.id}
+            className={`sa-btn sm ${activeMetric === m.id ? 'primary' : 'secondary'}`}
+            onClick={() => setActiveMetric(m.id)}>
+            {m.label}
+          </button>
+        ))}
+        <span style={{ marginLeft: 8, fontSize: 13, color: '#6B7280' }}>Period:</span>
+        {[7, 14, 30].map(d => (
+          <button key={d}
+            className={`sa-btn sm ${days === d ? 'primary' : 'secondary'}`}
+            onClick={() => setDays(d)}>
+            {d}d
+          </button>
+        ))}
+        <button className="sa-btn sm secondary" onClick={loadTop}>↻</button>
+      </div>
+
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginBottom: 16 }}>
+        {/* Top companies chart */}
+        <div className="sa-card">
+          <h2 className="sa-card-title">Top Companies — {METRICS.find(m => m.id === activeMetric)?.label} ({days}d)</h2>
+          {loading ? <Spinner /> : (
+            <div style={{ height: 260 }}>
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={topRows} layout="vertical" margin={{ left: 20, right: 20 }}>
+                  <CartesianGrid strokeDasharray="3 3" horizontal={false} />
+                  <XAxis type="number" tick={{ fontSize: 11 }} />
+                  <YAxis type="category" dataKey="name" tick={{ fontSize: 11 }} width={90} />
+                  <Tooltip formatter={v => [v, activeMetric]} />
+                  <Bar dataKey="value" fill={metricColor} radius={[0, 4, 4, 0]} />
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+          )}
+        </div>
+
+        {/* Platform alert trend */}
+        <div className="sa-card">
+          <h2 className="sa-card-title">Platform Alert Trend ({days}d)</h2>
+          {loading || !platform ? <Spinner /> : (
+            <div style={{ height: 260 }}>
+              <ResponsiveContainer width="100%" height="100%">
+                <LineChart data={platform.alert_trend || []} margin={{ top: 5, right: 10, left: 0, bottom: 5 }}>
+                  <CartesianGrid strokeDasharray="3 3" />
+                  <XAxis dataKey="day" tick={{ fontSize: 10 }} tickFormatter={d => d?.slice(5)} />
+                  <YAxis tick={{ fontSize: 11 }} />
+                  <Tooltip />
+                  <Line type="monotone" dataKey="total_alerts" stroke="#EF4444" dot={false} name="Total" />
+                  <Line type="monotone" dataKey="critical"     stroke="#DC2626" dot={false} strokeDasharray="4 2" name="Critical" />
+                  <Line type="monotone" dataKey="acknowledged" stroke="#10B981" dot={false} name="Acked" />
+                </LineChart>
+              </ResponsiveContainer>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Readings trend */}
+      {platform && (
+        <div className="sa-card" style={{ marginBottom: 16 }}>
+          <h2 className="sa-card-title">Sensor Readings & Admin Sessions ({days}d)</h2>
+          <div style={{ height: 200 }}>
+            <ResponsiveContainer width="100%" height="100%">
+              <LineChart margin={{ top: 5, right: 10, left: 0, bottom: 5 }}>
+                <CartesianGrid strokeDasharray="3 3" />
+                <XAxis dataKey="day" type="category" allowDuplicatedCategory={false}
+                  tick={{ fontSize: 10 }} tickFormatter={d => d?.slice(5)} />
+                <YAxis tick={{ fontSize: 11 }} />
+                <Tooltip />
+                <Line data={platform.reading_trend || []} type="monotone" dataKey="readings" stroke="#1D4ED8" dot={false} name="Readings" />
+                <Line data={platform.session_trend || []} type="monotone" dataKey="sessions" stroke="#7C3AED" dot={false} name="Sessions" />
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
+        </div>
+      )}
+
+      {/* Company comparison */}
+      <div className="sa-card">
+        <h2 className="sa-card-title">Company Side-by-Side Comparison</h2>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 14 }}>
+          <input className="sa-input" value={compareIds}
+            onChange={e => setCompareIds(e.target.value)}
+            placeholder="Company IDs, comma-separated  e.g. 1,2,3"
+            style={{ maxWidth: 300 }} />
+          <button className="sa-btn primary" onClick={runCompare} disabled={loading}>Compare</button>
+        </div>
+        {compareData.length > 0 && (
+          <div className="sa-table-wrap">
+            <table className="sa-table">
+              <thead><tr>
+                <th>Company</th>
+                <th>Alerts ({days}d)</th><th>Critical</th><th>Unacked Now</th>
+                <th>Readings ({days}d)</th><th>Uptime %</th>
+                <th>Subscribers</th><th>Admins</th><th>Last Reading</th>
+              </tr></thead>
+              <tbody>
+                {compareData.map(r => (
+                  <tr key={r.id}>
+                    <td><strong>{r.name}</strong>
+                      {!r.is_active && <Badge label="Inactive" type="inactive" />}
+                      {r.maintenance_mode && <Badge label="Maint" type="warning" />}
+                    </td>
+                    <td style={{ textAlign: 'center' }}>{r.alerts_period}</td>
+                    <td style={{ textAlign: 'center', color: r.critical_period > 0 ? '#DC2626' : undefined, fontWeight: r.critical_period > 0 ? 700 : undefined }}>{r.critical_period}</td>
+                    <td style={{ textAlign: 'center', color: r.unacked_now > 0 ? '#D97706' : undefined }}>{r.unacked_now}</td>
+                    <td style={{ textAlign: 'center' }}>{r.readings_period}</td>
+                    <td style={{ textAlign: 'center', color: r.uptime_pct < 50 ? '#DC2626' : r.uptime_pct < 80 ? '#D97706' : '#059669', fontWeight: 700 }}>{r.uptime_pct}%</td>
+                    <td style={{ textAlign: 'center' }}>{r.active_subscribers}</td>
+                    <td style={{ textAlign: 'center' }}>{r.admin_count}</td>
+                    <td style={{ fontSize: 12, color: '#6B7280' }}>{r.minutes_since_reading !== null ? fmtAge(r.minutes_since_reading) : 'never'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+        {compareData.length === 0 && !loading && (
+          <p style={{ color: '#9CA3AF', fontSize: 13, textAlign: 'center', padding: 20 }}>
+            Enter company IDs above and click Compare to see side-by-side metrics.
+          </p>
+        )}
+      </div>
+    </>
+  )
+}
+
+
+// ─── Tier 3: Templates & Rules Tab ────────────────────────────────────────────
+
+function TemplatesRulesTab() {
+  const [subTab, setSubTab] = useState('templates')
+  return (
+    <div>
+      <div style={{ display: 'flex', gap: 8, marginBottom: 20 }}>
+        {[
+          { id: 'templates', label: 'Parameter Templates' },
+          { id: 'rules',     label: 'Escalation Rules'    },
+          { id: 'crossanalytics', label: 'Cross-Company Analytics' },
+        ].map(t => (
+          <button key={t.id}
+            className={`sa-btn ${subTab === t.id ? 'primary' : 'secondary'}`}
+            onClick={() => setSubTab(t.id)}>
+            {t.label}
+          </button>
+        ))}
+      </div>
+      {subTab === 'templates'      && <ParameterTemplatesPanel />}
+      {subTab === 'rules'          && <EscalationRulesPanel />}
+      {subTab === 'crossanalytics' && <CrossCompanyAnalyticsPanel />}
+    </div>
+  )
+}
+
+
+function ParameterTemplatesPanel() {
+  const [templates,  setTemplates]  = useState([])
+  const [companies,  setCompanies]  = useState([])
+  const [loading,    setLoading]    = useState(true)
+  const [showForm,   setShowForm]   = useState(false)
+  const [toast,      setToast]      = useState('')
+  const [applyState, setApplyState] = useState({}) // { [tplId]: { company_id, loading } }
+
+  const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(''), 3500) }
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    try {
+      const [t, c] = await Promise.all([
+        get(`${SA}/parameter-templates`),
+        get(`${SA}/companies`),
+      ])
+      setTemplates(Array.isArray(t) ? t : [])
+      setCompanies(Array.isArray(c) ? c : [])
+    } catch { /* silent */ }
+    finally { setLoading(false) }
+  }, [])
+
+  useEffect(() => { load() }, [load])
+
+  const handleDelete = async (tpl) => {
+    if (!window.confirm(`Delete template "${tpl.name}"?`)) return
+    try {
+      await del(`${SA}/parameter-templates/${tpl.id}`)
+      showToast(`Template "${tpl.name}" deleted`)
+      load()
+    } catch (e) { alert(e.message) }
+  }
+
+  const handleApply = async (tpl) => {
+    const state = applyState[tpl.id] || {}
+    if (!state.company_id) return alert('Select a company first')
+    setApplyState(prev => ({ ...prev, [tpl.id]: { ...state, loading: true } }))
+    try {
+      const res = await post(`${SA}/parameter-templates/${tpl.id}/apply/${state.company_id}`, {})
+      showToast(`Applied: ${res.applied} params to ${res.company}, ${res.skipped} skipped (already existed)`)
+      setApplyState(prev => ({ ...prev, [tpl.id]: { company_id: '', loading: false } }))
+    } catch (e) {
+      alert(e.message)
+      setApplyState(prev => ({ ...prev, [tpl.id]: { ...state, loading: false } }))
+    }
+  }
+
+  return (
+    <>
+      {toast && <div style={{ position:'fixed', top:20, right:20, background:'#D1FAE5', color:'#065F46', padding:'10px 18px', borderRadius:8, fontWeight:600, fontSize:13, zIndex:2000 }}>{toast}</div>}
+
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
+        <div>
+          <h2 style={{ margin: 0, fontSize: 18, fontWeight: 800, color: '#1F2937' }}>Parameter Templates</h2>
+          <p style={{ margin: '4px 0 0', fontSize: 13, color: '#6B7280' }}>
+            Create reusable parameter sets. Apply them to any company in one click.
+          </p>
+        </div>
+        <button className="sa-btn primary" onClick={() => setShowForm(true)}>+ New Template</button>
+      </div>
+
+      {loading ? <Spinner /> : templates.length === 0 ? (
+        <div style={{ textAlign: 'center', padding: 40, color: '#9CA3AF' }}>
+          No templates yet. Create one to define a reusable set of sensor parameters.
+        </div>
+      ) : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+          {templates.map(tpl => {
+            const params = typeof tpl.params === 'string' ? JSON.parse(tpl.params) : (tpl.params || [])
+            const st     = applyState[tpl.id] || {}
+            return (
+              <div key={tpl.id} className="sa-card" style={{ padding: 16 }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12 }}>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 6 }}>
+                      <span style={{ fontWeight: 800, fontSize: 15, color: '#1F2937' }}>{tpl.name}</span>
+                      <span style={{ fontSize: 11, background: '#EFF6FF', color: '#1D4ED8', borderRadius: 4, padding: '2px 8px', fontWeight: 700 }}>
+                        {params.length} param{params.length !== 1 ? 's' : ''}
+                      </span>
+                    </div>
+                    {tpl.description && (
+                      <p style={{ fontSize: 13, color: '#6B7280', margin: '0 0 8px' }}>{tpl.description}</p>
+                    )}
+                    {/* Param chips */}
+                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                      {params.map((p, i) => (
+                        <span key={i} style={{ fontSize: 12, background: '#F3F4F6', borderRadius: 6, padding: '3px 10px', color: '#374151', fontWeight: 600 }}>
+                          {p.name}{p.unit ? ` (${p.unit})` : ''}{p.min_value != null ? ` ≥${p.min_value}` : ''}{p.max_value != null ? ` ≤${p.max_value}` : ''}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 6, alignItems: 'flex-end', flexShrink: 0 }}>
+                    <div style={{ display: 'flex', gap: 6 }}>
+                      <select className="sa-input" style={{ fontSize: 12, padding: '5px 8px', width: 160 }}
+                        value={st.company_id || ''}
+                        onChange={e => setApplyState(prev => ({ ...prev, [tpl.id]: { ...st, company_id: e.target.value } }))}>
+                        <option value="">Select company…</option>
+                        {companies.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+                      </select>
+                      <button className="sa-btn sm primary" onClick={() => handleApply(tpl)} disabled={st.loading || !st.company_id}>
+                        {st.loading ? '…' : '▶ Apply'}
+                      </button>
+                    </div>
+                    <button className="sa-btn sm danger" onClick={() => handleDelete(tpl)}>Delete</button>
+                    <span style={{ fontSize: 11, color: '#9CA3AF' }}>by {tpl.created_by_name || 'system'}</span>
+                  </div>
+                </div>
+              </div>
+            )
+          })}
+        </div>
+      )}
+
+      {showForm && <NewTemplateModal onClose={() => setShowForm(false)} onSaved={load} />}
+    </>
+  )
+}
+
+
+function NewTemplateModal({ onClose, onSaved }) {
+  const [name,    setName]    = useState('')
+  const [desc,    setDesc]    = useState('')
+  const [params,  setParams]  = useState([{ name: '', unit: '', min_value: '', max_value: '' }])
+  const [loading, setLoading] = useState(false)
+  const [error,   setError]   = useState('')
+
+  const addParam   = () => setParams(p => [...p, { name: '', unit: '', min_value: '', max_value: '' }])
+  const removeParam = (i) => setParams(p => p.filter((_, idx) => idx !== i))
+  const updateParam = (i, field, val) => setParams(p => p.map((row, idx) => idx === i ? { ...row, [field]: val } : row))
+
+  const handleSave = async () => {
+    if (!name.trim()) return setError('Template name required')
+    const filled = params.filter(p => p.name.trim())
+    if (!filled.length) return setError('Add at least one parameter')
+    setLoading(true); setError('')
+    try {
+      await post(`${SA}/parameter-templates`, {
+        name: name.trim(),
+        description: desc.trim() || null,
+        params: filled.map(p => ({
+          name:      p.name.trim(),
+          unit:      p.unit.trim() || null,
+          min_value: p.min_value !== '' ? parseFloat(p.min_value) : null,
+          max_value: p.max_value !== '' ? parseFloat(p.max_value) : null,
+        })),
+      })
+      onSaved?.()
+      onClose()
+    } catch (e) { setError(e.message) }
+    finally { setLoading(false) }
+  }
+
+  return (
+    <Modal title="New Parameter Template"
+      onClose={onClose}
+      footer={
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button className="sa-btn secondary" onClick={onClose}>Cancel</button>
+          <button className="sa-btn primary" onClick={handleSave} disabled={loading}>
+            {loading ? 'Saving…' : 'Save Template'}
+          </button>
+        </div>
+      }
+    >
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+        <div>
+          <label className="sa-label">Template Name *</label>
+          <input className="sa-input" value={name} onChange={e => setName(e.target.value)} placeholder="Cold Storage Basic" />
+        </div>
+        <div>
+          <label className="sa-label">Description</label>
+          <input className="sa-input" value={desc} onChange={e => setDesc(e.target.value)} placeholder="Standard params for cold storage facilities" />
+        </div>
+
+        {error && <Err msg={error} />}
+
+        <div>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+            <label className="sa-label" style={{ margin: 0 }}>Parameters</label>
+            <button className="sa-btn sm secondary" onClick={addParam}>+ Add</button>
+          </div>
+          {params.map((p, i) => (
+            <div key={i} style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 1fr 1fr auto', gap: 6, marginBottom: 6, alignItems: 'center' }}>
+              <input className="sa-input" placeholder="Name *" value={p.name} onChange={e => updateParam(i, 'name', e.target.value)} />
+              <input className="sa-input" placeholder="Unit" value={p.unit} onChange={e => updateParam(i, 'unit', e.target.value)} />
+              <input className="sa-input" placeholder="Min" type="number" value={p.min_value} onChange={e => updateParam(i, 'min_value', e.target.value)} />
+              <input className="sa-input" placeholder="Max" type="number" value={p.max_value} onChange={e => updateParam(i, 'max_value', e.target.value)} />
+              <button className="sa-btn sm danger" onClick={() => removeParam(i)} disabled={params.length === 1}>✕</button>
+            </div>
+          ))}
+        </div>
+      </div>
+    </Modal>
+  )
+}
+
+
+function EscalationRulesPanel() {
+  const [rules,     setRules]     = useState([])
+  const [companies, setCompanies] = useState([])
+  const [loading,   setLoading]   = useState(true)
+  const [showForm,  setShowForm]  = useState(false)
+  const [editRule,  setEditRule]  = useState(null)
+  const [toast,     setToast]     = useState('')
+  const [evalResult, setEvalResult] = useState(null)
+  const [evalLoading, setEvalLoading] = useState(false)
+
+  const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(''), 4000) }
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    try {
+      const [r, c] = await Promise.all([
+        get(`${SA}/escalation-rules`),
+        get(`${SA}/companies`),
+      ])
+      setRules(Array.isArray(r) ? r : [])
+      setCompanies(Array.isArray(c) ? c : [])
+    } catch { /* silent */ }
+    finally { setLoading(false) }
+  }, [])
+
+  useEffect(() => { load() }, [load])
+
+  const handleDelete = async (rule) => {
+    if (!window.confirm(`Delete rule "${rule.name}"?`)) return
+    try { await del(`${SA}/escalation-rules/${rule.id}`); showToast('Rule deleted'); load() }
+    catch (e) { alert(e.message) }
+  }
+
+  const runEval = async () => {
+    setEvalLoading(true); setEvalResult(null)
+    try {
+      const res = await post(`${SA}/escalation-rules/evaluate`, {})
+      setEvalResult(res)
+      showToast(`Evaluated ${res.evaluated} rules — ${res.triggered.length} triggered`)
+    } catch (e) { alert(e.message) }
+    finally { setEvalLoading(false) }
+  }
+
+  const SEV_COLOR = { critical: '#DC2626', warning: '#D97706', info: '#1D4ED8' }
+  const coMap = Object.fromEntries(companies.map(c => [c.id, c.name]))
+
+  return (
+    <>
+      {toast && <div style={{ position:'fixed', top:20, right:20, background:'#D1FAE5', color:'#065F46', padding:'10px 18px', borderRadius:8, fontWeight:600, fontSize:13, zIndex:2000 }}>{toast}</div>}
+
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 16 }}>
+        <div>
+          <h2 style={{ margin: 0, fontSize: 18, fontWeight: 800, color: '#1F2937' }}>Escalation Rules</h2>
+          <p style={{ margin: '4px 0 0', fontSize: 13, color: '#6B7280' }}>
+            Auto-trigger actions when unacked alerts stay open past a threshold.
+          </p>
+        </div>
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button className="sa-btn secondary" onClick={runEval} disabled={evalLoading}>
+            {evalLoading ? '…' : '▶ Evaluate Now'}
+          </button>
+          <button className="sa-btn primary" onClick={() => { setEditRule(null); setShowForm(true) }}>+ New Rule</button>
+        </div>
+      </div>
+
+      {/* Last eval result */}
+      {evalResult && (
+        <div className="sa-card" style={{ background: evalResult.triggered.length > 0 ? '#FFF7ED' : '#F0FDF4', border: `1px solid ${evalResult.triggered.length > 0 ? '#FCD34D' : '#86EFAC'}`, marginBottom: 16 }}>
+          <div style={{ fontWeight: 700, color: evalResult.triggered.length > 0 ? '#92400E' : '#15803D', marginBottom: 8 }}>
+            Evaluation result — {evalResult.evaluated} rules checked, {evalResult.triggered.length} triggered
+          </div>
+          {evalResult.triggered.map((t, i) => (
+            <div key={i} style={{ fontSize: 13, color: '#374151', padding: '4px 0', borderBottom: '1px solid rgba(0,0,0,0.05)' }}>
+              Rule <strong>{t.rule_name}</strong> → Alert #{t.alert_id} ({t.open_minutes}m open) — {t.webhook_status}
+            </div>
+          ))}
+          {evalResult.triggered.length === 0 && (
+            <div style={{ fontSize: 13, color: '#15803D' }}>No rules triggered — all alerts within thresholds.</div>
+          )}
+        </div>
+      )}
+
+      {loading ? <Spinner /> : rules.length === 0 ? (
+        <div style={{ textAlign: 'center', padding: 40, color: '#9CA3AF' }}>
+          No escalation rules yet. Create one to auto-fire actions on stale critical alerts.
+        </div>
+      ) : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          {rules.map(rule => (
+            <div key={rule.id} className="sa-card" style={{ padding: 14, borderLeft: `4px solid ${SEV_COLOR[rule.severity_filter] || '#6B7280'}`, opacity: rule.is_active ? 1 : 0.55 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12 }}>
+                <div style={{ flex: 1 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 4 }}>
+                    <span style={{ fontWeight: 800, fontSize: 14 }}>{rule.name}</span>
+                    {!rule.is_active && <Badge label="Disabled" type="inactive" />}
+                    <span style={{ fontSize: 12, color: SEV_COLOR[rule.severity_filter], fontWeight: 700, background: '#FEF2F2', padding: '2px 8px', borderRadius: 4 }}>
+                      {rule.severity_filter}
+                    </span>
+                  </div>
+                  <div style={{ fontSize: 12, color: '#6B7280', display: 'flex', gap: 16 }}>
+                    <span>Fires after <strong>{rule.threshold_minutes}min</strong> open</span>
+                    <span>Company: <strong>{rule.company_id ? coMap[rule.company_id] || `#${rule.company_id}` : 'All companies'}</strong></span>
+                    <span>Action: <strong>{rule.action_type}</strong>{rule.action_target ? ` → ${rule.action_target.slice(0, 40)}` : ''}</span>
+                    {rule.last_triggered_at && <span style={{ color: '#D97706' }}>Last: {new Date(rule.last_triggered_at).toLocaleString()}</span>}
+                  </div>
+                </div>
+                <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
+                  <button className="sa-btn sm secondary" onClick={() => { setEditRule(rule); setShowForm(true) }}>Edit</button>
+                  <button className="sa-btn sm danger" onClick={() => handleDelete(rule)}>Delete</button>
+                </div>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {showForm && (
+        <EscalationRuleModal
+          rule={editRule}
+          companies={companies}
+          onClose={() => setShowForm(false)}
+          onSaved={load}
+        />
+      )}
+    </>
+  )
+}
+
+
+function EscalationRuleModal({ rule, companies, onClose, onSaved }) {
+  const editing = !!rule
+  const [name,      setName]      = useState(rule?.name || '')
+  const [companyId, setCompanyId] = useState(rule?.company_id || '')
+  const [severity,  setSeverity]  = useState(rule?.severity_filter || 'critical')
+  const [threshold, setThreshold] = useState(rule?.threshold_minutes || 30)
+  const [actionType, setActionType] = useState(rule?.action_type || 'log')
+  const [actionTarget, setActionTarget] = useState(rule?.action_target || '')
+  const [isActive,  setIsActive]  = useState(rule?.is_active !== false)
+  const [loading,   setLoading]   = useState(false)
+  const [error,     setError]     = useState('')
+
+  const handleSave = async () => {
+    if (!name.trim()) return setError('Rule name required')
+    setLoading(true); setError('')
+    const body = {
+      name: name.trim(),
+      company_id:        companyId ? Number(companyId) : null,
+      severity_filter:   severity,
+      threshold_minutes: Number(threshold),
+      action_type:       actionType,
+      action_target:     actionTarget.trim() || null,
+      is_active:         isActive,
+    }
+    try {
+      if (editing) await patch(`${SA}/escalation-rules/${rule.id}`, body)
+      else         await post(`${SA}/escalation-rules`, body)
+      onSaved?.()
+      onClose()
+    } catch (e) { setError(e.message) }
+    finally { setLoading(false) }
+  }
+
+  return (
+    <Modal
+      title={editing ? `Edit Rule — ${rule.name}` : 'New Escalation Rule'}
+      onClose={onClose}
+      footer={
+        <div style={{ display: 'flex', gap: 8 }}>
+          <button className="sa-btn secondary" onClick={onClose}>Cancel</button>
+          <button className="sa-btn primary" onClick={handleSave} disabled={loading}>
+            {loading ? 'Saving…' : editing ? 'Update Rule' : 'Create Rule'}
+          </button>
+        </div>
+      }
+    >
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+        {error && <Err msg={error} />}
+        <div>
+          <label className="sa-label">Rule Name *</label>
+          <input className="sa-input" value={name} onChange={e => setName(e.target.value)} placeholder="Critical alert escalation" />
+        </div>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
+          <div>
+            <label className="sa-label">Company (blank = all)</label>
+            <select className="sa-input" value={companyId} onChange={e => setCompanyId(e.target.value)}>
+              <option value="">All companies</option>
+              {companies.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+            </select>
+          </div>
+          <div>
+            <label className="sa-label">Severity filter</label>
+            <select className="sa-input" value={severity} onChange={e => setSeverity(e.target.value)}>
+              <option value="critical">Critical</option>
+              <option value="warning">Warning</option>
+              <option value="info">Info</option>
+            </select>
+          </div>
+          <div>
+            <label className="sa-label">Fire after (minutes open)</label>
+            <input className="sa-input" type="number" min={1} value={threshold} onChange={e => setThreshold(e.target.value)} />
+          </div>
+          <div>
+            <label className="sa-label">Action type</label>
+            <select className="sa-input" value={actionType} onChange={e => setActionType(e.target.value)}>
+              <option value="log">Log only (audit)</option>
+              <option value="webhook">Webhook POST</option>
+            </select>
+          </div>
+        </div>
+        {actionType === 'webhook' && (
+          <div>
+            <label className="sa-label">Webhook URL</label>
+            <input className="sa-input" value={actionTarget} onChange={e => setActionTarget(e.target.value)} placeholder="https://hooks.example.com/notify" />
+          </div>
+        )}
+        <label style={{ display: 'flex', alignItems: 'center', gap: 8, cursor: 'pointer', fontSize: 13 }}>
+          <input type="checkbox" checked={isActive} onChange={e => setIsActive(e.target.checked)} />
+          Rule is active
+        </label>
+      </div>
+    </Modal>
+  )
+}
+
+
 // ─── Root ─────────────────────────────────────────────────────────────────────
 
 const TABS = [
-  { id: 'command',    label: 'Command Center', Icon: Radio           },
   { id: 'overview',   label: 'Overview',       Icon: LayoutDashboard },
   { id: 'companies',  label: 'Companies',      Icon: Building2       },
   { id: 'admins',     label: 'Admins',         Icon: Users           },
@@ -4925,6 +8005,12 @@ const TABS = [
   { id: 'sessions',   label: 'Sessions',       Icon: KeyRound        },
   { id: 'onboarding', label: 'Onboarding',     Icon: BookOpen        },
   { id: 'audit',      label: 'Audit Log',      Icon: ScrollText      },
+  { id: 'platform',   label: 'Platform Health',Icon: Server          },
+  { id: 'templates',    label: 'Templates & Rules', Icon: Zap          },
+  { id: 'incidents',   label: 'Incidents',        Icon: AlertTriangle },
+  { id: 'maintenance', label: 'Maintenance',       Icon: Clock         },
+  { id: 'sla',         label: 'SLA & Performance', Icon: Gauge         },
+  { id: 'command',     label: 'Command Center',    Icon: Radio         },
 ]
 
 export default function SuperAdmin() {
@@ -4936,6 +8022,11 @@ export default function SuperAdmin() {
   const [anomalyCount,  setAnomalyCount]  = useState(0)
 
   const username = sessionStorage.getItem('admin_username') || 'superadmin'
+
+  useEffect(() => {
+    document.title = 'SentinelEdge — Super Admin'
+    return () => { document.title = 'SentinelEdge — Admin Dashboard' }
+  }, [])
 
   // Poll pending approval count every 30 s for the sidebar badge
   useEffect(() => {
@@ -4978,7 +8069,7 @@ export default function SuperAdmin() {
 
   const handleLogout = () => {
     sessionStorage.removeItem('admin_token')
-    sessionStorage.removeItem('adminPassword')
+    sessionStorage.removeItem('adminVerified')
     sessionStorage.removeItem('admin_username')
     sessionStorage.removeItem('authenticated')
     navigate('/super-admin/login', { replace: true })
@@ -5006,7 +8097,12 @@ export default function SuperAdmin() {
       case 'sessions':  return <SessionsTab />
       case 'onboarding': return <OnboardingTab />
       case 'audit':      return <AuditTab />
-      default:          return null
+      case 'platform':    return <PlatformHealthTab />
+      case 'templates':   return <TemplatesRulesTab />
+      case 'incidents':   return <IncidentsTab />
+      case 'maintenance': return <MaintenanceTab />
+      case 'sla':         return <SLATab />
+      default:            return null
     }
   }
 

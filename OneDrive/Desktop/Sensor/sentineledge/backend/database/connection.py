@@ -1212,12 +1212,257 @@ def _run_migrations(pool: psycopg2.pool.ThreadedConnectionPool) -> None:
                 "CREATE INDEX IF NOT EXISTS idx_sub_sessions_expires ON subscriber_sessions(expires_at)"
             )
 
+            # Migration 47: parameter_templates — SA-created reusable threshold sets
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS parameter_templates (
+                    id          SERIAL PRIMARY KEY,
+                    name        TEXT NOT NULL UNIQUE,
+                    description TEXT,
+                    params      JSONB NOT NULL DEFAULT '[]',
+                    created_by  INTEGER REFERENCES admins(id) ON DELETE SET NULL,
+                    created_at  TIMESTAMPTZ DEFAULT NOW()
+                )
+                """
+            )
+
+            # Migration 48: escalation_rules — super-admin configurable alert escalation
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS escalation_rules (
+                    id                  SERIAL PRIMARY KEY,
+                    name                TEXT NOT NULL,
+                    company_id          INTEGER REFERENCES companies(id) ON DELETE CASCADE,
+                    severity_filter     TEXT NOT NULL DEFAULT 'critical',
+                    threshold_minutes   INTEGER NOT NULL DEFAULT 30,
+                    action_type         TEXT NOT NULL DEFAULT 'webhook',
+                    action_target       TEXT,
+                    is_active           BOOLEAN DEFAULT TRUE,
+                    last_triggered_at   TIMESTAMPTZ,
+                    created_at          TIMESTAMPTZ DEFAULT NOW()
+                )
+                """
+            )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_esc_rules_company ON escalation_rules(company_id)"
+            )
+
+            # Migration 49: audit_log.details — add missing column used by _log_audit helper
+            cur.execute(
+                "ALTER TABLE audit_log ADD COLUMN IF NOT EXISTS details TEXT"
+            )
+
+            # Migration 50: maintenance_windows — scheduled maintenance per company
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS maintenance_windows (
+                    id            SERIAL PRIMARY KEY,
+                    company_id    INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+                    start_at      TIMESTAMPTZ NOT NULL,
+                    end_at        TIMESTAMPTZ NOT NULL,
+                    reason        TEXT,
+                    created_by    INTEGER REFERENCES admins(id) ON DELETE SET NULL,
+                    created_at    TIMESTAMPTZ DEFAULT NOW(),
+                    is_cancelled  BOOLEAN DEFAULT FALSE
+                )
+                """
+            )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_mw_company ON maintenance_windows(company_id)"
+            )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_mw_start ON maintenance_windows(start_at)"
+            )
+
+            # Migration 51: incidents — incident management system
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS incidents (
+                    id           SERIAL PRIMARY KEY,
+                    company_id   INTEGER REFERENCES companies(id) ON DELETE SET NULL,
+                    title        TEXT NOT NULL,
+                    description  TEXT,
+                    severity     TEXT NOT NULL DEFAULT 'medium',
+                    status       TEXT NOT NULL DEFAULT 'open',
+                    assignee_id  INTEGER REFERENCES admins(id) ON DELETE SET NULL,
+                    created_by   INTEGER REFERENCES admins(id) ON DELETE SET NULL,
+                    resolved_at  TIMESTAMPTZ,
+                    created_at   TIMESTAMPTZ DEFAULT NOW(),
+                    updated_at   TIMESTAMPTZ DEFAULT NOW()
+                )
+                """
+            )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_incidents_company ON incidents(company_id)"
+            )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_incidents_status ON incidents(status)"
+            )
+
+            # Migration 52: incident_notes — timeline entries for each incident
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS incident_notes (
+                    id          SERIAL PRIMARY KEY,
+                    incident_id INTEGER NOT NULL REFERENCES incidents(id) ON DELETE CASCADE,
+                    author_id   INTEGER REFERENCES admins(id) ON DELETE SET NULL,
+                    note        TEXT NOT NULL,
+                    created_at  TIMESTAMPTZ DEFAULT NOW()
+                )
+                """
+            )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_inc_notes_incident ON incident_notes(incident_id)"
+            )
+
+            # Migration 53: incident_alerts — many-to-many link between incidents and alerts
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS incident_alerts (
+                    incident_id INTEGER NOT NULL REFERENCES incidents(id) ON DELETE CASCADE,
+                    alert_id    INTEGER NOT NULL REFERENCES alerts(id) ON DELETE CASCADE,
+                    linked_at   TIMESTAMPTZ DEFAULT NOW(),
+                    PRIMARY KEY (incident_id, alert_id)
+                )
+                """
+            )
+
+            # Migration 54: readings.company_id — multi-tenancy isolation for sensor data
+            cur.execute(
+                "ALTER TABLE readings ADD COLUMN IF NOT EXISTS company_id INTEGER REFERENCES companies(id)"
+            )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_readings_company_id ON readings(company_id)"
+            )
+            # Backfill runs in a background thread after startup to avoid blocking
+            # startup on large tables (see _backfill_readings_company_id below).
+
+            # Migration 55: notification_retry_queue — deferred retry for failed notifications
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS notification_retry_queue (
+                    id              SERIAL PRIMARY KEY,
+                    alert_id        INTEGER REFERENCES alerts(id) ON DELETE CASCADE,
+                    subscriber_id   INTEGER REFERENCES subscribers(id) ON DELETE CASCADE,
+                    channel         TEXT NOT NULL,
+                    attempt_count   INTEGER DEFAULT 0,
+                    next_retry_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    last_error      TEXT,
+                    payload         JSONB DEFAULT '{}',
+                    created_at      TIMESTAMPTZ DEFAULT NOW()
+                )
+                """
+            )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_retry_queue_next ON notification_retry_queue(next_retry_at)"
+            )
+
+            # Migration 56: impersonation_codes — one-time handoff codes replacing URL tokens
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS impersonation_codes (
+                    code        TEXT PRIMARY KEY,
+                    token       TEXT NOT NULL,
+                    admin_id    INTEGER REFERENCES admins(id) ON DELETE CASCADE,
+                    expires_at  TIMESTAMPTZ NOT NULL,
+                    used        INTEGER DEFAULT 0,
+                    created_at  TIMESTAMPTZ DEFAULT NOW()
+                )
+                """
+            )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_imp_codes_expires ON impersonation_codes(expires_at)"
+            )
+
+            # Migration 57: composite indexes for high-frequency multi-tenant queries
+            # idx_readings_company_ts is created by the background backfill thread
+            # (readings table can be 1M+ rows; CREATE INDEX must run outside migration tx).
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_alerts_company_ts "
+                "ON alerts(company_id, timestamp DESC)"
+            )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_sessions_token_exp "
+                "ON admin_sessions(token, expires_at)"
+            )
+
+            # Migration 58: app_settings — generic key-value store for runtime config
+            # Used for Pro-Server EX file path and column mappings set via the admin UI.
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS app_settings (
+                    key        TEXT PRIMARY KEY,
+                    value      TEXT NOT NULL DEFAULT '',
+                    updated_at TIMESTAMPTZ DEFAULT NOW()
+                )
+                """
+            )
+
         conn.commit()
     except Exception as exc:
         conn.rollback()
         logger.warning("Migration warning: %s", exc)
     finally:
         pool.putconn(conn)
+
+
+def _backfill_readings_company_id() -> None:
+    """Background thread: set company_id on legacy readings that have NULL.
+
+    Runs in batches of 10 000 rows to avoid a long-running lock on the
+    readings table, which has 1 M+ rows on production machines.
+    """
+    try:
+        pool = get_db_pool()
+        if pool is None:
+            return
+        conn = pool.getconn()
+        try:
+            first_id_rows = execute_read(
+                "SELECT id FROM companies ORDER BY id LIMIT 1"
+            )
+            if not first_id_rows:
+                return
+            first_company_id = first_id_rows[0]["id"]
+            total = 0
+            while True:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        """
+                        UPDATE readings
+                           SET company_id = %s
+                         WHERE id IN (
+                             SELECT id FROM readings
+                              WHERE company_id IS NULL
+                              LIMIT 10000
+                         )
+                        """,
+                        (first_company_id,),
+                    )
+                    updated = cur.rowcount
+                conn.commit()
+                if updated == 0:
+                    break
+                total += updated
+                time.sleep(0.1)  # yield briefly between batches
+            if total:
+                logger.info(
+                    "Backfill: set company_id on %d readings (company_id=%d)",
+                    total, first_company_id,
+                )
+
+            # Create the composite readings index now that backfill is done
+            with conn.cursor() as cur:
+                cur.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_readings_company_ts "
+                    "ON readings(company_id, timestamp DESC)"
+                )
+            conn.commit()
+            logger.info("Backfill: idx_readings_company_ts index created.")
+        finally:
+            pool.putconn(conn)
+    except Exception as exc:
+        logger.warning("_backfill_readings_company_id failed: %s", exc)
 
 
 def init_db() -> None:
@@ -1240,6 +1485,13 @@ def init_db() -> None:
         migrate_pins_to_bcrypt()  # idempotent: skips already-bcrypt rows
         logger.info("Database initialised (PostgreSQL).")
         MODULE_STATUS["database"] = "ok"
+
+        # Start backfill in background — does not block server startup
+        threading.Thread(
+            target=_backfill_readings_company_id,
+            daemon=True,
+            name="readings-company-backfill",
+        ).start()
     except Exception as exc:
         logger.exception("Failed to initialise database: %s", exc)
         MODULE_STATUS["database"] = f"error: {exc}"
@@ -1261,7 +1513,7 @@ def migrate_pins_to_bcrypt() -> None:
     # Late import to avoid circular import at module load time
     from utils.security import hash_pin, verify_pin  # noqa: F401
 
-    pool = get_db_pool()
+    get_db_pool()  # ensure pool is initialised
 
     # ── Admins ────────────────────────────────────────────────────────────────
     try:

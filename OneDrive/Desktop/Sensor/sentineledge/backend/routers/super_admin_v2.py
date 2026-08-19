@@ -26,11 +26,14 @@ New routes (supplements super_admin.py which is left untouched):
   GET    /api/super-admin/live-feed
 """
 
+import csv
+import io as _io
+import json
 from datetime import datetime, timezone, timedelta
-from typing import Optional
+from typing import Any, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 
 from database.connection import execute_read, execute_write
@@ -60,9 +63,25 @@ class _CompanyUpdateIn(BaseModel):
         return v.strip() if isinstance(v, str) else v
 
 
+def _enforce_password_strength(pwd: str) -> str:
+    """Raise ValueError if the password does not meet minimum complexity requirements."""
+    import re as _re
+    if len(pwd) < 10:
+        raise ValueError("Password must be at least 10 characters")
+    if not _re.search(r"[A-Z]", pwd):
+        raise ValueError("Password must contain at least one uppercase letter")
+    if not _re.search(r"[a-z]", pwd):
+        raise ValueError("Password must contain at least one lowercase letter")
+    if not _re.search(r"\d", pwd):
+        raise ValueError("Password must contain at least one number")
+    if not _re.search(r"[!@#$%^&*()_+\-=\[\]{};':\"\\|,.<>/?]", pwd):
+        raise ValueError("Password must contain at least one special character")
+    return pwd
+
+
 class _AdminCreateIn(BaseModel):
     name:       str = Field(min_length=2, max_length=50)
-    password:   str = Field(min_length=6, max_length=200)
+    password:   str = Field(min_length=10, max_length=200)
     role:       str = Field(default="sub")
     company_id: Optional[int] = None
 
@@ -71,14 +90,24 @@ class _AdminCreateIn(BaseModel):
     def strip_fields(cls, v):
         return v.strip() if isinstance(v, str) else v
 
+    @field_validator("password", mode="after")
+    @classmethod
+    def check_password_strength(cls, v):
+        return _enforce_password_strength(v)
+
 
 class _AdminPasswordIn(BaseModel):
-    new_password: str = Field(min_length=6, max_length=200)
+    new_password: str = Field(min_length=10, max_length=200)
 
     @field_validator("new_password", mode="before")
     @classmethod
     def strip_pwd(cls, v):
         return v.strip() if isinstance(v, str) else v
+
+    @field_validator("new_password", mode="after")
+    @classmethod
+    def check_password_strength(cls, v):
+        return _enforce_password_strength(v)
 
 
 class _AdminCompanyIn(BaseModel):
@@ -236,6 +265,11 @@ async def overview(
         total_subs       = execute_read("SELECT COUNT(*) AS cnt FROM subscribers WHERE is_active = 1 OR is_active IS NULL")[0]["cnt"]
         alerts_today     = execute_read("SELECT COUNT(*) AS cnt FROM alerts WHERE timestamp >= %s", (today,))[0]["cnt"]
         alerts_week      = execute_read("SELECT COUNT(*) AS cnt FROM alerts WHERE timestamp >= %s", (week,))[0]["cnt"]
+        pending_approvals = execute_read("SELECT COUNT(*) AS cnt FROM pending_approvals WHERE status = 'pending'")[0]["cnt"]
+        active_sessions  = execute_read("SELECT COUNT(*) AS cnt FROM admin_sessions WHERE expires_at > NOW()")[0]["cnt"]
+        readings_today   = execute_read("SELECT COUNT(*) AS cnt FROM readings WHERE timestamp >= %s", (today,))[0]["cnt"]
+        suspended_admins = execute_read("SELECT COUNT(*) AS cnt FROM admins WHERE is_active = 0")[0]["cnt"]
+        maintenance_cos  = execute_read("SELECT COUNT(*) AS cnt FROM companies WHERE COALESCE(maintenance_mode, 0) = 1")[0]["cnt"]
 
         company_rows = execute_read(
             """
@@ -249,17 +283,50 @@ async def overview(
             (today,),
         )
 
+        recent_alerts = execute_read(
+            """
+            SELECT a.id, a.parameter, a.value, a.severity, a.direction,
+                   a.timestamp::TEXT,
+                   COALESCE(c.name, 'Unassigned') AS company_name
+            FROM alerts a
+            LEFT JOIN companies c ON c.id = a.company_id
+            ORDER BY a.id DESC
+            LIMIT 6
+            """
+        )
+
+        pending_list = execute_read(
+            """
+            SELECT pa.id, pa.action_type, pa.payload, pa.created_at::TEXT,
+                   a.name  AS admin_name,
+                   co.name AS company_name
+            FROM pending_approvals pa
+            JOIN admins a ON a.id = pa.admin_id
+            LEFT JOIN companies co ON co.id = a.company_id
+            WHERE pa.status = 'pending'
+            ORDER BY pa.created_at DESC
+            LIMIT 5
+            """
+        )
+
         return {
-            "total_companies":  total_companies,
-            "active_admins":    active_admins,
-            "total_subscribers": total_subs,
-            "alerts_today":     alerts_today,
-            "alerts_week":      alerts_week,
-            "companies":        company_rows,
+            "total_companies":    total_companies,
+            "active_admins":      active_admins,
+            "total_subscribers":  total_subs,
+            "alerts_today":       alerts_today,
+            "alerts_week":        alerts_week,
+            "pending_approvals":  pending_approvals,
+            "active_sessions":    active_sessions,
+            "readings_today":     readings_today,
+            "suspended_admins":   suspended_admins,
+            "maintenance_companies": maintenance_cos,
+            "companies":          company_rows,
+            "recent_alerts":      recent_alerts,
+            "pending_list":       pending_list,
         }
     except Exception as exc:
         logger.error("overview failed: %s", exc)
-        return JSONResponse(status_code=500, content={"error": str(exc)})
+        logger.error("internal error: %s", exc, exc_info=True); return JSONResponse(status_code=500, content={"error": "An internal error occurred"})
 
 
 # ─── Companies ────────────────────────────────────────────────────────────────
@@ -289,12 +356,153 @@ async def update_company(
             return JSONResponse(status_code=422, content={"error": "No fields to update"})
         params.append(company_id)
         execute_write(f"UPDATE companies SET {', '.join(sets)} WHERE id = %s", tuple(params))
+        ip = request.client.host if request.client else "unknown"
+        _log_audit(_admin["id"], company_id, f"update_company:{company_id}", "company", "low",
+                   f"fields={','.join(sets)}", ip)
         return _get_company_or_404(company_id)
     except HTTPException:
         raise
     except Exception as exc:
         logger.error("update_company failed: %s", exc)
-        return JSONResponse(status_code=500, content={"error": str(exc)})
+        logger.error("internal error: %s", exc, exc_info=True); return JSONResponse(status_code=500, content={"error": "An internal error occurred"})
+
+
+@router.get("/companies/{company_id}/detail", summary="Full company detail — all data end-to-end")
+@limiter.limit("60/minute")
+async def get_company_detail(
+    company_id: int,
+    request: Request,
+    _admin: dict = Depends(require_super_admin),
+):
+    try:
+        today = _today_str()
+        week  = _week_str()
+
+        # Core company row
+        rows = execute_read(
+            """
+            SELECT c.id, c.name, c.slug, c.description,
+                   COALESCE(c.is_active, 0)         AS is_active,
+                   COALESCE(c.maintenance_mode, 0)  AS maintenance_mode,
+                   COALESCE(c.maintenance_reason,'') AS maintenance_reason,
+                   COALESCE(c.max_subscribers, 100) AS max_subscribers,
+                   COALESCE(c.max_devices, 10)       AS max_devices,
+                   COALESCE(c.allowed_channels,'sms,email,push') AS allowed_channels,
+                   c.created_at::TEXT,
+                   COALESCE(st.name,'Free')          AS tier_name,
+                   COALESCE(c.sms_used_this_month,0) AS sms_used,
+                   COALESCE(c.email_used_this_month,0) AS email_used,
+                   COALESCE(c.push_used_this_month,0)  AS push_used
+            FROM companies c
+            LEFT JOIN subscription_tiers st ON st.id = c.tier_id
+            WHERE c.id = %s
+            """,
+            (company_id,),
+        )
+        if not rows:
+            raise HTTPException(status_code=404, detail="Company not found")
+        company = rows[0]
+
+        # Admins
+        admins = execute_read(
+            """
+            SELECT id, name, role, email, COALESCE(is_active,1) AS is_active,
+                   last_login_at::TEXT, last_login_ip, created_at::TEXT
+            FROM admins WHERE company_id = %s ORDER BY id
+            """,
+            (company_id,),
+        )
+
+        # Subscribers
+        subscribers = execute_read(
+            """
+            SELECT id, name, phone, email, escalation_order,
+                   COALESCE(is_active,1) AS is_active, created_at::TEXT
+            FROM subscribers WHERE company_id = %s ORDER BY escalation_order
+            """,
+            (company_id,),
+        )
+
+        # Custom parameters
+        parameters = execute_read(
+            """
+            SELECT id, name, unit, min_value, max_value,
+                   COALESCE(is_active, false) AS is_active, created_at::TEXT
+            FROM company_parameters WHERE company_id = %s ORDER BY name
+            """,
+            (company_id,),
+        )
+
+        # Alert stats
+        alert_stats = execute_read(
+            """
+            SELECT
+                COUNT(*)                                                      AS total_alerts,
+                SUM(CASE WHEN timestamp >= %s THEN 1 ELSE 0 END)             AS alerts_today,
+                SUM(CASE WHEN timestamp >= %s THEN 1 ELSE 0 END)             AS alerts_week,
+                SUM(CASE WHEN severity='critical' THEN 1 ELSE 0 END)         AS critical,
+                SUM(CASE WHEN severity='warning'  THEN 1 ELSE 0 END)         AS warning,
+                SUM(CASE WHEN acknowledged=1 THEN 1 ELSE 0 END)              AS acknowledged
+            FROM alerts WHERE company_id = %s
+            """,
+            (today, week, company_id),
+        )
+
+        # Reading stats
+        reading_stats = execute_read(
+            """
+            SELECT
+                COUNT(*)                                           AS total_readings,
+                SUM(CASE WHEN timestamp >= %s THEN 1 ELSE 0 END)  AS readings_today,
+                MIN(temperature)::FLOAT                            AS min_temp,
+                MAX(temperature)::FLOAT                            AS max_temp,
+                ROUND(AVG(temperature)::NUMERIC, 2)::FLOAT         AS avg_temp,
+                MAX(timestamp)::TEXT                               AS last_reading_at
+            FROM readings WHERE company_id = %s
+            """,
+            (today, company_id),
+        )
+
+        # Active sessions for admins in this company
+        sessions = execute_read(
+            """
+            SELECT s.id, s.created_at::TEXT, s.expires_at::TEXT, s.last_used_at::TEXT,
+                   a.name AS admin_name, a.role AS admin_role
+            FROM admin_sessions s
+            JOIN admins a ON a.id = (
+                SELECT admin_id FROM admin_sessions WHERE token = s.token LIMIT 1
+            )
+            WHERE a.company_id = %s AND s.expires_at > NOW()
+            ORDER BY s.last_used_at DESC LIMIT 20
+            """,
+            (company_id,),
+        )
+
+        # Recent alerts (last 10)
+        recent_alerts = execute_read(
+            """
+            SELECT id, parameter, value, threshold, direction, severity,
+                   timestamp::TEXT, acknowledged
+            FROM alerts WHERE company_id = %s ORDER BY id DESC LIMIT 10
+            """,
+            (company_id,),
+        )
+
+        return {
+            "company":       company,
+            "admins":        admins,
+            "subscribers":   subscribers,
+            "parameters":    parameters,
+            "alert_stats":   alert_stats[0] if alert_stats else {},
+            "reading_stats": reading_stats[0] if reading_stats else {},
+            "sessions":      sessions,
+            "recent_alerts": recent_alerts,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("get_company_detail failed: %s", exc)
+        logger.error("internal error: %s", exc, exc_info=True); return JSONResponse(status_code=500, content={"error": "An internal error occurred"})
 
 
 @router.delete("/companies/{company_id}", summary="Delete a company")
@@ -313,13 +521,114 @@ async def delete_company(
                 status_code=409,
                 detail=f"Cannot delete: company has {sub_count} subscriber(s) and {adm_count} admin(s). Reassign or delete them first.",
             )
+        co = _get_company_or_404(company_id)
         execute_write("DELETE FROM companies WHERE id = %s", (company_id,))
+        ip = request.client.host if request.client else "unknown"
+        _log_audit(_admin["id"], None, f"delete_company:{company_id}", "company", "high",
+                   f"name={co['name']}", ip)
         return {"status": "deleted", "company_id": company_id}
     except HTTPException:
         raise
     except Exception as exc:
         logger.error("delete_company failed: %s", exc)
-        return JSONResponse(status_code=500, content={"error": str(exc)})
+        logger.error("internal error: %s", exc, exc_info=True); return JSONResponse(status_code=500, content={"error": "An internal error occurred"})
+
+
+@router.delete("/companies/{company_id}/offboard", summary="Full cascade offboard — deletes all company data")
+@limiter.limit("5/minute")
+async def offboard_company(
+    company_id: int,
+    request: Request,
+    _admin: dict = Depends(require_super_admin),
+):
+    """
+    Irreversibly purges all data belonging to the company in FK-safe order:
+    sessions → acks → delivery records → retry queue → alerts → readings
+    → subscribers → admin sessions → admins → company row.
+    """
+    try:
+        co = _get_company_or_404(company_id)
+
+        # 1. Subscriber sessions for subscribers of this company
+        execute_write(
+            """
+            DELETE FROM subscriber_sessions
+             WHERE subscriber_id IN (SELECT id FROM subscribers WHERE company_id = %s)
+            """,
+            (company_id,),
+        )
+
+        # 2. Notification acknowledgements for subscribers of this company
+        execute_write(
+            """
+            DELETE FROM notification_acknowledgements
+             WHERE subscriber_id IN (SELECT id FROM subscribers WHERE company_id = %s)
+            """,
+            (company_id,),
+        )
+
+        # 3. Delivery records for alerts of this company
+        execute_write(
+            """
+            DELETE FROM delivery_records
+             WHERE alert_id IN (SELECT id FROM alerts WHERE company_id = %s)
+            """,
+            (company_id,),
+        )
+
+        # 4. Retry queue entries for alerts of this company
+        execute_write(
+            """
+            DELETE FROM notification_retry_queue
+             WHERE alert_id IN (SELECT id FROM alerts WHERE company_id = %s)
+            """,
+            (company_id,),
+        )
+
+        # 5. Alerts
+        execute_write("DELETE FROM alerts WHERE company_id = %s", (company_id,))
+
+        # 6. Readings
+        execute_write("DELETE FROM readings WHERE company_id = %s", (company_id,))
+
+        # 7. Subscribers
+        execute_write("DELETE FROM subscribers WHERE company_id = %s", (company_id,))
+
+        # 8. Admin sessions for admins of this company
+        execute_write(
+            """
+            DELETE FROM admin_sessions
+             WHERE admin_id IN (
+                SELECT id FROM admins WHERE company_id = %s AND role != 'super_admin'
+             )
+            """,
+            (company_id,),
+        )
+
+        # 9. Admins (excluding super_admin, which has no company_id)
+        execute_write(
+            "DELETE FROM admins WHERE company_id = %s AND role != 'super_admin'",
+            (company_id,),
+        )
+
+        # 10. Company row
+        execute_write("DELETE FROM companies WHERE id = %s", (company_id,))
+
+        ip = request.client.host if request.client else "unknown"
+        _log_audit(
+            _admin["id"], None, f"offboard_company:{company_id}", "company", "critical",
+            f"full cascade delete — name={co['name']}", ip,
+        )
+        logger.warning(
+            "Company %d (%s) fully offboarded by super admin %d from %s",
+            company_id, co["name"], _admin["id"], ip,
+        )
+        return {"status": "offboarded", "company_id": company_id, "company_name": co["name"]}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("internal error: %s", exc, exc_info=True)
+        return JSONResponse(status_code=500, content={"error": "An internal error occurred"})
 
 
 @router.get("/companies/{company_id}/admins", summary="List admins for a company")
@@ -343,7 +652,7 @@ async def list_company_admins(
         raise
     except Exception as exc:
         logger.error("list_company_admins failed: %s", exc)
-        return JSONResponse(status_code=500, content={"error": str(exc)})
+        logger.error("internal error: %s", exc, exc_info=True); return JSONResponse(status_code=500, content={"error": "An internal error occurred"})
 
 
 # ─── Admins ───────────────────────────────────────────────────────────────────
@@ -379,7 +688,7 @@ async def list_admins(
         return rows
     except Exception as exc:
         logger.error("list_admins failed: %s", exc)
-        return JSONResponse(status_code=500, content={"error": str(exc)})
+        logger.error("internal error: %s", exc, exc_info=True); return JSONResponse(status_code=500, content={"error": "An internal error occurred"})
 
 
 @router.post("/admins", status_code=201, summary="Create an admin")
@@ -401,12 +710,15 @@ async def create_admin(
         if body.company_id:
             execute_write("UPDATE admins SET company_id = %s WHERE id = %s", (body.company_id, result.lastrowid))
         logger.info("Admin created by super_admin: name=%s role=%s", body.name, body.role)
+        ip = request.client.host if request.client else "unknown"
+        _log_audit(_admin["id"], body.company_id, f"create_admin:{body.name}", "admin", "medium",
+                   f"role={body.role}", ip)
         return _get_admin_or_404(result.lastrowid)
     except Exception as exc:
         if "unique" in str(exc).lower() or "duplicate" in str(exc).lower():
             return JSONResponse(status_code=409, content={"error": f"Admin '{body.name}' already exists"})
         logger.error("create_admin failed: %s", exc)
-        return JSONResponse(status_code=500, content={"error": str(exc)})
+        logger.error("internal error: %s", exc, exc_info=True); return JSONResponse(status_code=500, content={"error": "An internal error occurred"})
 
 
 @router.get("/admins/{admin_id}", summary="Admin detail")
@@ -441,7 +753,7 @@ async def get_admin_detail(
         raise
     except Exception as exc:
         logger.error("get_admin_detail failed: %s", exc)
-        return JSONResponse(status_code=500, content={"error": str(exc)})
+        logger.error("internal error: %s", exc, exc_info=True); return JSONResponse(status_code=500, content={"error": "An internal error occurred"})
 
 
 @router.patch("/admins/{admin_id}/toggle", summary="Toggle admin active status")
@@ -460,15 +772,18 @@ async def toggle_admin(
             (admin_id,),
         )
         updated = _get_admin_or_404(admin_id)
+        new_state = "disabled" if updated.get("is_active") == 0 else "enabled"
         if updated.get("is_active") == 0:
-            # Task 2A: kill all active sessions immediately on deactivation
             execute_write("DELETE FROM admin_sessions WHERE admin_id = %s", (admin_id,))
+        ip = request.client.host if request.client else "unknown"
+        _log_audit(_admin["id"], admin.get("company_id"), f"toggle_admin:{admin_id}",
+                   "admin", "medium", f"name={admin['name']} state={new_state}", ip)
         return updated
     except HTTPException:
         raise
     except Exception as exc:
         logger.error("toggle_admin failed: %s", exc)
-        return JSONResponse(status_code=500, content={"error": str(exc)})
+        logger.error("internal error: %s", exc, exc_info=True); return JSONResponse(status_code=500, content={"error": "An internal error occurred"})
 
 
 @router.put("/admins/{admin_id}/password", summary="Reset admin password")
@@ -485,15 +800,18 @@ async def reset_admin_password(
             "UPDATE admins SET password_hash = %s WHERE id = %s",
             (hash_pin(body.new_password), admin_id),
         )
-        # Invalidate all sessions for this admin
-        execute_write("DELETE FROM admin_sessions")
+        execute_write("DELETE FROM admin_sessions WHERE admin_id = %s", (admin_id,))
         logger.info("Password reset for admin id=%d", admin_id)
+        ip = request.client.host if request.client else "unknown"
+        a = _get_admin_or_404(admin_id)
+        _log_audit(_admin["id"], a.get("company_id"), f"reset_password:{admin_id}",
+                   "admin", "high", f"name={a['name']}", ip)
         return {"status": "updated", "admin_id": admin_id}
     except HTTPException:
         raise
     except Exception as exc:
         logger.error("reset_admin_password failed: %s", exc)
-        return JSONResponse(status_code=500, content={"error": str(exc)})
+        logger.error("internal error: %s", exc, exc_info=True); return JSONResponse(status_code=500, content={"error": "An internal error occurred"})
 
 
 @router.patch("/admins/{admin_id}/company", summary="Assign admin to company")
@@ -516,7 +834,7 @@ async def assign_admin_company(
         raise
     except Exception as exc:
         logger.error("assign_admin_company failed: %s", exc)
-        return JSONResponse(status_code=500, content={"error": str(exc)})
+        logger.error("internal error: %s", exc, exc_info=True); return JSONResponse(status_code=500, content={"error": "An internal error occurred"})
 
 
 @router.get("/admins/{admin_id}/activity", summary="Admin activity log")
@@ -545,7 +863,7 @@ async def admin_activity_log(
         raise
     except Exception as exc:
         logger.error("admin_activity_log failed: %s", exc)
-        return JSONResponse(status_code=500, content={"error": str(exc)})
+        logger.error("internal error: %s", exc, exc_info=True); return JSONResponse(status_code=500, content={"error": "An internal error occurred"})
 
 
 @router.get("/admins/{admin_id}/subscribers", summary="Subscribers under admin's company")
@@ -571,7 +889,7 @@ async def admin_subscribers(
         raise
     except Exception as exc:
         logger.error("admin_subscribers failed: %s", exc)
-        return JSONResponse(status_code=500, content={"error": str(exc)})
+        logger.error("internal error: %s", exc, exc_info=True); return JSONResponse(status_code=500, content={"error": "An internal error occurred"})
 
 
 # ─── Broadcast ────────────────────────────────────────────────────────────────
@@ -593,7 +911,7 @@ async def send_broadcast(
         return row[0] if row else {"status": "sent"}
     except Exception as exc:
         logger.error("send_broadcast failed: %s", exc)
-        return JSONResponse(status_code=500, content={"error": str(exc)})
+        logger.error("internal error: %s", exc, exc_info=True); return JSONResponse(status_code=500, content={"error": "An internal error occurred"})
 
 
 @router.get("/broadcast", summary="Broadcast history")
@@ -611,7 +929,7 @@ async def broadcast_history(
         return rows
     except Exception as exc:
         logger.error("broadcast_history failed: %s", exc)
-        return JSONResponse(status_code=500, content={"error": str(exc)})
+        logger.error("internal error: %s", exc, exc_info=True); return JSONResponse(status_code=500, content={"error": "An internal error occurred"})
 
 
 # ─── Sessions ─────────────────────────────────────────────────────────────────
@@ -648,7 +966,7 @@ async def active_sessions(
         return rows
     except Exception as exc:
         logger.error("active_sessions failed: %s", exc)
-        return JSONResponse(status_code=500, content={"error": str(exc)})
+        logger.error("internal error: %s", exc, exc_info=True); return JSONResponse(status_code=500, content={"error": "An internal error occurred"})
 
 
 # ─── Live Feed ────────────────────────────────────────────────────────────────
@@ -706,7 +1024,263 @@ async def live_feed(
         ]
     except Exception as exc:
         logger.error("live_feed failed: %s", exc)
-        return JSONResponse(status_code=500, content={"error": str(exc)})
+        logger.error("internal error: %s", exc, exc_info=True); return JSONResponse(status_code=500, content={"error": "An internal error occurred"})
+
+
+# ─── Tier 1: Audit log helper ─────────────────────────────────────────────────
+
+def _log_audit(admin_id: int, company_id, action: str, category: str,
+               severity: str, details: str, ip: str = "unknown"):
+    try:
+        execute_write(
+            """INSERT INTO audit_log (admin_id, company_id, action, category, severity, details, ip_address)
+               VALUES (%s, %s, %s, %s, %s, %s, %s)""",
+            (admin_id, company_id, action, category, severity, details, ip),
+        )
+    except Exception as exc:
+        logger.warning("_log_audit failed (non-fatal): %s", exc)
+
+
+# ─── Tier 1: Company Health Grid ─────────────────────────────────────────────
+
+@router.get("/companies/health", summary="Traffic-light health status for every company")
+@limiter.limit("60/minute")
+async def companies_health(
+    request: Request,
+    _admin: dict = Depends(require_super_admin),
+):
+    """
+    Returns one row per company with:
+      - last_reading_at + minutes_since_reading
+      - flatline flag (active & !maintenance & no reading >30 min)
+      - unack_critical / unack_warning / unack_total counts
+      - alerts_today count
+      - health: 'red' | 'yellow' | 'green'
+    """
+    try:
+        today = _today_str()
+        rows = execute_read(
+            """
+            SELECT
+                c.id,
+                c.name,
+                c.slug,
+                COALESCE(c.is_active,        1) AS is_active,
+                COALESCE(c.maintenance_mode, 0) AS maintenance_mode,
+                COALESCE(c.maintenance_reason, '') AS maintenance_reason,
+                MAX(r.timestamp)               AS last_reading_at,
+                EXTRACT(EPOCH FROM (NOW() - MAX(r.timestamp))) / 60
+                                               AS minutes_since_reading,
+                COUNT(DISTINCT CASE WHEN (a.acknowledged = 0 OR a.acknowledged IS NULL)
+                                     AND a.severity = 'critical' THEN a.id END) AS unack_critical,
+                COUNT(DISTINCT CASE WHEN (a.acknowledged = 0 OR a.acknowledged IS NULL)
+                                     AND a.severity = 'warning'  THEN a.id END) AS unack_warning,
+                COUNT(DISTINCT CASE WHEN (a.acknowledged = 0 OR a.acknowledged IS NULL) THEN a.id END) AS unack_total,
+                COUNT(DISTINCT CASE WHEN a.timestamp >= %s THEN a.id END) AS alerts_today,
+                COUNT(DISTINCT CASE WHEN (s.is_active IS NULL OR s.is_active = 1) THEN s.id END) AS subscriber_count,
+                COUNT(DISTINCT CASE WHEN adm.role != 'super_admin'
+                                     AND (adm.is_active IS NULL OR adm.is_active = 1) THEN adm.id END) AS admin_count
+            FROM companies c
+            LEFT JOIN readings    r   ON r.company_id = c.id
+            LEFT JOIN alerts      a   ON a.company_id = c.id
+            LEFT JOIN subscribers s   ON s.company_id = c.id
+            LEFT JOIN admins      adm ON adm.company_id = c.id
+            GROUP BY c.id, c.name, c.slug, c.is_active, c.maintenance_mode, c.maintenance_reason
+            ORDER BY c.id
+            """,
+            (today,),
+        )
+
+        result = []
+        for r in rows:
+            is_active  = bool(r.get("is_active", 1))
+            in_maint   = bool(r.get("maintenance_mode", 0))
+            unack_crit = int(r.get("unack_critical") or 0)
+            unack_warn = int(r.get("unack_warning")  or 0)
+            unack_tot  = int(r.get("unack_total")    or 0)
+            minutes    = float(r["minutes_since_reading"] or 0) if r.get("last_reading_at") else None
+            flatline   = is_active and not in_maint and (
+                r.get("last_reading_at") is None or (minutes is not None and minutes > 30)
+            )
+
+            if unack_crit > 0 or flatline:
+                health = "red"
+            elif unack_warn > 0 or in_maint:
+                health = "yellow"
+            else:
+                health = "green"
+
+            result.append({
+                "id":                    r["id"],
+                "name":                  r["name"],
+                "slug":                  r["slug"],
+                "is_active":             is_active,
+                "maintenance_mode":      in_maint,
+                "maintenance_reason":    r.get("maintenance_reason", ""),
+                "last_reading_at":       str(r["last_reading_at"]) if r.get("last_reading_at") else None,
+                "minutes_since_reading": round(minutes, 1) if minutes is not None else None,
+                "flatline":              flatline,
+                "unack_critical":        unack_crit,
+                "unack_warning":         unack_warn,
+                "unack_total":           unack_tot,
+                "alerts_today":          int(r.get("alerts_today") or 0),
+                "subscriber_count":      int(r.get("subscriber_count") or 0),
+                "admin_count":           int(r.get("admin_count") or 0),
+                "health":                health,
+            })
+
+        return result
+    except Exception as exc:
+        logger.error("companies_health failed: %s", exc)
+        logger.error("internal error: %s", exc, exc_info=True); return JSONResponse(status_code=500, content={"error": "An internal error occurred"})
+
+
+# ─── Tier 1: Cross-company alert list (AlertsTab) ────────────────────────────
+
+@router.get("/alerts", summary="All alerts across all companies")
+@limiter.limit("60/minute")
+async def list_all_alerts(
+    request: Request,
+    limit: int = 100,
+    company_id: Optional[int] = None,
+    severity:   Optional[str] = None,
+    _admin: dict = Depends(require_super_admin),
+):
+    try:
+        conditions, params = [], []
+        if company_id:
+            conditions.append("a.company_id = %s"); params.append(company_id)
+        if severity:
+            conditions.append("a.severity = %s"); params.append(severity.lower())
+        where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+        params.append(limit)
+        rows = execute_read(
+            f"""
+            SELECT a.id, a.parameter, a.value, a.threshold, a.direction, a.severity,
+                   COALESCE(a.acknowledged, 0) AS acknowledged,
+                   a.timestamp::TEXT,
+                   c.id   AS company_id,
+                   c.name AS company_name
+            FROM alerts a
+            JOIN companies c ON c.id = a.company_id
+            {where}
+            ORDER BY a.id DESC
+            LIMIT %s
+            """,
+            tuple(params),
+        )
+        return rows
+    except Exception as exc:
+        logger.error("list_all_alerts failed: %s", exc)
+        logger.error("internal error: %s", exc, exc_info=True); return JSONResponse(status_code=500, content={"error": "An internal error occurred"})
+
+
+# ─── Tier 1: Alert Triage Board ──────────────────────────────────────────────
+
+@router.get("/alerts/triage", summary="Cross-company triage feed — unacked critical first")
+@limiter.limit("60/minute")
+async def alerts_triage(
+    request: Request,
+    severity:   Optional[str] = None,
+    company_id: Optional[int] = None,
+    unack_only: bool = False,
+    limit: int = 200,
+    _admin: dict = Depends(require_super_admin),
+):
+    """
+    Returns alerts sorted by urgency:
+      1. Unacknowledged critical
+      2. Unacknowledged warning
+      3. Everything else (descending by time)
+    Includes minutes_open (SLA age) for each alert.
+    """
+    try:
+        conditions, params = [], []
+        if severity:
+            conditions.append("a.severity = %s"); params.append(severity.lower())
+        if company_id:
+            conditions.append("a.company_id = %s"); params.append(company_id)
+        if unack_only:
+            conditions.append("(a.acknowledged = 0 OR a.acknowledged IS NULL)")
+        where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+        params.append(limit)
+
+        rows = execute_read(
+            f"""
+            SELECT
+                a.id,
+                a.parameter,
+                a.value,
+                a.threshold,
+                a.direction,
+                a.severity,
+                a.timestamp::TEXT                           AS timestamp,
+                COALESCE(a.acknowledged, 0)                AS acknowledged,
+                a.acknowledged_at::TEXT                    AS acknowledged_at,
+                EXTRACT(EPOCH FROM (NOW() - a.timestamp)) / 60 AS minutes_open,
+                c.id    AS company_id,
+                c.name  AS company_name,
+                c.slug  AS company_slug
+            FROM alerts a
+            JOIN companies c ON c.id = a.company_id
+            {where}
+            ORDER BY
+                CASE WHEN COALESCE(a.acknowledged, 0) = 0 THEN 0 ELSE 1 END,
+                CASE a.severity WHEN 'critical' THEN 0 WHEN 'warning' THEN 1 ELSE 2 END,
+                a.timestamp DESC
+            LIMIT %s
+            """,
+            tuple(params),
+        )
+
+        result = []
+        for r in rows:
+            result.append({
+                **{k: v for k, v in r.items() if k != "minutes_open"},
+                "acknowledged":  bool(r.get("acknowledged", 0)),
+                "minutes_open":  round(float(r.get("minutes_open") or 0), 1),
+            })
+        return result
+    except Exception as exc:
+        logger.error("alerts_triage failed: %s", exc)
+        logger.error("internal error: %s", exc, exc_info=True); return JSONResponse(status_code=500, content={"error": "An internal error occurred"})
+
+
+# ─── Tier 1: Super Admin Acknowledge Alert ────────────────────────────────────
+
+@router.post("/alerts/{alert_id}/acknowledge", summary="Super admin acknowledge any company's alert")
+@limiter.limit("30/minute")
+async def sa_acknowledge_alert(
+    alert_id: int,
+    request: Request,
+    _admin: dict = Depends(require_super_admin),
+):
+    try:
+        rows = execute_read(
+            "SELECT id, company_id, severity FROM alerts WHERE id = %s", (alert_id,)
+        )
+        if not rows:
+            raise HTTPException(status_code=404, detail=f"Alert {alert_id} not found")
+        alert = rows[0]
+        execute_write(
+            """UPDATE alerts
+               SET acknowledged = 1, acknowledged_at = NOW(), acknowledged_by = %s
+               WHERE id = %s""",
+            (_admin.get("name", "super_admin"), alert_id),
+        )
+        ip = request.client.host if request.client else "unknown"
+        _log_audit(
+            _admin["id"], alert["company_id"],
+            f"ack_alert:{alert_id}", "alerts", "medium",
+            f"alert_id={alert_id} severity={alert['severity']}",
+            ip,
+        )
+        return {"status": "acknowledged", "alert_id": alert_id}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("sa_acknowledge_alert failed: %s", exc)
+        logger.error("internal error: %s", exc, exc_info=True); return JSONResponse(status_code=500, content={"error": "An internal error occurred"})
 
 
 # ─── Task 1 (Phase 4): Severity-based channel routing ────────────────────────
@@ -736,7 +1310,7 @@ async def get_severity_routing(
         return rows
     except Exception as exc:
         logger.error("get_severity_routing failed: %s", exc)
-        return JSONResponse(status_code=500, content={"error": str(exc)})
+        logger.error("internal error: %s", exc, exc_info=True); return JSONResponse(status_code=500, content={"error": "An internal error occurred"})
 
 
 @router.patch(
@@ -779,7 +1353,7 @@ async def update_severity_routing(
         return {"status": "updated", "company_id": company_id, "severity": severity}
     except Exception as exc:
         logger.error("update_severity_routing failed: %s", exc)
-        return JSONResponse(status_code=500, content={"error": str(exc)})
+        logger.error("internal error: %s", exc, exc_info=True); return JSONResponse(status_code=500, content={"error": "An internal error occurred"})
 
 
 # ─── Task 2 (Phase 4): Escalation Policy ─────────────────────────────────────
@@ -822,7 +1396,7 @@ async def get_escalation_policy(
         return {"company_id": company_id, **r}
     except Exception as exc:
         logger.error("get_escalation_policy failed: %s", exc)
-        return JSONResponse(status_code=500, content={"error": str(exc)})
+        logger.error("internal error: %s", exc, exc_info=True); return JSONResponse(status_code=500, content={"error": "An internal error occurred"})
 
 
 @router.patch("/escalation/policy/{company_id}", summary="Update escalation policy for a company")
@@ -857,7 +1431,7 @@ async def update_escalation_policy(
         return {"status": "updated", "company_id": company_id, "changes": updates}
     except Exception as exc:
         logger.error("update_escalation_policy failed: %s", exc)
-        return JSONResponse(status_code=500, content={"error": str(exc)})
+        logger.error("internal error: %s", exc, exc_info=True); return JSONResponse(status_code=500, content={"error": "An internal error occurred"})
 
 
 @router.get("/escalation/log/{alert_id}", summary="Get policy escalation log for an alert")
@@ -885,7 +1459,7 @@ async def get_escalation_log(
         return rows
     except Exception as exc:
         logger.error("get_escalation_log failed: %s", exc)
-        return JSONResponse(status_code=500, content={"error": str(exc)})
+        logger.error("internal error: %s", exc, exc_info=True); return JSONResponse(status_code=500, content={"error": "An internal error occurred"})
 
 
 # ─── Task 5: Alert unacknowledge ──────────────────────────────────────────────
@@ -1562,7 +2136,7 @@ async def fcm_health(
 
     except Exception as exc:
         logger.error("fcm_health failed: %s", exc)
-        return JSONResponse(status_code=500, content={"error": str(exc)})
+        logger.error("internal error: %s", exc, exc_info=True); return JSONResponse(status_code=500, content={"error": "An internal error occurred"})
 
 
 # ─── Stale FCM Token Cleanup (manual trigger) ─────────────────────────────
@@ -1669,4 +2243,1741 @@ async def clear_stale_fcm_tokens(
         raise
     except Exception as exc:
         logger.error("clear_stale_fcm_tokens failed: %s", exc)
-        return JSONResponse(status_code=500, content={"error": str(exc)})
+        logger.error("internal error: %s", exc, exc_info=True); return JSONResponse(status_code=500, content={"error": "An internal error occurred"})
+
+
+# ─── Tier 2: Subscriber Coverage Check ───────────────────────────────────────
+
+@router.get("/subscriber-coverage", summary="Companies with missing/low subscriber coverage")
+@limiter.limit("60/minute")
+async def subscriber_coverage(
+    request: Request,
+    _admin: dict = Depends(require_super_admin),
+):
+    """
+    Returns companies where active subscriber count < 2.
+    - 0 subscribers → critical  (alert will reach no one)
+    - 1 subscriber  → warning   (no failover if primary unreachable)
+    """
+    try:
+        rows = execute_read(
+            """
+            SELECT c.id, c.name, c.slug,
+                   COALESCE(c.is_active, 1)        AS is_active,
+                   COALESCE(c.maintenance_mode, 0) AS maintenance_mode,
+                   COUNT(s.id)                     AS subscriber_count
+            FROM companies c
+            LEFT JOIN subscribers s
+                   ON s.company_id = c.id
+                  AND (s.is_active IS NULL OR s.is_active = 1)
+            GROUP BY c.id, c.name, c.slug, c.is_active, c.maintenance_mode
+            HAVING COUNT(s.id) < 2
+            ORDER BY COUNT(s.id), c.name
+            """
+        )
+        result = []
+        for r in rows:
+            result.append({
+                **r,
+                "risk_level": "critical" if int(r["subscriber_count"] or 0) == 0 else "warning",
+                "risk_label": "No subscribers — alerts reach nobody"
+                              if int(r["subscriber_count"] or 0) == 0
+                              else "Only 1 subscriber — no failover",
+            })
+        return result
+    except Exception as exc:
+        logger.error("subscriber_coverage failed: %s", exc)
+        logger.error("internal error: %s", exc, exc_info=True); return JSONResponse(status_code=500, content={"error": "An internal error occurred"})
+
+
+# ─── Tier 2: Bulk Company Operations ─────────────────────────────────────────
+
+class _BulkCompanyIn(BaseModel):
+    ids:    list[int] = Field(min_length=1)
+    action: str       # enable | disable | maintenance_on | maintenance_off
+
+    @field_validator("action")
+    @classmethod
+    def check_action(cls, v):
+        if v not in ("enable", "disable", "maintenance_on", "maintenance_off"):
+            raise ValueError("action must be enable | disable | maintenance_on | maintenance_off")
+        return v
+
+
+@router.post("/companies/bulk", summary="Bulk enable / disable / maintenance for multiple companies")
+@limiter.limit("20/minute")
+async def bulk_company_action(
+    body: _BulkCompanyIn,
+    request: Request,
+    _admin: dict = Depends(require_super_admin),
+):
+    try:
+        if not body.ids:
+            return JSONResponse(status_code=422, content={"error": "No company IDs provided"})
+
+        placeholders = ", ".join(["%s"] * len(body.ids))
+
+        if body.action == "enable":
+            execute_write(f"UPDATE companies SET is_active = 1 WHERE id IN ({placeholders})", tuple(body.ids))
+        elif body.action == "disable":
+            execute_write(f"UPDATE companies SET is_active = 0 WHERE id IN ({placeholders})", tuple(body.ids))
+        elif body.action == "maintenance_on":
+            execute_write(f"UPDATE companies SET maintenance_mode = 1 WHERE id IN ({placeholders})", tuple(body.ids))
+        elif body.action == "maintenance_off":
+            execute_write(f"UPDATE companies SET maintenance_mode = 0, maintenance_reason = NULL WHERE id IN ({placeholders})", tuple(body.ids))
+
+        ip = request.client.host if request.client else "unknown"
+        _log_audit(
+            _admin["id"], None,
+            f"bulk_{body.action}", "company", "medium",
+            f"ids={body.ids}", ip,
+        )
+        return {"status": "ok", "action": body.action, "affected": len(body.ids), "ids": body.ids}
+    except Exception as exc:
+        logger.error("bulk_company_action failed: %s", exc)
+        logger.error("internal error: %s", exc, exc_info=True); return JSONResponse(status_code=500, content={"error": "An internal error occurred"})
+
+
+# ─── Tier 2: CSV Exports ──────────────────────────────────────────────────────
+
+import csv
+import io as _io
+from fastapi.responses import StreamingResponse
+
+
+@router.get("/export/companies.csv", summary="Download all companies as CSV")
+@limiter.limit("10/minute")
+async def export_companies_csv(
+    request: Request,
+    _admin: dict = Depends(require_super_admin),
+):
+    try:
+        rows = execute_read(
+            """
+            SELECT c.id, c.name, c.slug,
+                   COALESCE(c.is_active, 1)        AS is_active,
+                   COALESCE(c.maintenance_mode, 0) AS maintenance_mode,
+                   COALESCE(st.name, 'Free')        AS tier,
+                   c.max_subscribers, c.max_devices, c.allowed_channels,
+                   c.created_at::TEXT,
+                   COUNT(DISTINCT a.id)             AS admin_count,
+                   COUNT(DISTINCT s.id)             AS subscriber_count,
+                   COUNT(DISTINCT al.id)            AS total_alerts
+            FROM companies c
+            LEFT JOIN subscription_tiers st ON st.id = c.tier_id
+            LEFT JOIN admins      a  ON a.company_id  = c.id AND a.role != 'super_admin'
+            LEFT JOIN subscribers s  ON s.company_id  = c.id
+            LEFT JOIN alerts      al ON al.company_id = c.id
+            GROUP BY c.id, c.name, c.slug, c.is_active, c.maintenance_mode,
+                     st.name, c.max_subscribers, c.max_devices, c.allowed_channels, c.created_at
+            ORDER BY c.id
+            """
+        )
+        buf = _io.StringIO()
+        w = csv.writer(buf)
+        w.writerow(["ID", "Name", "Slug", "Active", "Maintenance", "Tier",
+                    "Max Subscribers", "Max Devices", "Channels",
+                    "Admins", "Subscribers", "Total Alerts", "Created At"])
+        for r in rows:
+            w.writerow([r["id"], r["name"], r["slug"], bool(r["is_active"]),
+                        bool(r["maintenance_mode"]), r["tier"],
+                        r["max_subscribers"], r["max_devices"], r["allowed_channels"],
+                        r["admin_count"], r["subscriber_count"], r["total_alerts"], r["created_at"]])
+        buf.seek(0)
+        return StreamingResponse(
+            iter([buf.getvalue()]),
+            media_type="text/csv",
+            headers={"Content-Disposition": 'attachment; filename="companies.csv"'},
+        )
+    except Exception as exc:
+        logger.error("export_companies_csv failed: %s", exc)
+        logger.error("internal error: %s", exc, exc_info=True); return JSONResponse(status_code=500, content={"error": "An internal error occurred"})
+
+
+@router.get("/export/alerts.csv", summary="Download alerts as CSV")
+@limiter.limit("10/minute")
+async def export_alerts_csv(
+    request: Request,
+    days: int = 7,
+    _admin: dict = Depends(require_super_admin),
+):
+    try:
+        rows = execute_read(
+            """
+            SELECT a.id, c.name AS company, a.parameter, a.value, a.threshold,
+                   a.direction, a.severity,
+                   COALESCE(a.acknowledged, 0) AS acknowledged,
+                   a.acknowledged_at::TEXT,
+                   a.timestamp::TEXT
+            FROM alerts a
+            JOIN companies c ON c.id = a.company_id
+            WHERE a.timestamp >= NOW() - INTERVAL '%(days)s days'
+            ORDER BY a.timestamp DESC
+            """ % {"days": int(days)}
+        )
+        buf = _io.StringIO()
+        w = csv.writer(buf)
+        w.writerow(["ID", "Company", "Parameter", "Value", "Threshold", "Direction",
+                    "Severity", "Acknowledged", "Acknowledged At", "Timestamp"])
+        for r in rows:
+            w.writerow([r["id"], r["company"], r["parameter"], r["value"], r["threshold"],
+                        r["direction"], r["severity"], bool(r["acknowledged"]),
+                        r["acknowledged_at"] or "", r["timestamp"]])
+        buf.seek(0)
+        return StreamingResponse(
+            iter([buf.getvalue()]),
+            media_type="text/csv",
+            headers={"Content-Disposition": f'attachment; filename="alerts_{days}d.csv"'},
+        )
+    except Exception as exc:
+        logger.error("export_alerts_csv failed: %s", exc)
+        logger.error("internal error: %s", exc, exc_info=True); return JSONResponse(status_code=500, content={"error": "An internal error occurred"})
+
+
+@router.get("/export/subscribers.csv", summary="Download all subscribers as CSV")
+@limiter.limit("10/minute")
+async def export_subscribers_csv(
+    request: Request,
+    _admin: dict = Depends(require_super_admin),
+):
+    try:
+        rows = execute_read(
+            """
+            SELECT s.id, c.name AS company, s.name, s.phone, s.email,
+                   s.escalation_order,
+                   COALESCE(s.is_active, 1) AS is_active,
+                   s.created_at::TEXT
+            FROM subscribers s
+            JOIN companies c ON c.id = s.company_id
+            ORDER BY c.name, s.escalation_order
+            """
+        )
+        buf = _io.StringIO()
+        w = csv.writer(buf)
+        w.writerow(["ID", "Company", "Name", "Phone", "Email",
+                    "Escalation Order", "Active", "Created At"])
+        for r in rows:
+            w.writerow([r["id"], r["company"], r["name"], r["phone"] or "",
+                        r["email"] or "", r["escalation_order"],
+                        bool(r["is_active"]), r["created_at"]])
+        buf.seek(0)
+        return StreamingResponse(
+            iter([buf.getvalue()]),
+            media_type="text/csv",
+            headers={"Content-Disposition": 'attachment; filename="subscribers.csv"'},
+        )
+    except Exception as exc:
+        logger.error("export_subscribers_csv failed: %s", exc)
+        logger.error("internal error: %s", exc, exc_info=True); return JSONResponse(status_code=500, content={"error": "An internal error occurred"})
+
+
+# ─── Tier 2: New Company Wizard — step-by-step creation ──────────────────────
+
+class _WizardCompanyIn(BaseModel):
+    name:             str  = Field(min_length=2, max_length=100)
+    slug:             str  = Field(min_length=2, max_length=60)
+    description:      Optional[str] = None
+    max_subscribers:  int  = Field(default=100, ge=1)
+    max_devices:      int  = Field(default=10,  ge=1)
+    allowed_channels: str  = Field(default="sms,email,push")
+
+    @field_validator("name", "slug", mode="before")
+    @classmethod
+    def strip(cls, v): return v.strip() if isinstance(v, str) else v
+
+
+class _WizardAdminIn(BaseModel):
+    company_id: int
+    name:       str  = Field(min_length=2, max_length=50)
+    password:   str  = Field(min_length=10, max_length=200)
+    role:       str  = Field(default="main")
+    email:      Optional[str] = None
+
+    @field_validator("name", "password", mode="before")
+    @classmethod
+    def strip(cls, v): return v.strip() if isinstance(v, str) else v
+
+    @field_validator("password", mode="after")
+    @classmethod
+    def check_password_strength(cls, v):
+        return _enforce_password_strength(v)
+
+
+class _WizardSubscriberIn(BaseModel):
+    company_id:        int
+    name:              str  = Field(min_length=2, max_length=100)
+    phone:             Optional[str] = None
+    email:             Optional[str] = None
+    escalation_order:  int  = Field(default=1, ge=1)
+
+    @field_validator("name", mode="before")
+    @classmethod
+    def strip(cls, v): return v.strip() if isinstance(v, str) else v
+
+
+@router.post("/wizard/company", status_code=201, summary="Wizard step 1 — create company")
+@limiter.limit("20/minute")
+async def wizard_create_company(
+    body: _WizardCompanyIn,
+    request: Request,
+    _admin: dict = Depends(require_super_admin),
+):
+    try:
+        result = execute_write(
+            """INSERT INTO companies (name, slug, description, max_subscribers, max_devices, allowed_channels, is_active, created_at)
+               VALUES (%s, %s, %s, %s, %s, %s, 0, NOW()) RETURNING id""",
+            (body.name, body.slug, body.description, body.max_subscribers, body.max_devices, body.allowed_channels),
+        )
+        company_id = result.lastrowid
+        ip = request.client.host if request.client else "unknown"
+        _log_audit(_admin["id"], company_id, f"wizard_create_company:{body.name}", "company", "medium",
+                   f"slug={body.slug}", ip)
+        rows = execute_read("SELECT id, name, slug, is_active, created_at::TEXT FROM companies WHERE id = %s", (company_id,))
+        return rows[0] if rows else {"id": company_id, "name": body.name}
+    except Exception as exc:
+        if "unique" in str(exc).lower() or "duplicate" in str(exc).lower():
+            return JSONResponse(status_code=409, content={"error": f"Slug '{body.slug}' already exists"})
+        logger.error("wizard_create_company failed: %s", exc)
+        logger.error("internal error: %s", exc, exc_info=True); return JSONResponse(status_code=500, content={"error": "An internal error occurred"})
+
+
+@router.post("/wizard/admin", status_code=201, summary="Wizard step 2 — create admin for company")
+@limiter.limit("20/minute")
+async def wizard_create_admin(
+    body: _WizardAdminIn,
+    request: Request,
+    _admin: dict = Depends(require_super_admin),
+):
+    try:
+        if body.role not in ("main", "sub"):
+            return JSONResponse(status_code=422, content={"error": "role must be main or sub"})
+        result = execute_write(
+            "INSERT INTO admins (name, password_hash, role, company_id, created_at) VALUES (%s, %s, %s, %s, NOW()) RETURNING id",
+            (body.name, hash_pin(body.password), body.role, body.company_id),
+        )
+        if body.email:
+            try:
+                execute_write("UPDATE admins SET email = %s WHERE id = %s", (body.email, result.lastrowid))
+            except Exception: pass
+        ip = request.client.host if request.client else "unknown"
+        _log_audit(_admin["id"], body.company_id, f"wizard_create_admin:{body.name}", "admin", "medium",
+                   f"role={body.role}", ip)
+        return _get_admin_or_404(result.lastrowid)
+    except Exception as exc:
+        if "unique" in str(exc).lower() or "duplicate" in str(exc).lower():
+            return JSONResponse(status_code=409, content={"error": f"Admin '{body.name}' already exists"})
+        logger.error("wizard_create_admin failed: %s", exc)
+        logger.error("internal error: %s", exc, exc_info=True); return JSONResponse(status_code=500, content={"error": "An internal error occurred"})
+
+
+@router.post("/wizard/subscriber", status_code=201, summary="Wizard step 4 — add subscriber")
+@limiter.limit("30/minute")
+async def wizard_add_subscriber(
+    body: _WizardSubscriberIn,
+    request: Request,
+    _admin: dict = Depends(require_super_admin),
+):
+    try:
+        result = execute_write(
+            """INSERT INTO subscribers (company_id, name, phone, email, escalation_order, is_active, created_at)
+               VALUES (%s, %s, %s, %s, %s, 1, NOW()) RETURNING id""",
+            (body.company_id, body.name, body.phone, body.email, body.escalation_order),
+        )
+        return {"id": result.lastrowid, "name": body.name, "escalation_order": body.escalation_order}
+    except Exception as exc:
+        logger.error("wizard_add_subscriber failed: %s", exc)
+        logger.error("internal error: %s", exc, exc_info=True); return JSONResponse(status_code=500, content={"error": "An internal error occurred"})
+
+
+@router.post("/wizard/enable/{company_id}", summary="Wizard final step — enable the company")
+@limiter.limit("20/minute")
+async def wizard_enable_company(
+    company_id: int,
+    request: Request,
+    _admin: dict = Depends(require_super_admin),
+):
+    try:
+        rows = execute_read("SELECT id, name FROM companies WHERE id = %s", (company_id,))
+        if not rows:
+            raise HTTPException(status_code=404, detail="Company not found")
+        execute_write("UPDATE companies SET is_active = 1 WHERE id = %s", (company_id,))
+        ip = request.client.host if request.client else "unknown"
+        _log_audit(_admin["id"], company_id, f"wizard_enable:{rows[0]['name']}", "company", "medium",
+                   f"company_id={company_id}", ip)
+        return {"status": "enabled", "company_id": company_id, "name": rows[0]["name"]}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error("wizard_enable_company failed: %s", exc)
+        logger.error("internal error: %s", exc, exc_info=True); return JSONResponse(status_code=500, content={"error": "An internal error occurred"})
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TIER 3 — Advanced Intelligence & Platform Management
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ─── Tier 3 Pydantic models ───────────────────────────────────────────────────
+
+class _TemplateParamItem(BaseModel):
+    name:      str
+    unit:      Optional[str] = None
+    min_value: Optional[float] = None
+    max_value: Optional[float] = None
+
+class _ParameterTemplateIn(BaseModel):
+    name:        str = Field(min_length=2, max_length=100)
+    description: Optional[str] = None
+    params:      List[_TemplateParamItem] = Field(default_factory=list)
+
+    @field_validator("name", mode="before")
+    @classmethod
+    def strip_name(cls, v):
+        return v.strip() if isinstance(v, str) else v
+
+
+class _EscalationRuleIn(BaseModel):
+    name:               str  = Field(min_length=2, max_length=100)
+    company_id:         Optional[int] = None   # None = applies to all companies
+    severity_filter:    str  = Field(default="critical")
+    threshold_minutes:  int  = Field(default=30, ge=1, le=10080)
+    action_type:        str  = Field(default="webhook")          # webhook | log
+    action_target:      Optional[str] = None                     # URL for webhook
+    is_active:          bool = True
+
+    @field_validator("name", mode="before")
+    @classmethod
+    def strip_name(cls, v):
+        return v.strip() if isinstance(v, str) else v
+
+    @field_validator("action_target", mode="before")
+    @classmethod
+    def validate_webhook_url(cls, v):
+        if v is None:
+            return v
+        from urllib.parse import urlparse
+        import ipaddress
+        url = v.strip()
+        parsed = urlparse(url)
+        if parsed.scheme not in ("https", "http"):
+            raise ValueError("action_target must use http or https")
+        hostname = parsed.hostname or ""
+        # Block private/loopback/link-local ranges (SSRF protection)
+        try:
+            addr = ipaddress.ip_address(hostname)
+            if addr.is_private or addr.is_loopback or addr.is_link_local or addr.is_reserved:
+                raise ValueError("action_target must not point to a private/internal address")
+        except ValueError as ip_exc:
+            if "action_target" in str(ip_exc) or "private" in str(ip_exc):
+                raise
+            # hostname is a domain name, not an IP — check for localhost patterns
+            if hostname.lower() in ("localhost", "127.0.0.1", "::1"):
+                raise ValueError("action_target must not point to localhost")
+        return url
+
+
+# ─── 1. Advanced Audit Explorer ───────────────────────────────────────────────
+
+@router.get("/audit", summary="Tier 3: paginated, filtered audit log")
+@limiter.limit("60/minute")
+async def get_audit_log(
+    request:    Request,
+    company_id: Optional[int] = Query(None),
+    category:   Optional[str] = Query(None),
+    severity:   Optional[str] = Query(None),
+    search:     Optional[str] = Query(None),
+    date_from:  Optional[str] = Query(None),   # ISO date string e.g. 2026-01-01
+    date_to:    Optional[str] = Query(None),
+    page:       int           = Query(1, ge=1),
+    limit:      int           = Query(50, ge=1, le=200),
+    _admin: dict = Depends(require_super_admin),
+):
+    conditions = []
+    params: List[Any] = []
+
+    if company_id:
+        conditions.append("al.company_id = %s"); params.append(company_id)
+    if category:
+        conditions.append("al.category = %s"); params.append(category)
+    if severity:
+        conditions.append("al.severity = %s"); params.append(severity)
+    if search:
+        conditions.append("(al.action ILIKE %s OR al.details ILIKE %s)")
+        like = f"%{search}%"; params += [like, like]
+    if date_from:
+        conditions.append("al.created_at >= %s::timestamptz"); params.append(date_from)
+    if date_to:
+        conditions.append("al.created_at <= %s::timestamptz"); params.append(date_to + "T23:59:59")
+
+    where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+    offset = (page - 1) * limit
+
+    rows = execute_read(
+        f"""
+        SELECT al.id, al.admin_id, a.name AS admin_name, al.company_id,
+               c.name AS company_name, al.category, al.action,
+               al.severity, al.details, al.ip_address,
+               al.created_at
+          FROM audit_log al
+          LEFT JOIN admins   a ON a.id = al.admin_id
+          LEFT JOIN companies c ON c.id = al.company_id
+         {where}
+         ORDER BY al.created_at DESC
+         LIMIT %s OFFSET %s
+        """,
+        params + [limit, offset],
+    )
+    count_rows = execute_read(
+        f"SELECT COUNT(*) AS total FROM audit_log al {where}",
+        params,
+    )
+    total = count_rows[0]["total"] if count_rows else 0
+
+    # Distinct categories for filter dropdowns
+    cats = execute_read("SELECT DISTINCT category FROM audit_log ORDER BY category")
+
+    return {
+        "rows":       rows,
+        "total":      total,
+        "page":       page,
+        "pages":      max(1, -(-total // limit)),   # ceiling division
+        "categories": [r["category"] for r in cats],
+    }
+
+
+@router.get("/export/audit.csv", summary="Tier 3: export audit log as CSV")
+@limiter.limit("10/minute")
+async def export_audit_csv(
+    request:    Request,
+    company_id: Optional[int] = Query(None),
+    date_from:  Optional[str] = Query(None),
+    date_to:    Optional[str] = Query(None),
+    _admin: dict = Depends(require_super_admin),
+):
+    conditions = []
+    params: List[Any] = []
+    if company_id:
+        conditions.append("al.company_id = %s"); params.append(company_id)
+    if date_from:
+        conditions.append("al.created_at >= %s::timestamptz"); params.append(date_from)
+    if date_to:
+        conditions.append("al.created_at <= %s::timestamptz"); params.append(date_to + "T23:59:59")
+    where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+
+    rows = execute_read(
+        f"""
+        SELECT al.id, a.name AS admin_name, c.name AS company_name,
+               al.category, al.action, al.severity, al.details,
+               al.ip_address, al.created_at
+          FROM audit_log al
+          LEFT JOIN admins    a ON a.id = al.admin_id
+          LEFT JOIN companies c ON c.id = al.company_id
+         {where}
+         ORDER BY al.created_at DESC
+         LIMIT 10000
+        """,
+        params,
+    )
+    buf = _io.StringIO()
+    w   = csv.writer(buf)
+    w.writerow(["ID", "Admin", "Company", "Category", "Action", "Severity", "Details", "IP", "Timestamp"])
+    for r in rows:
+        w.writerow([r["id"], r["admin_name"], r["company_name"], r["category"],
+                    r["action"], r["severity"], r["details"], r["ip_address"], r["created_at"]])
+    buf.seek(0)
+    return StreamingResponse(
+        iter([buf.read()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=audit.csv"},
+    )
+
+
+# ─── 2. Cross-Company Analytics ───────────────────────────────────────────────
+
+@router.get("/analytics/alerts", summary="Tier 3: daily alert counts per company (last N days)")
+@limiter.limit("30/minute")
+async def analytics_alerts(
+    request: Request,
+    days:    int = Query(14, ge=1, le=90),
+    _admin: dict = Depends(require_super_admin),
+):
+    """Returns [{date, company_id, company_name, total, critical, warning, info}] for chart rendering."""
+    rows = execute_read(
+        """
+        SELECT DATE(a.timestamp::timestamptz) AS day,
+               a.company_id,
+               c.name AS company_name,
+               COUNT(*)                                                      AS total,
+               COUNT(*) FILTER (WHERE a.severity = 'critical')               AS critical,
+               COUNT(*) FILTER (WHERE a.severity = 'warning')                AS warning,
+               COUNT(*) FILTER (WHERE a.severity NOT IN ('critical','warning')) AS info
+          FROM alerts a
+          JOIN companies c ON c.id = a.company_id
+         WHERE a.timestamp::timestamptz >= NOW() - (%s || ' days')::interval
+         GROUP BY day, a.company_id, c.name
+         ORDER BY day, total DESC
+        """,
+        (days,),
+    )
+    return rows
+
+
+@router.get("/analytics/platform", summary="Tier 3: platform-wide daily totals for trend charts")
+@limiter.limit("30/minute")
+async def analytics_platform(
+    request: Request,
+    days:    int = Query(30, ge=1, le=90),
+    _admin: dict = Depends(require_super_admin),
+):
+    alert_trend = execute_read(
+        """
+        SELECT DATE(timestamp::timestamptz) AS day,
+               COUNT(*)                                               AS total_alerts,
+               COUNT(*) FILTER (WHERE severity = 'critical')          AS critical,
+               COUNT(*) FILTER (WHERE acknowledged = 1)               AS acknowledged
+          FROM alerts
+         WHERE timestamp::timestamptz >= NOW() - (%s || ' days')::interval
+         GROUP BY day ORDER BY day
+        """,
+        (days,),
+    )
+    reading_trend = execute_read(
+        """
+        SELECT DATE(timestamp::timestamptz) AS day, COUNT(*) AS readings
+          FROM readings
+         WHERE timestamp::timestamptz >= NOW() - (%s || ' days')::interval
+         GROUP BY day ORDER BY day
+        """,
+        (days,),
+    )
+    session_trend = execute_read(
+        """
+        SELECT DATE(created_at) AS day, COUNT(*) AS sessions
+          FROM admin_sessions
+         WHERE created_at >= NOW() - (%s || ' days')::interval
+         GROUP BY day ORDER BY day
+        """,
+        (days,),
+    )
+    return {
+        "alert_trend":   alert_trend,
+        "reading_trend": reading_trend,
+        "session_trend": session_trend,
+    }
+
+
+@router.get("/analytics/top-companies", summary="Tier 3: companies ranked by activity metrics")
+@limiter.limit("30/minute")
+async def analytics_top_companies(
+    request: Request,
+    metric:  str = Query("alerts", pattern="^(alerts|readings|sessions)$"),
+    days:    int = Query(7, ge=1, le=90),
+    limit:   int = Query(10, ge=1, le=50),
+    _admin: dict = Depends(require_super_admin),
+):
+    if metric == "alerts":
+        rows = execute_read(
+            """
+            SELECT c.id, c.name, COUNT(a.id) AS value
+              FROM companies c
+              LEFT JOIN alerts a ON a.company_id = c.id
+                AND a.timestamp::timestamptz >= NOW() - (%s || ' days')::interval
+             GROUP BY c.id, c.name
+             ORDER BY value DESC
+             LIMIT %s
+            """,
+            (days, limit),
+        )
+    elif metric == "readings":
+        rows = execute_read(
+            """
+            SELECT c.id, c.name, COUNT(r.id) AS value
+              FROM companies c
+              LEFT JOIN readings r ON r.company_id = c.id
+                AND r.timestamp::timestamptz >= NOW() - (%s || ' days')::interval
+             GROUP BY c.id, c.name
+             ORDER BY value DESC
+             LIMIT %s
+            """,
+            (days, limit),
+        )
+    else:  # sessions
+        rows = execute_read(
+            """
+            SELECT c.id, c.name, COUNT(s.id) AS value
+              FROM companies c
+              LEFT JOIN admins ad ON ad.company_id = c.id
+              LEFT JOIN admin_sessions s ON s.admin_id = ad.id
+                AND s.created_at >= NOW() - (%s || ' days')::interval
+             GROUP BY c.id, c.name
+             ORDER BY value DESC
+             LIMIT %s
+            """,
+            (days, limit),
+        )
+    return {"metric": metric, "days": days, "rows": rows}
+
+
+@router.get("/analytics/compare", summary="Tier 3: side-by-side company comparison")
+@limiter.limit("30/minute")
+async def analytics_compare(
+    request: Request,
+    ids:     str = Query(..., description="Comma-separated company IDs"),
+    days:    int = Query(7, ge=1, le=90),
+    _admin: dict = Depends(require_super_admin),
+):
+    try:
+        id_list = [int(x.strip()) for x in ids.split(",") if x.strip().isdigit()]
+    except ValueError:
+        raise HTTPException(status_code=422, detail="ids must be comma-separated integers")
+    if not id_list:
+        return []
+    if len(id_list) > 10:
+        raise HTTPException(status_code=422, detail="Max 10 companies for comparison")
+
+    placeholders = ", ".join(["%s"] * len(id_list))
+    rows = execute_read(
+        f"""
+        SELECT
+            c.id, c.name, c.slug, c.is_active, c.maintenance_mode,
+            (SELECT COUNT(*) FROM alerts a
+              WHERE a.company_id = c.id
+                AND a.timestamp::timestamptz >= NOW() - (%s || ' days')::interval) AS alerts_period,
+            (SELECT COUNT(*) FROM alerts a
+              WHERE a.company_id = c.id AND a.severity = 'critical'
+                AND a.timestamp::timestamptz >= NOW() - (%s || ' days')::interval) AS critical_period,
+            (SELECT COUNT(*) FROM alerts a
+              WHERE a.company_id = c.id AND a.acknowledged = 0)                    AS unacked_now,
+            (SELECT COUNT(*) FROM readings r
+              WHERE r.company_id = c.id
+                AND r.timestamp::timestamptz >= NOW() - (%s || ' days')::interval) AS readings_period,
+            (SELECT COUNT(*) FROM subscribers s
+              WHERE s.company_id = c.id AND s.is_active = 1)                       AS active_subscribers,
+            (SELECT COUNT(*) FROM admins ad
+              WHERE ad.company_id = c.id)                                           AS admin_count,
+            (SELECT MAX(r2.timestamp::timestamptz) FROM readings r2
+              WHERE r2.company_id = c.id)                                           AS last_reading_at
+          FROM companies c
+         WHERE c.id IN ({placeholders})
+         ORDER BY alerts_period DESC
+        """,
+        [days, days, days, days] + id_list,
+    )
+
+    # Add uptime % (readings in period vs expected at 1/min)
+    expected = days * 24 * 60
+    result = []
+    for r in rows:
+        row = dict(r)
+        rdgs = row.get("readings_period") or 0
+        row["uptime_pct"] = round(min(100.0, rdgs / expected * 100), 1) if expected else 0
+        if row.get("last_reading_at"):
+            delta = (datetime.now(timezone.utc) - row["last_reading_at"]).total_seconds() / 60
+            row["minutes_since_reading"] = round(delta, 1)
+        else:
+            row["minutes_since_reading"] = None
+        result.append(row)
+    return result
+
+
+# ─── 3. Platform Health Monitor ───────────────────────────────────────────────
+
+@router.get("/platform/health", summary="Tier 3: platform system vitals")
+@limiter.limit("30/minute")
+async def platform_health(
+    request: Request,
+    _admin: dict = Depends(require_super_admin),
+):
+    from database.connection import get_db_pool, MODULE_STATUS
+
+    pool = get_db_pool()
+    pool_stats = {
+        "min_conn": pool.minconn,
+        "max_conn": pool.maxconn,
+        "used":     len(pool._used),
+        "free":     len(pool._pool),
+    }
+
+    active_sessions = execute_read(
+        "SELECT COUNT(*) AS n FROM admin_sessions WHERE expires_at > NOW()", []
+    )
+    readings_last_hour = execute_read(
+        "SELECT COUNT(*) AS n FROM readings WHERE timestamp::timestamptz >= NOW() - INTERVAL '1 hour'", []
+    )
+    alerts_last_hour = execute_read(
+        "SELECT COUNT(*) AS n FROM alerts WHERE timestamp::timestamptz >= NOW() - INTERVAL '1 hour'", []
+    )
+    unacked_critical = execute_read(
+        "SELECT COUNT(*) AS n FROM alerts WHERE acknowledged = 0 AND severity = 'critical'", []
+    )
+    recent_audit_errors = execute_read(
+        "SELECT COUNT(*) AS n FROM audit_log WHERE severity = 'critical' AND created_at >= NOW() - INTERVAL '1 hour'",
+        [],
+    )
+
+    return {
+        "db_pool":              pool_stats,
+        "module_status":        MODULE_STATUS,
+        "active_sessions":      active_sessions[0]["n"] if active_sessions else 0,
+        "readings_last_hour":   readings_last_hour[0]["n"] if readings_last_hour else 0,
+        "alerts_last_hour":     alerts_last_hour[0]["n"] if alerts_last_hour else 0,
+        "unacked_critical":     unacked_critical[0]["n"] if unacked_critical else 0,
+        "audit_errors_last_hour": recent_audit_errors[0]["n"] if recent_audit_errors else 0,
+        "server_time_utc":      datetime.now(timezone.utc).isoformat(),
+    }
+
+
+# ─── 4. Parameter Template Library ───────────────────────────────────────────
+
+@router.get("/parameter-templates", summary="Tier 3: list all parameter templates")
+@limiter.limit("60/minute")
+async def list_parameter_templates(
+    request: Request,
+    _admin: dict = Depends(require_super_admin),
+):
+    rows = execute_read(
+        """
+        SELECT pt.id, pt.name, pt.description, pt.params,
+               a.name AS created_by_name, pt.created_at
+          FROM parameter_templates pt
+          LEFT JOIN admins a ON a.id = pt.created_by
+         ORDER BY pt.created_at DESC
+        """,
+        [],
+    )
+    return rows
+
+
+@router.post("/parameter-templates", status_code=201, summary="Tier 3: create parameter template")
+@limiter.limit("20/minute")
+async def create_parameter_template(
+    body:    _ParameterTemplateIn,
+    request: Request,
+    _admin: dict = Depends(require_super_admin),
+):
+    params_json = json.dumps([p.model_dump() for p in body.params])
+    try:
+        result = execute_write(
+            """INSERT INTO parameter_templates (name, description, params, created_by)
+               VALUES (%s, %s, %s::jsonb, %s) RETURNING id""",
+            (body.name, body.description, params_json, _admin["id"]),
+        )
+        ip = request.client.host if request.client else "unknown"
+        _log_audit(_admin["id"], None, f"create_template:{body.name}", "template", "low",
+                   f"params={len(body.params)}", ip)
+        return {"id": result.lastrowid, "name": body.name}
+    except Exception as exc:
+        if "unique" in str(exc).lower():
+            raise HTTPException(status_code=409, detail=f"Template name '{body.name}' already exists")
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.delete("/parameter-templates/{template_id}", summary="Tier 3: delete parameter template")
+@limiter.limit("20/minute")
+async def delete_parameter_template(
+    template_id: int,
+    request:     Request,
+    _admin: dict = Depends(require_super_admin),
+):
+    rows = execute_read("SELECT name FROM parameter_templates WHERE id = %s", (template_id,))
+    if not rows:
+        raise HTTPException(status_code=404, detail="Template not found")
+    execute_write("DELETE FROM parameter_templates WHERE id = %s", (template_id,))
+    ip = request.client.host if request.client else "unknown"
+    _log_audit(_admin["id"], None, f"delete_template:{rows[0]['name']}", "template", "medium",
+               f"template_id={template_id}", ip)
+    return {"status": "deleted"}
+
+
+@router.post(
+    "/parameter-templates/{template_id}/apply/{company_id}",
+    summary="Tier 3: apply template to a company",
+)
+@limiter.limit("20/minute")
+async def apply_parameter_template(
+    template_id: int,
+    company_id:  int,
+    request:     Request,
+    _admin: dict = Depends(require_super_admin),
+):
+    tpl_rows = execute_read(
+        "SELECT id, name, description, params, created_by, created_at "
+        "FROM parameter_templates WHERE id = %s",
+        (template_id,),
+    )
+    if not tpl_rows:
+        raise HTTPException(status_code=404, detail="Template not found")
+    co_rows = execute_read("SELECT name FROM companies WHERE id = %s", (company_id,))
+    if not co_rows:
+        raise HTTPException(status_code=404, detail="Company not found")
+
+    params = tpl_rows[0]["params"]
+    if isinstance(params, str):
+        params = json.loads(params)
+
+    applied, skipped = 0, 0
+    for p in params:
+        try:
+            execute_write(
+                """INSERT INTO company_parameters (company_id, name, unit, min_value, max_value)
+                   VALUES (%s, %s, %s, %s, %s)
+                   ON CONFLICT (company_id, name) DO NOTHING""",
+                (company_id, p["name"], p.get("unit"), p.get("min_value"), p.get("max_value")),
+            )
+            applied += 1
+        except Exception:
+            skipped += 1
+
+    ip = request.client.host if request.client else "unknown"
+    _log_audit(_admin["id"], company_id,
+               f"apply_template:{tpl_rows[0]['name']}→{co_rows[0]['name']}",
+               "template", "medium", f"applied={applied},skipped={skipped}", ip)
+    return {"applied": applied, "skipped": skipped, "company": co_rows[0]["name"], "template": tpl_rows[0]["name"]}
+
+
+# ─── 5. Escalation Rules Engine ──────────────────────────────────────────────
+
+@router.get("/escalation-rules", summary="Tier 3: list escalation rules")
+@limiter.limit("60/minute")
+async def list_escalation_rules(
+    request: Request,
+    _admin: dict = Depends(require_super_admin),
+):
+    rows = execute_read(
+        """
+        SELECT er.id, er.name, er.company_id, c.name AS company_name,
+               er.severity_filter, er.threshold_minutes, er.action_type,
+               er.action_target, er.is_active, er.last_triggered_at, er.created_at
+          FROM escalation_rules er
+          LEFT JOIN companies c ON c.id = er.company_id
+         ORDER BY er.created_at DESC
+        """,
+        [],
+    )
+    return rows
+
+
+@router.post("/escalation-rules", status_code=201, summary="Tier 3: create escalation rule")
+@limiter.limit("20/minute")
+async def create_escalation_rule(
+    body:    _EscalationRuleIn,
+    request: Request,
+    _admin: dict = Depends(require_super_admin),
+):
+    result = execute_write(
+        """INSERT INTO escalation_rules
+               (name, company_id, severity_filter, threshold_minutes,
+                action_type, action_target, is_active)
+           VALUES (%s, %s, %s, %s, %s, %s, %s) RETURNING id""",
+        (body.name, body.company_id, body.severity_filter, body.threshold_minutes,
+         body.action_type, body.action_target, body.is_active),
+    )
+    ip = request.client.host if request.client else "unknown"
+    _log_audit(_admin["id"], body.company_id, f"create_rule:{body.name}", "escalation", "low",
+               f"severity={body.severity_filter},threshold={body.threshold_minutes}m", ip)
+    return {"id": result.lastrowid, "name": body.name}
+
+
+@router.patch("/escalation-rules/{rule_id}", summary="Tier 3: update escalation rule")
+@limiter.limit("20/minute")
+async def update_escalation_rule(
+    rule_id: int,
+    body:    _EscalationRuleIn,
+    request: Request,
+    _admin: dict = Depends(require_super_admin),
+):
+    rows = execute_read("SELECT id FROM escalation_rules WHERE id = %s", (rule_id,))
+    if not rows:
+        raise HTTPException(status_code=404, detail="Rule not found")
+    execute_write(
+        """UPDATE escalation_rules
+              SET name = %s, company_id = %s, severity_filter = %s,
+                  threshold_minutes = %s, action_type = %s,
+                  action_target = %s, is_active = %s
+            WHERE id = %s""",
+        (body.name, body.company_id, body.severity_filter, body.threshold_minutes,
+         body.action_type, body.action_target, body.is_active, rule_id),
+    )
+    ip = request.client.host if request.client else "unknown"
+    _log_audit(_admin["id"], body.company_id, f"update_rule:{body.name}", "escalation", "medium",
+               f"rule_id={rule_id}", ip)
+    return {"status": "updated", "id": rule_id}
+
+
+@router.delete("/escalation-rules/{rule_id}", summary="Tier 3: delete escalation rule")
+@limiter.limit("20/minute")
+async def delete_escalation_rule(
+    rule_id: int,
+    request: Request,
+    _admin: dict = Depends(require_super_admin),
+):
+    rows = execute_read("SELECT name FROM escalation_rules WHERE id = %s", (rule_id,))
+    if not rows:
+        raise HTTPException(status_code=404, detail="Rule not found")
+    execute_write("DELETE FROM escalation_rules WHERE id = %s", (rule_id,))
+    ip = request.client.host if request.client else "unknown"
+    _log_audit(_admin["id"], None, f"delete_rule:{rows[0]['name']}", "escalation", "medium",
+               f"rule_id={rule_id}", ip)
+    return {"status": "deleted"}
+
+
+@router.post("/escalation-rules/evaluate", summary="Tier 3: manually trigger rule evaluation")
+@limiter.limit("10/minute")
+async def evaluate_escalation_rules(
+    request: Request,
+    _admin: dict = Depends(require_super_admin),
+):
+    """
+    Checks all active escalation rules against currently open (unacked) alerts.
+    For alerts that have been open longer than the rule's threshold, fires the
+    configured action (webhook POST or audit log entry).
+    Returns a list of triggered rule/alert pairs.
+    """
+    import httpx
+
+    rules = execute_read(
+        "SELECT id, name, company_id, severity_filter, threshold_minutes, "
+        "action_type, action_target, is_active, last_triggered_at "
+        "FROM escalation_rules WHERE is_active = TRUE ORDER BY id",
+        [],
+    )
+    triggered = []
+    now = datetime.now(timezone.utc)
+
+    for rule in rules:
+        # Find unacked alerts matching this rule's severity + company filters
+        conditions = ["acknowledged = 0", "severity = %s"]
+        params: List[Any] = [rule["severity_filter"]]
+        if rule["company_id"]:
+            conditions.append("company_id = %s")
+            params.append(rule["company_id"])
+
+        alerts = execute_read(
+            f"SELECT id, company_id, parameter, severity, timestamp FROM alerts WHERE {' AND '.join(conditions)}",
+            params,
+        )
+        for alert in alerts:
+            try:
+                alert_ts = datetime.fromisoformat(str(alert["timestamp"]).replace("Z", "+00:00"))
+                if alert_ts.tzinfo is None:
+                    alert_ts = alert_ts.replace(tzinfo=timezone.utc)
+            except Exception:
+                continue
+
+            open_minutes = (now - alert_ts).total_seconds() / 60
+            if open_minutes < rule["threshold_minutes"]:
+                continue
+
+            entry = {
+                "rule_id":      rule["id"],
+                "rule_name":    rule["name"],
+                "alert_id":     alert["id"],
+                "open_minutes": round(open_minutes, 1),
+                "action":       rule["action_type"],
+            }
+
+            if rule["action_type"] == "webhook" and rule["action_target"]:
+                try:
+                    async with httpx.AsyncClient(timeout=5.0) as client:
+                        await client.post(rule["action_target"], json={
+                            "rule":         rule["name"],
+                            "alert_id":     alert["id"],
+                            "company_id":   alert["company_id"],
+                            "severity":     alert["severity"],
+                            "open_minutes": round(open_minutes, 1),
+                            "parameter":    alert["parameter"],
+                        })
+                    entry["webhook_status"] = "sent"
+                except Exception as exc:
+                    entry["webhook_status"] = f"failed: {exc}"
+            else:
+                entry["webhook_status"] = "logged"
+
+            # Record the trigger
+            _log_audit(
+                _admin["id"], alert["company_id"],
+                f"escalation_triggered:{rule['name']}",
+                "escalation", "high",
+                f"alert_id={alert['id']},open={round(open_minutes,1)}m",
+                request.client.host if request.client else "unknown",
+            )
+            execute_write(
+                "UPDATE escalation_rules SET last_triggered_at = NOW() WHERE id = %s",
+                (rule["id"],),
+            )
+            triggered.append(entry)
+
+    return {"evaluated": len(rules), "triggered": triggered}
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# TIER 4 — Operations Automation & Intelligence
+# ═══════════════════════════════════════════════════════════════════════════════
+
+# ─── Tier 4 Pydantic models ───────────────────────────────────────────────────
+
+class _MaintenanceWindowIn(BaseModel):
+    company_id: int
+    start_at:   str = Field(description="ISO 8601 datetime")
+    end_at:     str = Field(description="ISO 8601 datetime")
+    reason:     Optional[str] = None
+
+    @field_validator("reason", mode="before")
+    @classmethod
+    def strip_reason(cls, v):
+        return v.strip() if isinstance(v, str) else v
+
+
+class _IncidentIn(BaseModel):
+    company_id:  Optional[int] = None
+    title:       str  = Field(min_length=3, max_length=200)
+    description: Optional[str] = None
+    severity:    str  = Field(default="medium")
+    assignee_id: Optional[int] = None
+
+    @field_validator("title", mode="before")
+    @classmethod
+    def strip_title(cls, v):
+        return v.strip() if isinstance(v, str) else v
+
+
+class _IncidentUpdateIn(BaseModel):
+    status:      Optional[str] = None   # open | investigating | resolved | closed
+    severity:    Optional[str] = None
+    assignee_id: Optional[int] = None
+    title:       Optional[str] = None
+    description: Optional[str] = None
+
+
+class _IncidentNoteIn(BaseModel):
+    note: str = Field(min_length=1, max_length=4000)
+
+    @field_validator("note", mode="before")
+    @classmethod
+    def strip_note(cls, v):
+        return v.strip() if isinstance(v, str) else v
+
+
+class _LinkAlertIn(BaseModel):
+    alert_id: int
+
+
+# ─── 1. Scheduled Maintenance Windows ────────────────────────────────────────
+
+@router.get("/maintenance-windows", summary="Tier 4: list all maintenance windows")
+@limiter.limit("60/minute")
+async def list_maintenance_windows(
+    request:    Request,
+    company_id: Optional[int] = Query(None),
+    include_past: bool        = Query(False),
+    _admin: dict = Depends(require_super_admin),
+):
+    conditions = ["NOT is_cancelled"]
+    params: List[Any] = []
+    if company_id:
+        conditions.append("mw.company_id = %s"); params.append(company_id)
+    if not include_past:
+        conditions.append("mw.end_at >= NOW()")
+    where = "WHERE " + " AND ".join(conditions)
+    rows = execute_read(
+        f"""
+        SELECT mw.id, mw.company_id, c.name AS company_name,
+               mw.start_at, mw.end_at, mw.reason,
+               a.name AS created_by_name, mw.created_at, mw.is_cancelled,
+               CASE
+                 WHEN NOW() < mw.start_at THEN 'upcoming'
+                 WHEN NOW() BETWEEN mw.start_at AND mw.end_at THEN 'active'
+                 ELSE 'expired'
+               END AS window_status
+          FROM maintenance_windows mw
+          JOIN companies c ON c.id = mw.company_id
+          LEFT JOIN admins a ON a.id = mw.created_by
+         {where}
+         ORDER BY mw.start_at DESC
+         LIMIT 200
+        """,
+        params,
+    )
+    return rows
+
+
+@router.post("/maintenance-windows", status_code=201, summary="Tier 4: schedule maintenance window")
+@limiter.limit("20/minute")
+async def create_maintenance_window(
+    body:    _MaintenanceWindowIn,
+    request: Request,
+    _admin: dict = Depends(require_super_admin),
+):
+    co = execute_read("SELECT name FROM companies WHERE id = %s", (body.company_id,))
+    if not co:
+        raise HTTPException(status_code=404, detail="Company not found")
+    try:
+        start = datetime.fromisoformat(body.start_at.replace("Z", "+00:00"))
+        end   = datetime.fromisoformat(body.end_at.replace("Z", "+00:00"))
+    except ValueError:
+        raise HTTPException(status_code=422, detail="Invalid datetime format. Use ISO 8601.")
+    if end <= start:
+        raise HTTPException(status_code=422, detail="end_at must be after start_at")
+
+    result = execute_write(
+        """INSERT INTO maintenance_windows (company_id, start_at, end_at, reason, created_by)
+           VALUES (%s, %s, %s, %s, %s) RETURNING id""",
+        (body.company_id, start.isoformat(), end.isoformat(), body.reason, _admin["id"]),
+    )
+    ip = request.client.host if request.client else "unknown"
+    _log_audit(_admin["id"], body.company_id,
+               f"schedule_maintenance:{co[0]['name']}",
+               "maintenance", "medium",
+               f"start={start.isoformat()},end={end.isoformat()}", ip)
+    return {"id": result.lastrowid, "company": co[0]["name"], "start_at": start.isoformat(), "end_at": end.isoformat()}
+
+
+@router.delete("/maintenance-windows/{window_id}", summary="Tier 4: cancel maintenance window")
+@limiter.limit("20/minute")
+async def cancel_maintenance_window(
+    window_id: int,
+    request:   Request,
+    _admin: dict = Depends(require_super_admin),
+):
+    rows = execute_read(
+        "SELECT mw.*, c.name AS company_name FROM maintenance_windows mw JOIN companies c ON c.id = mw.company_id WHERE mw.id = %s",
+        (window_id,),
+    )
+    if not rows:
+        raise HTTPException(status_code=404, detail="Window not found")
+    execute_write("UPDATE maintenance_windows SET is_cancelled = TRUE WHERE id = %s", (window_id,))
+    ip = request.client.host if request.client else "unknown"
+    _log_audit(_admin["id"], rows[0]["company_id"],
+               f"cancel_maintenance:{rows[0]['company_name']}",
+               "maintenance", "medium", f"window_id={window_id}", ip)
+    return {"status": "cancelled"}
+
+
+@router.post("/maintenance-windows/apply", summary="Tier 4: sync company maintenance_mode with active windows")
+@limiter.limit("10/minute")
+async def apply_maintenance_windows(
+    request: Request,
+    _admin: dict = Depends(require_super_admin),
+):
+    """
+    Check active windows and toggle companies into/out of maintenance mode.
+    Call this on a schedule (e.g., every minute from a cron job) or manually.
+    """
+    # Companies that should be in maintenance right now
+    active = execute_read(
+        """
+        SELECT DISTINCT company_id FROM maintenance_windows
+         WHERE NOT is_cancelled
+           AND NOW() BETWEEN start_at AND end_at
+        """,
+        [],
+    )
+    active_ids = {r["company_id"] for r in active}
+
+    # Companies that were auto-maintained but window expired
+    should_exit = execute_read(
+        """
+        SELECT DISTINCT c.id, c.name
+          FROM companies c
+         WHERE c.maintenance_mode = 1
+           AND c.id NOT IN (
+               SELECT company_id FROM maintenance_windows
+                WHERE NOT is_cancelled AND NOW() BETWEEN start_at AND end_at
+           )
+        """,
+        [],
+    ) if active_ids else execute_read(
+        "SELECT id, name FROM companies WHERE maintenance_mode = 1",
+        [],
+    )
+
+    entered, exited = [], []
+    ip = request.client.host if request.client else "unknown"
+
+    for cid in active_ids:
+        co = execute_read("SELECT id, name, maintenance_mode FROM companies WHERE id = %s", (cid,))
+        if co and not co[0]["maintenance_mode"]:
+            execute_write("UPDATE companies SET maintenance_mode = 1 WHERE id = %s", (cid,))
+            _log_audit(_admin["id"], cid, f"auto_maintenance_enter:{co[0]['name']}",
+                       "maintenance", "low", "triggered by active window", ip)
+            entered.append(co[0]["name"])
+
+    for row in should_exit:
+        execute_write("UPDATE companies SET maintenance_mode = 0 WHERE id = %s", (row["id"],))
+        _log_audit(_admin["id"], row["id"], f"auto_maintenance_exit:{row['name']}",
+                   "maintenance", "low", "window expired", ip)
+        exited.append(row["name"])
+
+    return {"entered_maintenance": entered, "exited_maintenance": exited}
+
+
+# ─── 2. Incident Management ───────────────────────────────────────────────────
+
+@router.get("/incidents", summary="Tier 4: list incidents")
+@limiter.limit("60/minute")
+async def list_incidents(
+    request:    Request,
+    company_id: Optional[int] = Query(None),
+    status:     Optional[str] = Query(None),
+    severity:   Optional[str] = Query(None),
+    limit:      int           = Query(50, ge=1, le=200),
+    _admin: dict = Depends(require_super_admin),
+):
+    conditions: List[str] = []
+    params: List[Any] = []
+    if company_id:
+        conditions.append("i.company_id = %s"); params.append(company_id)
+    if status:
+        conditions.append("i.status = %s"); params.append(status)
+    if severity:
+        conditions.append("i.severity = %s"); params.append(severity)
+    where = ("WHERE " + " AND ".join(conditions)) if conditions else ""
+
+    rows = execute_read(
+        f"""
+        SELECT i.id, i.company_id, c.name AS company_name,
+               i.title, i.description, i.severity, i.status,
+               ass.name AS assignee_name, cr.name AS created_by_name,
+               i.created_at, i.updated_at, i.resolved_at,
+               (SELECT COUNT(*) FROM incident_notes n WHERE n.incident_id = i.id) AS note_count,
+               (SELECT COUNT(*) FROM incident_alerts ia WHERE ia.incident_id = i.id) AS alert_count
+          FROM incidents i
+          LEFT JOIN companies c   ON c.id  = i.company_id
+          LEFT JOIN admins    ass ON ass.id = i.assignee_id
+          LEFT JOIN admins    cr  ON cr.id  = i.created_by
+         {where}
+         ORDER BY
+           CASE i.status WHEN 'open' THEN 0 WHEN 'investigating' THEN 1 ELSE 2 END,
+           CASE i.severity WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END,
+           i.created_at DESC
+         LIMIT %s
+        """,
+        params + [limit],
+    )
+    return rows
+
+
+@router.post("/incidents", status_code=201, summary="Tier 4: create incident")
+@limiter.limit("20/minute")
+async def create_incident(
+    body:    _IncidentIn,
+    request: Request,
+    _admin: dict = Depends(require_super_admin),
+):
+    result = execute_write(
+        """INSERT INTO incidents (company_id, title, description, severity, assignee_id, created_by)
+           VALUES (%s, %s, %s, %s, %s, %s) RETURNING id""",
+        (body.company_id, body.title, body.description, body.severity, body.assignee_id, _admin["id"]),
+    )
+    inc_id = result.lastrowid
+    ip = request.client.host if request.client else "unknown"
+    _log_audit(_admin["id"], body.company_id, f"create_incident:{body.title}",
+               "incident", "medium", f"severity={body.severity}", ip)
+    return {"id": inc_id, "title": body.title, "severity": body.severity}
+
+
+@router.get("/incidents/{incident_id}", summary="Tier 4: get incident detail with notes + linked alerts")
+@limiter.limit("60/minute")
+async def get_incident(
+    incident_id: int,
+    request:     Request,
+    _admin: dict = Depends(require_super_admin),
+):
+    rows = execute_read(
+        """
+        SELECT i.*, c.name AS company_name,
+               ass.name AS assignee_name, cr.name AS created_by_name
+          FROM incidents i
+          LEFT JOIN companies c   ON c.id  = i.company_id
+          LEFT JOIN admins    ass ON ass.id = i.assignee_id
+          LEFT JOIN admins    cr  ON cr.id  = i.created_by
+         WHERE i.id = %s
+        """,
+        (incident_id,),
+    )
+    if not rows:
+        raise HTTPException(status_code=404, detail="Incident not found")
+
+    notes = execute_read(
+        """
+        SELECT n.id, n.note, a.name AS author_name, n.created_at
+          FROM incident_notes n
+          LEFT JOIN admins a ON a.id = n.author_id
+         WHERE n.incident_id = %s
+         ORDER BY n.created_at ASC
+        """,
+        (incident_id,),
+    )
+    linked_alerts = execute_read(
+        """
+        SELECT al.id, al.parameter, al.value, al.threshold, al.severity,
+               al.timestamp, al.acknowledged, c.name AS company_name
+          FROM incident_alerts ia
+          JOIN alerts al ON al.id = ia.alert_id
+          LEFT JOIN companies c ON c.id = al.company_id
+         WHERE ia.incident_id = %s
+         ORDER BY al.timestamp DESC
+        """,
+        (incident_id,),
+    )
+    return {**dict(rows[0]), "notes": notes, "linked_alerts": linked_alerts}
+
+
+@router.patch("/incidents/{incident_id}", summary="Tier 4: update incident")
+@limiter.limit("30/minute")
+async def update_incident(
+    incident_id: int,
+    body:        _IncidentUpdateIn,
+    request:     Request,
+    _admin: dict = Depends(require_super_admin),
+):
+    rows = execute_read(
+        "SELECT id, title, description, status, severity, assignee_id, "
+        "company_id, alert_id, created_at, updated_at, resolved_at "
+        "FROM incidents WHERE id = %s",
+        (incident_id,),
+    )
+    if not rows:
+        raise HTTPException(status_code=404, detail="Incident not found")
+
+    inc = rows[0]
+    new_status   = body.status   or inc["status"]
+    new_severity = body.severity or inc["severity"]
+    new_assignee = body.assignee_id if body.assignee_id is not None else inc["assignee_id"]
+    new_title    = body.title   or inc["title"]
+    new_desc     = body.description if body.description is not None else inc["description"]
+
+    resolved_at = inc["resolved_at"]
+    if new_status in ("resolved", "closed") and not resolved_at:
+        resolved_at = datetime.now(timezone.utc).isoformat()
+
+    execute_write(
+        """UPDATE incidents
+              SET status = %s, severity = %s, assignee_id = %s,
+                  title = %s, description = %s, resolved_at = %s,
+                  updated_at = NOW()
+            WHERE id = %s""",
+        (new_status, new_severity, new_assignee, new_title, new_desc, resolved_at, incident_id),
+    )
+    ip = request.client.host if request.client else "unknown"
+    _log_audit(_admin["id"], inc["company_id"],
+               f"update_incident:{inc['title']}→{new_status}",
+               "incident", "low", f"severity={new_severity}", ip)
+    return {"status": "updated", "incident_id": incident_id, "new_status": new_status}
+
+
+@router.post("/incidents/{incident_id}/notes", status_code=201, summary="Tier 4: add note to incident")
+@limiter.limit("30/minute")
+async def add_incident_note(
+    incident_id: int,
+    body:        _IncidentNoteIn,
+    request:     Request,
+    _admin: dict = Depends(require_super_admin),
+):
+    rows = execute_read("SELECT id, title, company_id FROM incidents WHERE id = %s", (incident_id,))
+    if not rows:
+        raise HTTPException(status_code=404, detail="Incident not found")
+    result = execute_write(
+        "INSERT INTO incident_notes (incident_id, author_id, note) VALUES (%s, %s, %s) RETURNING id",
+        (incident_id, _admin["id"], body.note),
+    )
+    execute_write("UPDATE incidents SET updated_at = NOW() WHERE id = %s", (incident_id,))
+    return {"id": result.lastrowid, "incident_id": incident_id}
+
+
+@router.post("/incidents/{incident_id}/link-alert", status_code=201, summary="Tier 4: link alert to incident")
+@limiter.limit("30/minute")
+async def link_alert_to_incident(
+    incident_id: int,
+    body:        _LinkAlertIn,
+    request:     Request,
+    _admin: dict = Depends(require_super_admin),
+):
+    rows = execute_read("SELECT id FROM incidents WHERE id = %s", (incident_id,))
+    if not rows:
+        raise HTTPException(status_code=404, detail="Incident not found")
+    try:
+        execute_write(
+            "INSERT INTO incident_alerts (incident_id, alert_id) VALUES (%s, %s)",
+            (incident_id, body.alert_id),
+        )
+    except Exception as exc:
+        if "unique" in str(exc).lower() or "duplicate" in str(exc).lower():
+            return {"status": "already_linked"}
+        raise HTTPException(status_code=500, detail=str(exc))
+    return {"status": "linked", "incident_id": incident_id, "alert_id": body.alert_id}
+
+
+@router.delete("/incidents/{incident_id}", summary="Tier 4: delete incident")
+@limiter.limit("10/minute")
+async def delete_incident(
+    incident_id: int,
+    request:     Request,
+    _admin: dict = Depends(require_super_admin),
+):
+    rows = execute_read("SELECT title, company_id FROM incidents WHERE id = %s", (incident_id,))
+    if not rows:
+        raise HTTPException(status_code=404, detail="Incident not found")
+    execute_write("DELETE FROM incidents WHERE id = %s", (incident_id,))
+    ip = request.client.host if request.client else "unknown"
+    _log_audit(_admin["id"], rows[0]["company_id"], f"delete_incident:{rows[0]['title']}",
+               "incident", "medium", f"incident_id={incident_id}", ip)
+    return {"status": "deleted"}
+
+
+# ─── 3. SLA Performance Dashboard ────────────────────────────────────────────
+
+@router.get("/sla/metrics", summary="Tier 4: per-company SLA metrics")
+@limiter.limit("30/minute")
+async def sla_metrics(
+    request: Request,
+    days:    int = Query(30, ge=1, le=90),
+    _admin: dict = Depends(require_super_admin),
+):
+    """
+    For each company: avg time-to-acknowledge (minutes), total alerts,
+    acked alerts, ack rate, and a composite SLA score (0-100).
+    """
+    rows = execute_read(
+        """
+        SELECT
+            c.id AS company_id,
+            c.name AS company_name,
+            c.is_active,
+            COUNT(a.id)                                                 AS total_alerts,
+            COUNT(a.id) FILTER (WHERE a.acknowledged = 1)               AS acked_alerts,
+            COUNT(a.id) FILTER (WHERE a.acknowledged = 0)               AS unacked_alerts,
+            COUNT(a.id) FILTER (WHERE a.severity = 'critical')          AS critical_total,
+            COUNT(a.id) FILTER (WHERE a.severity = 'critical' AND a.acknowledged = 1) AS critical_acked,
+            ROUND(
+                AVG(
+                    CASE WHEN a.acknowledged = 1 AND a.acknowledged_at IS NOT NULL
+                         THEN EXTRACT(EPOCH FROM (
+                                a.acknowledged_at::timestamptz - a.timestamp::timestamptz
+                              )) / 60.0
+                    END
+                )::numeric, 1
+            ) AS avg_ack_minutes,
+            ROUND(
+                PERCENTILE_CONT(0.5) WITHIN GROUP (
+                    ORDER BY
+                        CASE WHEN a.acknowledged = 1 AND a.acknowledged_at IS NOT NULL
+                             THEN EXTRACT(EPOCH FROM (
+                                    a.acknowledged_at::timestamptz - a.timestamp::timestamptz
+                                  )) / 60.0
+                        END
+                )::numeric, 1
+            ) AS median_ack_minutes
+          FROM companies c
+          LEFT JOIN alerts a
+                 ON a.company_id = c.id
+                AND a.timestamp::timestamptz >= NOW() - (%s || ' days')::interval
+         GROUP BY c.id, c.name, c.is_active
+         ORDER BY total_alerts DESC
+        """,
+        (days,),
+    )
+
+    result = []
+    for r in rows:
+        row = dict(r)
+        total = row["total_alerts"] or 0
+        acked = row["acked_alerts"] or 0
+        ack_rate = round(acked / total * 100, 1) if total else 100.0
+        avg_min  = float(row["avg_ack_minutes"]) if row["avg_ack_minutes"] is not None else None
+
+        # SLA score: 100 = perfect. Deductions: -1 per % unacked, -0.5 per min avg ack delay (capped at 30)
+        score = 100.0
+        score -= (100 - ack_rate)
+        if avg_min is not None:
+            score -= min(30.0, avg_min * 0.5)
+        score = max(0.0, round(score, 1))
+
+        row["ack_rate"]  = ack_rate
+        row["sla_score"] = score
+        row["sla_grade"] = (
+            "A" if score >= 90 else
+            "B" if score >= 75 else
+            "C" if score >= 60 else
+            "D" if score >= 40 else "F"
+        )
+        result.append(row)
+
+    return result
+
+
+@router.get("/sla/leaderboard", summary="Tier 4: SLA leaderboard (best to worst)")
+@limiter.limit("30/minute")
+async def sla_leaderboard(
+    request: Request,
+    days:    int = Query(30, ge=1, le=90),
+    _admin: dict = Depends(require_super_admin),
+):
+    all_metrics = await sla_metrics(request=request, days=days, _admin=_admin)
+    # Sort by sla_score desc, exclude companies with 0 alerts
+    active = [r for r in all_metrics if r["total_alerts"] > 0]
+    active.sort(key=lambda x: x["sla_score"], reverse=True)
+    return {"days": days, "companies": active}
+
+
+# ─── 4. Statistical Anomaly Detection ────────────────────────────────────────
+
+@router.get("/anomaly-detection", summary="Tier 4: z-score outlier detection across companies")
+@limiter.limit("20/minute")
+async def detect_anomalies(
+    request:   Request,
+    window:    int = Query(7, ge=1, le=30, description="Recent window in days to compare against baseline"),
+    baseline:  int = Query(30, ge=7, le=90, description="Baseline window in days"),
+    threshold: float = Query(2.0, ge=1.0, le=5.0, description="Z-score threshold for anomaly"),
+    _admin: dict = Depends(require_super_admin),
+):
+    """
+    For each company, compare recent alert rate (last `window` days) against
+    baseline rate (last `baseline` days). Flag companies whose recent rate
+    deviates more than `threshold` standard deviations from the fleet mean.
+    """
+    rows = execute_read(
+        """
+        SELECT
+            c.id AS company_id, c.name AS company_name,
+            COUNT(a.id) FILTER (
+                WHERE a.timestamp::timestamptz >= NOW() - (%s || ' days')::interval
+            ) AS recent_count,
+            COUNT(a.id) FILTER (
+                WHERE a.timestamp::timestamptz >= NOW() - (%s || ' days')::interval
+            ) AS baseline_count,
+            COUNT(a.id) FILTER (
+                WHERE a.severity = 'critical'
+                  AND a.timestamp::timestamptz >= NOW() - (%s || ' days')::interval
+            ) AS recent_critical
+          FROM companies c
+          LEFT JOIN alerts a ON a.company_id = c.id
+         WHERE c.is_active = 1
+         GROUP BY c.id, c.name
+        """,
+        (window, baseline, window),
+    )
+
+    if not rows:
+        return {"anomalies": [], "fleet_stats": {}}
+
+    # Normalise baseline to same day-count as window for fair comparison
+    rates = []
+    for r in rows:
+        bc = r["baseline_count"] or 0
+        rc = r["recent_count"]   or 0
+        baseline_daily = bc / baseline if baseline else 0
+        recent_daily   = rc / window   if window   else 0
+        rates.append({
+            "company_id":   r["company_id"],
+            "company_name": r["company_name"],
+            "recent_count": rc,
+            "recent_critical": r["recent_critical"] or 0,
+            "recent_daily":    round(recent_daily,   2),
+            "baseline_daily":  round(baseline_daily, 2),
+        })
+
+    # Fleet statistics
+    vals = [r["recent_daily"] for r in rates]
+    n = len(vals)
+    if n < 2:
+        return {"anomalies": [], "fleet_stats": {"n": n}}
+
+    import statistics
+    mean = statistics.mean(vals)
+    std  = statistics.stdev(vals) if n > 1 else 0.0
+
+    anomalies = []
+    for r in rates:
+        z = (r["recent_daily"] - mean) / std if std > 0 else 0.0
+        r["z_score"] = round(z, 2)
+        r["mean_daily"] = round(mean, 2)
+        r["std_daily"]  = round(std, 2)
+        if abs(z) >= threshold:
+            r["direction"] = "spike" if z > 0 else "quiet"
+            r["anomaly"]   = True
+            anomalies.append(r)
+        else:
+            r["anomaly"] = False
+
+    anomalies.sort(key=lambda x: abs(x["z_score"]), reverse=True)
+
+    return {
+        "anomalies":   anomalies,
+        "all_companies": rates,
+        "fleet_stats": {
+            "n":           n,
+            "mean_daily":  round(mean, 2),
+            "std_daily":   round(std,  2),
+            "window_days": window,
+            "baseline_days": baseline,
+            "threshold":   threshold,
+        },
+    }
+
+
+# ─── 5. Export: Maintenance Windows CSV ──────────────────────────────────────
+
+@router.get("/export/maintenance.csv", summary="Tier 4: export maintenance windows as CSV")
+@limiter.limit("10/minute")
+async def export_maintenance_csv(
+    request: Request,
+    _admin: dict = Depends(require_super_admin),
+):
+    rows = execute_read(
+        """
+        SELECT mw.id, c.name AS company, mw.start_at, mw.end_at, mw.reason,
+               a.name AS created_by, mw.created_at, mw.is_cancelled
+          FROM maintenance_windows mw
+          JOIN companies c ON c.id = mw.company_id
+          LEFT JOIN admins a ON a.id = mw.created_by
+         ORDER BY mw.start_at DESC
+         LIMIT 5000
+        """,
+        [],
+    )
+    buf = _io.StringIO()
+    w   = csv.writer(buf)
+    w.writerow(["ID", "Company", "Start", "End", "Reason", "Created By", "Created At", "Cancelled"])
+    for r in rows:
+        w.writerow([r["id"], r["company"], r["start_at"], r["end_at"],
+                    r["reason"], r["created_by"], r["created_at"], r["is_cancelled"]])
+    buf.seek(0)
+    return StreamingResponse(
+        iter([buf.read()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=maintenance_windows.csv"},
+    )
+
+
+@router.get("/export/incidents.csv", summary="Tier 4: export incidents as CSV")
+@limiter.limit("10/minute")
+async def export_incidents_csv(
+    request: Request,
+    _admin: dict = Depends(require_super_admin),
+):
+    rows = execute_read(
+        """
+        SELECT i.id, c.name AS company, i.title, i.severity, i.status,
+               ass.name AS assignee, cr.name AS created_by,
+               i.created_at, i.resolved_at
+          FROM incidents i
+          LEFT JOIN companies c   ON c.id  = i.company_id
+          LEFT JOIN admins    ass ON ass.id = i.assignee_id
+          LEFT JOIN admins    cr  ON cr.id  = i.created_by
+         ORDER BY i.created_at DESC
+         LIMIT 5000
+        """,
+        [],
+    )
+    buf = _io.StringIO()
+    w   = csv.writer(buf)
+    w.writerow(["ID", "Company", "Title", "Severity", "Status", "Assignee", "Created By", "Created At", "Resolved At"])
+    for r in rows:
+        w.writerow([r["id"], r["company"], r["title"], r["severity"],
+                    r["status"], r["assignee"], r["created_by"], r["created_at"], r["resolved_at"]])
+    buf.seek(0)
+    return StreamingResponse(
+        iter([buf.read()]),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=incidents.csv"},
+    )
