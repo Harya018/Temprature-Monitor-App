@@ -30,8 +30,9 @@ sentry-sdk[fastapi]==2.8.0
 # ── USB temperature sensor ────────────────────────────────────────────────────
 pyserial==3.5
 
-# ── Excel file sensor (pro-server / HMI live data via .xlsx) ─────────────────
-openpyxl==3.1.2
+# ── Excel file sensor (pro-server / HMI live data via .xlsx / .xls) ─────────
+openpyxl==3.1.2   # .xlsx support
+xlrd==2.0.1       # .xls (legacy Excel) support — xlrd 2.x handles .xls only
 
 # ── SMS via USB GSM modem (optional, only for SMS_METHOD=gammu) ───────────────
 # Windows: pip install python-gammu   Linux/macOS: pip install gammu

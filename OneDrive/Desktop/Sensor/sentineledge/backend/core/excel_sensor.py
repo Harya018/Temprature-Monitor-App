@@ -46,9 +46,9 @@ logger = get_logger("sentineledge.excel_sensor")
 
 # ── Configuration (mutable — updated by reload_settings) ──────────────────────
 EXCEL_FILE_PATH     : str   = os.environ.get("EXCEL_FILE_PATH",     "").strip()
-EXCEL_TEMP_COL      : str   = os.environ.get("EXCEL_TEMP_COL",      "Temperature").strip()
+EXCEL_TEMP_COL      : str   = os.environ.get("EXCEL_TEMP_COL",      "TEMPERATURE").strip()
 EXCEL_TIMESTAMP_COL : str   = os.environ.get("EXCEL_TIMESTAMP_COL", "").strip()
-EXCEL_DATE_COL      : str   = os.environ.get("EXCEL_DATE_COL",      "Date").strip()
+EXCEL_DATE_COL      : str   = os.environ.get("EXCEL_DATE_COL",      "DATE/TIME").strip()
 EXCEL_TIME_COL      : str   = os.environ.get("EXCEL_TIME_COL",      "Time").strip()
 EXCEL_SHEET         : str   = os.environ.get("EXCEL_SHEET",         "0").strip()
 EXCEL_POLL_INTERVAL : float = float(os.environ.get("EXCEL_POLL_INTERVAL", "1.0"))
@@ -380,13 +380,106 @@ def _is_skip_col(header: str) -> bool:
 def _read_latest_row() -> Optional[Dict]:
     """
     Dispatch to the correct reader based on file extension.
+    .xlsx → openpyxl   .xls → xlrd   everything else → CSV
     Returns {column_header: raw_value} or None.
     """
     ext = Path(EXCEL_FILE_PATH).suffix.lower()
-    if ext in (".xls", ".xlsx"):
+    if ext == ".xlsx":
         return _read_xlsx(EXCEL_FILE_PATH)
+    elif ext == ".xls":
+        return _read_xls(EXCEL_FILE_PATH)
     else:
         return _read_csv(EXCEL_FILE_PATH)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Legacy Excel (.xls) reader — xlrd only, openpyxl cannot open .xls files
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def _read_xls(filepath: str) -> Optional[Dict[str, object]]:
+    """
+    Read the last non-empty data row from a legacy .xls file using xlrd.
+    Pro-Server EX on older Windows systems often saves in .xls format.
+    Uses a temp-copy to handle Windows file locking (same as xlsx reader).
+    """
+    try:
+        import xlrd
+    except ImportError:
+        logger.error("xlrd not installed — run: pip install xlrd==2.0.1")
+        return None
+
+    # Copy to temp file to avoid Windows lock conflicts
+    tmp_path: Optional[str] = None
+    read_path = filepath
+    try:
+        fd, tmp_path = tempfile.mkstemp(suffix=".xls")
+        os.close(fd)
+        shutil.copy2(filepath, tmp_path)
+        read_path = tmp_path
+    except Exception as exc:
+        logger.debug("XLS copy failed (%s) — reading original", exc)
+        tmp_path = None
+
+    try:
+        wb = xlrd.open_workbook(read_path)
+
+        # Resolve sheet (index or name, same logic as xlsx reader)
+        ref = EXCEL_SHEET
+        if ref.isdigit() and int(ref) < wb.nsheets:
+            ws = wb.sheet_by_index(int(ref))
+        else:
+            try:
+                ws = wb.sheet_by_name(ref)
+            except Exception:
+                ws = wb.sheet_by_index(0)
+
+        if ws.nrows < 2:
+            return None
+
+        # Headers from row 0
+        headers = [
+            str(ws.cell_value(0, c)).strip() or f"col_{c}"
+            for c in range(ws.ncols)
+        ]
+
+        # Find last non-empty data row (scan from bottom)
+        # xlrd ctype: 0=EMPTY, 1=TEXT, 2=NUMBER, 3=DATE, 4=BOOL, 5=ERROR
+        last_row_idx: Optional[int] = None
+        for r in range(ws.nrows - 1, 0, -1):
+            if any(ws.cell(r, c).ctype not in (0, 5) for c in range(ws.ncols)):
+                last_row_idx = r
+                break
+
+        if last_row_idx is None:
+            return None
+
+        if not _active:
+            logger.info("Pro-Server EX XLS detected. Columns: %s", headers)
+
+        import datetime as _dt
+        row_data: Dict[str, object] = {}
+        for c, header in enumerate(headers):
+            cell = ws.cell(last_row_idx, c)
+            val = cell.value
+            # xlrd ctype 3 = DATE — convert Excel serial float to Python datetime
+            if cell.ctype == 3:
+                try:
+                    val = xlrd.xldate_as_datetime(val, wb.datemode)
+                except Exception:
+                    pass  # leave as raw float if conversion fails
+            row_data[header] = val
+
+        return row_data
+
+    except Exception as exc:
+        logger.warning("XLS read error: %s", exc)
+        return None
+    finally:
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except Exception:
+                pass
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
