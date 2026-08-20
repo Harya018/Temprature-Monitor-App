@@ -83,8 +83,7 @@ export default function DashboardPage({ wsData, health, thresholds, onAlertCount
     fetch('/api/admin/me', { headers })
       .then(r => r.ok ? r.json() : null)
       .then(me => {
-        if (!me?.company_id) return
-        setCompanyId(me.company_id)
+        if (me?.company_id) setCompanyId(me.company_id)
         return fetch('/api/admin/parameters', { headers })
           .then(r => r.ok ? r.json() : [])
           .then(params => setExtraParams(Array.isArray(params) ? params : []))
@@ -173,7 +172,11 @@ export default function DashboardPage({ wsData, health, thresholds, onAlertCount
         {extraParams.length > 0 && (
           <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
             {extraParams.map(p => {
-              const liveValue = lastReading?.extra_params?.[p.name] ?? null
+              // Case-insensitive match — Pro-Server EX column names may differ in case
+              const ep = lastReading?.extra_params
+              const liveValue = ep
+                ? (ep[p.name] ?? Object.entries(ep).find(([k]) => k.toLowerCase() === p.name.toLowerCase())?.[1] ?? null)
+                : null
               const mn = p.min_value != null ? Number(p.min_value) : null
               const mx = p.max_value != null ? Number(p.max_value) : null
               const inRange = liveValue != null && mn != null && mx != null

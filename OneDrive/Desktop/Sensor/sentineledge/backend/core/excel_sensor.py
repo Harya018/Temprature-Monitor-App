@@ -443,12 +443,13 @@ def _apply_row(row: Dict) -> None:
 # Background polling thread
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def _poll_loop() -> None:
+def _poll_loop(stop_evt: threading.Event) -> None:
     """
     Daemon thread: checks the file every EXCEL_POLL_INTERVAL seconds.
     Reads EXCEL_FILE_PATH dynamically each iteration so reload_settings()
     changes are picked up without restarting the process.
-    Exits cleanly when _stop_evt is set by reload_settings().
+    Accepts its own stop_evt so reload_settings() can replace the module-
+    level _stop_evt without the old thread picking up the new (unset) event.
     """
     global _last_mtime, _last_file_size, _last_row_sig, _active
 
@@ -457,11 +458,11 @@ def _poll_loop() -> None:
         EXCEL_FILE_PATH, EXCEL_POLL_INTERVAL,
     )
 
-    while not _stop_evt.is_set():
+    while not stop_evt.is_set():
         try:
             fp_str = EXCEL_FILE_PATH   # read module global each iteration
             if not fp_str:
-                _stop_evt.wait(EXCEL_POLL_INTERVAL)
+                stop_evt.wait(EXCEL_POLL_INTERVAL)
                 continue
 
             file_path = Path(fp_str)
@@ -474,7 +475,7 @@ def _poll_loop() -> None:
                         file_path,
                     )
                     _active = False
-                _stop_evt.wait(EXCEL_POLL_INTERVAL)
+                stop_evt.wait(EXCEL_POLL_INTERVAL)
                 continue
 
             stat      = file_path.stat()
@@ -484,7 +485,7 @@ def _poll_loop() -> None:
             # ── Skip if nothing changed ───────────────────────────────────────
             if mtime == _last_mtime and file_size == _last_file_size:
                 _active = True
-                _stop_evt.wait(EXCEL_POLL_INTERVAL)
+                stop_evt.wait(EXCEL_POLL_INTERVAL)
                 continue
 
             _last_mtime     = mtime
@@ -494,13 +495,13 @@ def _poll_loop() -> None:
             # ── Read latest row ───────────────────────────────────────────────
             row = _read_latest_row()
             if row is None:
-                _stop_evt.wait(EXCEL_POLL_INTERVAL)
+                stop_evt.wait(EXCEL_POLL_INTERVAL)
                 continue
 
             # ── Duplicate suppression ─────────────────────────────────────────
             sig = "|".join(str(v) for v in row.values())
             if sig == _last_row_sig:
-                _stop_evt.wait(EXCEL_POLL_INTERVAL)
+                stop_evt.wait(EXCEL_POLL_INTERVAL)
                 continue
             _last_row_sig = sig
 
@@ -517,7 +518,7 @@ def _poll_loop() -> None:
         except Exception as exc:
             logger.warning("Pro-Server EX reader error: %s", exc)
 
-        _stop_evt.wait(EXCEL_POLL_INTERVAL)
+        stop_evt.wait(EXCEL_POLL_INTERVAL)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -555,8 +556,10 @@ def reload_settings(db_values: Dict[str, str]) -> None:
     except (ValueError, TypeError):
         EXCEL_POLL_INTERVAL = 1.0
 
-    # Signal old thread to exit
-    _stop_evt.set()
+    # Signal old thread to exit using the OLD event (before replacing it)
+    old_stop = _stop_evt
+    _stop_evt = threading.Event()   # new event for the new thread
+    old_stop.set()                  # stop the old thread
     if _thread_ref and _thread_ref.is_alive():
         _thread_ref.join(timeout=5.0)
 
@@ -569,12 +572,10 @@ def reload_settings(db_values: Dict[str, str]) -> None:
     _last_row_sig       = ""
     _active             = False
 
-    # New stop event for the new thread
-    _stop_evt = threading.Event()
-
     if EXCEL_FILE_PATH:
         _thread_ref = threading.Thread(
             target=_poll_loop,
+            args=(_stop_evt,),      # pass the new event so old thread can't interfere
             daemon=True,
             name="proserver-reader",
         )
@@ -592,6 +593,7 @@ def reload_settings(db_values: Dict[str, str]) -> None:
 if EXCEL_FILE_PATH:
     _thread_ref = threading.Thread(
         target=_poll_loop,
+        args=(_stop_evt,),
         daemon=True,
         name="proserver-reader",
     )

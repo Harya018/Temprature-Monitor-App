@@ -733,7 +733,16 @@ async def get_me(request: Request):
             (token,),
         )
         if rows:
-            return rows[0]
+            row = dict(rows[0])
+            # Super admin may have no company — fall back to the first active company
+            # so the dashboard can load parameters and scope WebSocket data correctly.
+            if not row.get("company_id"):
+                fb = execute_read(
+                    "SELECT id FROM companies WHERE is_active != 0 ORDER BY id LIMIT 1"
+                )
+                if fb:
+                    row["company_id"] = fb[0]["id"]
+            return row
     return JSONResponse(status_code=401, content={"error": "Not authenticated"})
 
 
@@ -836,7 +845,7 @@ class _ParamRequestIn(BaseModel):
     dependencies=[Depends(require_admin)],
 )
 async def request_admin_parameter(body: _ParamRequestIn, request: Request):
-    from database.connection import execute_write
+    from database.connection import execute_write, execute_read
     import json as _json
 
     auth = request.headers.get("authorization", "")
@@ -847,6 +856,39 @@ async def request_admin_parameter(body: _ParamRequestIn, request: Request):
     if not admin_id or not company_id:
         return JSONResponse(status_code=401, content={"error": "Cannot determine admin identity from token"})
 
+    # Super admin: direct insert — no approval queue needed
+    role_rows = execute_read("SELECT role FROM admins WHERE id = %s LIMIT 1", (admin_id,))
+    role = role_rows[0]["role"] if role_rows else None
+    if role == "super_admin":
+        execute_write(
+            """INSERT INTO company_parameters
+                   (company_id, name, unit, min_value, max_value, is_active, created_at, updated_at)
+               VALUES (%s, %s, %s, %s, %s, TRUE, NOW(), NOW())
+               ON CONFLICT (company_id, name) DO UPDATE
+                 SET unit=EXCLUDED.unit, min_value=EXCLUDED.min_value,
+                     max_value=EXCLUDED.max_value, is_active=TRUE, updated_at=NOW()""",
+            (company_id, body.name, body.unit, body.min_value, body.max_value),
+        )
+        try:
+            from modules.inapp.manager import broadcast as _bcast
+            import asyncio as _asyncio
+            _asyncio.create_task(_bcast({
+                "type":       "parameter_added",
+                "company_id": company_id,
+                "parameter":  {"name": body.name, "unit": body.unit,
+                               "min_value": body.min_value, "max_value": body.max_value},
+            }))
+        except Exception as _be:
+            logger.warning("parameter_added broadcast failed: %s", _be)
+        log_activity(admin_id, "parameter_added", "company_parameters",
+                     f"company_id:{company_id} name:{body.name}", company_id)
+        logger.info("Super admin %d added parameter '%s' for company %d", admin_id, body.name, company_id)
+        return JSONResponse(
+            status_code=201,
+            content={"status": "added", "message": f"Parameter '{body.name}' added successfully."},
+        )
+
+    # Regular admin: submit for approval
     payload = {
         "company_id": company_id,
         "name":       body.name,

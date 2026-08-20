@@ -1,0 +1,127 @@
+═══════════════════════════════════════════════════════════
+  SENTINELEDGE — SETUP GUIDE FOR NEW LAPTOP
+═══════════════════════════════════════════════════════════
+
+STEP 1 — Install Python 3.12
+─────────────────────────────
+1. Download from: https://www.python.org/downloads/
+2. Run installer
+3. IMPORTANT: tick "Add Python to PATH" before clicking Install
+4. Verify: open Command Prompt → type:  python --version
+   Should show: Python 3.12.x
+
+STEP 2 — Install Node.js 20+
+─────────────────────────────
+1. Download LTS from: https://nodejs.org/
+2. Run installer (all defaults are fine)
+3. Verify: open Command Prompt → type:  node --version
+   Should show: v20.x.x
+
+STEP 3 — Install PostgreSQL 16
+────────────────────────────────
+1. Download from: https://www.postgresql.org/download/windows/
+2. Run installer:
+   - Password: sentineledge123   (or whatever you set in .env)
+   - Port: 5432 (default)
+   - Keep all defaults
+3. After install, open pgAdmin or Command Prompt as admin:
+   psql -U postgres
+   CREATE DATABASE sentineledge;
+   CREATE USER sentineledge WITH PASSWORD 'sentineledge123';
+   GRANT ALL PRIVILEGES ON DATABASE sentineledge TO sentineledge;
+   \q
+
+STEP 4 — Install Python packages
+──────────────────────────────────
+Open Command Prompt in the backend folder:
+  cd D:\sensor\sentineledge\backend
+  pip install -r requirements.txt
+
+STEP 5 — Install Node packages (frontend)
+──────────────────────────────────────────
+Open Command Prompt in the frontend folder:
+  cd D:\sensor\sentineledge\frontend-web
+  npm install
+
+STEP 6 — Create environment file
+──────────────────────────────────
+Copy the example and edit it:
+  cd D:\sensor\sentineledge
+  copy .env.production .env.production.local   (if it exists)
+
+Or create D:\sensor\sentineledge\.env.production with:
+───────────────────────────────────────
+DATABASE_URL=postgresql://sentineledge:sentineledge123@localhost/sentineledge
+ADMIN_USERNAME=superadmin
+ADMIN_PASSWORD=YourStrongPassword123
+APP_ENV=production
+SERVER_HOST=0.0.0.0
+SERVER_PORT=5000
+DEMO_MODE=false
+───────────────────────────────────────
+
+STEP 7 — Build the frontend (only if src/ files changed)
+──────────────────────────────────────────────────────────
+  cd D:\sensor\sentineledge\frontend-web
+  npm run build
+  (This copies files to backend\static\ automatically)
+
+STEP 8 — Start the server
+───────────────────────────
+  cd D:\sensor\sentineledge
+  START.bat
+
+OR manually:
+  cd D:\sensor\sentineledge\backend
+  python main.py
+
+Open browser: http://localhost:5000
+
+═══════════════════════════════════════════════════════════
+  PRO-SERVER EX FILE PATH SETUP
+═══════════════════════════════════════════════════════════
+
+If Pro-Server EX is running on THIS SAME COMPUTER:
+  → Use the direct file path, e.g.:
+     C:\ProServer\data\readings.csv
+
+If Pro-Server EX is on a DIFFERENT COMPUTER on the network:
+  Option A — Map a network drive:
+    1. In Windows Explorer → This PC → Map network drive
+    2. Use the mapped drive letter, e.g.:  Z:\readings.csv
+
+  Option B — UNC path (no drive mapping needed):
+    Use:  \\192.168.1.x\SharedFolder\readings.csv
+    (Replace 192.168.1.x with the Pro-Server EX computer's IP)
+
+After starting the server:
+  1. Open http://localhost:5000
+  2. Login → Settings → Pro-Server EX Data Source
+  3. Paste the file path
+  4. Click "Test File" — should show column names
+  5. Click "Save Settings" — live data will start flowing
+
+═══════════════════════════════════════════════════════════
+  TROUBLESHOOTING
+═══════════════════════════════════════════════════════════
+
+"python is not recognized":
+  → Reinstall Python and tick "Add to PATH"
+
+"pip install fails":
+  → Run Command Prompt as Administrator
+
+"database connection error":
+  → Make sure PostgreSQL is running (Services → postgresql-x64-16)
+  → Check DATABASE_URL in .env.production
+
+"file not found" in Pro-Server EX settings:
+  → Make sure the path uses double backslashes OR forward slashes
+  → Good:  C:/ProServer/data/readings.csv
+  → Good:  C:\ProServer\data\readings.csv
+
+Parameters added (pH, DO) not showing in dashboard:
+  → They appear immediately after adding (no approval needed for super admin)
+  → Make sure the column name in the CSV exactly matches what you typed
+
+═══════════════════════════════════════════════════════════
