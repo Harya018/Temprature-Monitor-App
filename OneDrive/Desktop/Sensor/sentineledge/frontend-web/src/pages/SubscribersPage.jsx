@@ -22,6 +22,7 @@ import Modal from '../components/shared/Modal.jsx'
 import PasswordConfirmModal from '../components/PasswordConfirmModal.jsx'
 import ErrorState from '../components/ErrorState'
 import EmptyState from '../components/EmptyState'
+import SubscriberProfilesPage from './SubscriberProfilesPage'
 
 // ── Constants ──────────────────────────────────────────────────────────────────
 const PAGE_SIZE = 6
@@ -62,6 +63,7 @@ const avatarColor = (idx) => AVATAR_COLORS[idx % AVATAR_COLORS.length]
 
 // ── Main component ─────────────────────────────────────────────────────────────
 export default function SubscribersPage() {
+  const [activeTab,  setActiveTab]  = useState('subscribers')
   const [subs,       setSubs]       = useState([])
   const [loading,    setLoading]    = useState(false)
   const [fetchError, setFetchError] = useState(null)
@@ -255,6 +257,28 @@ export default function SubscribersPage() {
   // ── Render ──────────────────────────────────────────────────────────────────
   return (
     <div className="space-y-5">
+
+      {/* ── Tab switcher ────────────────────────────────────────────────────── */}
+      <div className="sub-tabs">
+        <button
+          className={`sub-tab-btn${activeTab === 'subscribers' ? ' active' : ''}`}
+          onClick={() => setActiveTab('subscribers')}
+        >
+          Subscribers
+        </button>
+        <button
+          className={`sub-tab-btn${activeTab === 'profiles' ? ' active' : ''}`}
+          onClick={() => setActiveTab('profiles')}
+        >
+          Profiles
+        </button>
+      </div>
+
+      {/* ── Profiles tab ────────────────────────────────────────────────────── */}
+      {activeTab === 'profiles' && <SubscriberProfilesPage />}
+
+      {/* ── Subscribers tab ─────────────────────────────────────────────────── */}
+      {activeTab === 'subscribers' && <>
 
       {/* ── Header row ──────────────────────────────────────────────────────── */}
       <div className="flex items-center justify-between">
@@ -602,6 +626,8 @@ export default function SubscribersPage() {
         onCancel={() => { setPendingAction(null); setPwdError(null) }}
         error={pwdError}
       />
+
+      </> /* end subscribers tab */}
 
     </div>
   )

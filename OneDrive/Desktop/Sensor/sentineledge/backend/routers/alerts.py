@@ -13,7 +13,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request
 import database
 import core.escalation as escalation
 from database.connection import execute_read
-from middleware.auth import require_admin
+from middleware.auth import require_admin, require_subscriber_auth
 from middleware.rate_limit import limiter
 from models import AcknowledgeIn, AlertOut
 from utils.logger import get_logger
@@ -183,3 +183,69 @@ async def delete_alerts(
     except Exception as exc:
         logger.error("DELETE /api/alerts failed: %s", exc, exc_info=True)
         raise HTTPException(status_code=500, detail="An internal error occurred")
+
+
+# ── Subscriber-facing alert endpoints (mobile app) ────────────────────────────
+# These mirror the admin endpoints above but accept X-Auth-Token (subscriber
+# session) instead of Authorization: Bearer (admin session).  The subscriber's
+# company_id is derived from their own row so results are always scoped to
+# their company.
+
+@router.get(
+    "/subscriber/alerts",
+    response_model=list[AlertOut],
+    summary="Get recent alerts (subscriber)",
+    description="Returns alerts for the subscriber's company. Requires X-Auth-Token header.",
+)
+@limiter.limit("60/minute")
+async def get_subscriber_alerts(
+    request: Request,
+    limit: int = Query(50, ge=1, le=1000),
+    page:  int = Query(1,  ge=1),
+    sub_session: dict = Depends(require_subscriber_auth),
+):
+    sub = database.get_subscriber_by_id(sub_session["subscriber_id"])
+    company_id = sub.get("company_id") if sub else None
+    offset = (page - 1) * limit
+    rows = database.get_recent_alerts(limit=limit, offset=offset, company_id=company_id)
+    result = []
+    for r in rows:
+        delivery_status = _build_delivery_status(r["id"])
+        result.append(AlertOut(
+            id=r["id"],
+            parameter=r["parameter"],
+            value=r["value"],
+            threshold=r["threshold"],
+            direction=r["direction"],
+            severity=r.get("severity", "WARNING"),
+            timestamp=r["timestamp"],
+            acknowledged=bool(r["acknowledged"]),
+            acknowledged_by=r.get("acknowledged_by"),
+            acknowledged_at=r.get("acknowledged_at"),
+            escalation_level=r["escalation_level"],
+            max_escalated=bool(r["max_escalated"]),
+            cooldown_until=r.get("cooldown_until"),
+            delivery_status=delivery_status if delivery_status else None,
+        ))
+    return result
+
+
+@router.post(
+    "/subscriber/alerts/{alert_id}/acknowledge",
+    summary="Acknowledge an alert (subscriber)",
+    description="Marks the alert as acknowledged. Requires X-Auth-Token header.",
+)
+@limiter.limit("30/minute")
+async def subscriber_acknowledge_alert(
+    alert_id: int,
+    body: AcknowledgeIn,
+    request: Request,
+    sub_session: dict = Depends(require_subscriber_auth),
+):
+    ok = await escalation.acknowledge(alert_id, f"{body.acknowledged_by} (app)")
+    if not ok:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Alert {alert_id} not found or already acknowledged",
+        )
+    return {"status": "acknowledged", "alert_id": alert_id}

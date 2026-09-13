@@ -4,35 +4,28 @@ websockets==12.0
 pywebpush==1.14.0
 python-dotenv==1.0.1
 requests==2.31.0
-aiofiles==23.2.1
 pydantic==2.7.0
 firebase-admin==6.5.0
 
-# ── PostgreSQL drivers ────────────────────────────────────────────────────────
+# ── PostgreSQL driver ─────────────────────────────────────────────────────────
 psycopg2-binary==2.9.9
-asyncpg==0.29.0
-databases[asyncpg]==0.9.0
 
 # ── Rate limiting ─────────────────────────────────────────────────────────────
 slowapi==0.1.9
-limits==3.13.0
 
 # ── Security / password hashing ───────────────────────────────────────────────
 bcrypt==4.2.1
 
 # ── TOTP two-factor authentication ────────────────────────────────────────────
 pyotp==2.9.0
-qrcode==7.4.2
 
 # ── Error tracking ───────────────────────────────────────────────────────────
 sentry-sdk[fastapi]==2.8.0
 
-# ── USB temperature sensor ────────────────────────────────────────────────────
-pyserial==3.5
-
 # ── Excel file sensor (pro-server / HMI live data via .xlsx / .xls) ─────────
 openpyxl==3.1.2   # .xlsx support
 xlrd==2.0.1       # .xls (legacy Excel) support — xlrd 2.x handles .xls only
+olefile>=0.46     # OLE2 compound-doc reader — lets xlrd split multi-block Pro-Server EX .xls files
 
 # ── SMS via USB GSM modem (optional, only for SMS_METHOD=gammu) ───────────────
 # Windows: pip install python-gammu   Linux/macOS: pip install gammu

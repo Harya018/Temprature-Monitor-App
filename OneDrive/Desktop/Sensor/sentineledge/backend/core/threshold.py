@@ -30,7 +30,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone, timedelta
 
-from config import RUNTIME_THRESHOLDS, ALERT_COOLDOWN_SECONDS, MODULE_STATUS
+from config import RUNTIME_THRESHOLDS, ALERT_COOLDOWN_SECONDS, MODULE_STATUS, is_alert_enabled
 from models import BreachEvent
 
 # ─── Severity bands ───────────────────────────────────────────────────────────
@@ -68,6 +68,8 @@ def _get_severity(value: float, threshold: float, direction: str) -> str:
 cooldown_tracker: dict[str, datetime | None] = {
     "temperature_high": None,
     "temperature_low":  None,
+    "ph_high":          None,
+    "ph_low":           None,
 }
 
 # ─── Direction tracker: prevents duplicate LOW alerts per cooling run ─────────
@@ -97,58 +99,83 @@ def check_threshold(reading: dict) -> list[BreachEvent]:
     cooldown_delta = timedelta(seconds=ALERT_COOLDOWN_SECONDS)
     breaches: list[BreachEvent] = []
 
-    temp  = reading["temperature"]
-    t_high = RUNTIME_THRESHOLDS["temp_high"]
-    t_low  = RUNTIME_THRESHOLDS["temp_low"]
+    # ── Temperature checks ────────────────────────────────────────────────────
+    if is_alert_enabled("temperature"):
+        temp  = reading["temperature"]
+        t_high = RUNTIME_THRESHOLDS["temp_high"]
+        t_low  = RUNTIME_THRESHOLDS["temp_low"]
 
-    # ── Reset LOW direction when machine heats back up ────────────────────────
-    # This means a new cooling run is starting; the next crossing of LOW
-    # should fire a fresh alert.
-    if temp > _LOW_DIRECTION_RESET_TEMP:
-        last_breach_direction["temperature"] = None
+        # Reset LOW direction when machine heats back up (new cooling run)
+        if temp > _LOW_DIRECTION_RESET_TEMP:
+            last_breach_direction["temperature"] = None
 
-    checks = [
-        ("temperature", temp, t_high, "high"),
-        ("temperature", temp, t_low,  "low"),
-    ]
+        for parameter, value, threshold, direction in [
+            ("temperature", temp, t_high, "high"),
+            ("temperature", temp, t_low,  "low"),
+        ]:
+            if direction == "high" and value <= threshold:
+                continue
+            if direction == "low"  and value >= threshold:
+                continue
 
-    for parameter, value, threshold, direction in checks:
-        # STRICT boundary: exactly at threshold is NOT a breach
-        if direction == "high" and value <= threshold:
-            continue
-        if direction == "low"  and value >= threshold:
-            continue
+            # Suppress duplicate LOW alert within the same cooling run
+            if direction == "low" and last_breach_direction.get(parameter) == "low":
+                continue
 
-        # ── Cooling-run duplicate suppression for LOW direction ───────────────
-        # If we already fired a LOW alert in this cooling run, skip.
-        # The run resets when temperature climbs back above _LOW_DIRECTION_RESET_TEMP.
-        if direction == "low" and last_breach_direction.get(parameter) == "low":
-            continue
+            key = f"{parameter}_{direction}"
+            last_trigger = cooldown_tracker.get(key)
+            if last_trigger is not None and (now - last_trigger) < cooldown_delta:
+                continue
 
-        # Unique key per direction
-        key = f"{parameter}_{direction}"
-        last_trigger = cooldown_tracker.get(key)
+            severity = _get_severity(value, threshold, direction)
+            cooldown_tracker[key] = now
+            last_breach_direction[parameter] = direction
+            breaches.append(BreachEvent(
+                parameter=parameter, value=value,
+                threshold=threshold, direction=direction, severity=severity,
+            ))
 
-        if last_trigger is not None and (now - last_trigger) < cooldown_delta:
-            # Still within cooldown window — skip
-            continue
+    # ── pH range check (min / max) ─────────────────────────────────────────────
+    if is_alert_enabled("ph"):
+        extra = reading.get("extra_params") or {}
+        ph_raw = next((v for k, v in extra.items() if k.lower() == "ph"), None)
+        if ph_raw is not None:
+            try:
+                ph_val = float(ph_raw)
+            except (TypeError, ValueError):
+                ph_val = None
 
-        # Compute severity
-        severity = _get_severity(value, threshold, direction)
+            if ph_val is not None:
+                ph_max = float(RUNTIME_THRESHOLDS.get("ph_threshold_max", 7.0))
+                ph_min = float(RUNTIME_THRESHOLDS.get("ph_threshold_min", 5.5))
 
-        # Record this trigger
-        cooldown_tracker[key] = now
-        last_breach_direction[parameter] = direction
+                # HIGH breach: pH above maximum threshold
+                if ph_val > ph_max:
+                    key = "ph_high"
+                    last_trigger = cooldown_tracker.get(key)
+                    if last_trigger is None or (now - last_trigger) >= cooldown_delta:
+                        cooldown_tracker[key] = now
+                        breaches.append(BreachEvent(
+                            parameter="ph",
+                            value=ph_val,
+                            threshold=ph_max,
+                            direction="high",
+                            severity=_get_severity(ph_val, ph_max, "high"),
+                        ))
 
-        breaches.append(
-            BreachEvent(
-                parameter=parameter,
-                value=value,
-                threshold=threshold,
-                direction=direction,
-                severity=severity,
-            )
-        )
+                # LOW breach: pH below minimum threshold
+                if ph_val < ph_min:
+                    key = "ph_low"
+                    last_trigger = cooldown_tracker.get(key)
+                    if last_trigger is None or (now - last_trigger) >= cooldown_delta:
+                        cooldown_tracker[key] = now
+                        breaches.append(BreachEvent(
+                            parameter="ph",
+                            value=ph_val,
+                            threshold=ph_min,
+                            direction="low",
+                            severity=_get_severity(ph_val, ph_min, "low"),
+                        ))
 
     # Update module status once we've processed at least one reading
     if "sensor" not in MODULE_STATUS or MODULE_STATUS.get("sensor") == "starting":

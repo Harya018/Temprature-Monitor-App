@@ -40,7 +40,7 @@ async function req(method, path, body, headers = adminHeaders()) {
 export const adminLogin              = (username, pin)   => req('POST', '/api/admin/login',             { username, pin }, jsonHeaders())
 
 // ── Core ──────────────────────────────────────────────────────────────────────
-export const fetchHealth             = ()             => req('GET',  '/api/health',                   undefined, jsonHeaders())
+export const fetchHealth             = ()             => req('GET',  '/api/health')
 export const fetchAlerts             = (limit = 50)   => req('GET',  `/api/alerts?limit=${limit}`,    undefined, adminHeaders())
 export const acknowledgeAlert        = (id, name)     => req('POST', `/api/alerts/${id}/acknowledge`, { acknowledged_by: name })
 export const fetchSubscribers        = ()             => req('GET',  '/api/subscribers',              undefined, adminHeaders())
@@ -52,7 +52,13 @@ export const setSubscriberPin        = (id, pin)      => req('POST', `/api/subsc
 export const fetchThresholds         = ()             => req('GET',  '/api/config/thresholds',        undefined, jsonHeaders())
 export const updateThresholds        = (data, pwd)    => req('POST', '/api/config/thresholds',        data, adminHeaders(pwd))
 export const resetThresholds         = (pwd)          => req('POST', '/api/config/thresholds/reset',  undefined, adminHeaders(pwd))
+export const fetchAlertSettings      = ()             => req('GET',  '/api/config/alert-settings',    undefined, jsonHeaders())
+export const updateAlertSettings     = (data)         => req('POST', '/api/config/alert-settings',    data)
+export const fetchOpcSettings        = ()             => req('GET',  '/api/admin/opc/settings')
+export const saveOpcSettings         = (data)         => req('POST', '/api/admin/opc/settings',        data)
+export const fetchOpcStatus          = ()             => req('GET',  '/api/admin/opc/status')
 export const simulateBreach          = ()             => req('POST', '/api/simulate/breach',          undefined)
+export const simulatePhBreach        = ()             => req('POST', '/api/simulate/ph-breach',       undefined)
 export const fetchRecentReadings     = ()             => req('GET',  '/api/readings/recent',          undefined, jsonHeaders())
 export const fetchAdminConfigChanges = ()             => req('GET',  '/api/admin/config-changes')
 export const fetchDatabaseStats      = ()             => req('GET',  '/api/admin/database/stats')

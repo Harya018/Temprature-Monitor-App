@@ -42,6 +42,7 @@ DATABASE_URL: str = os.getenv(
 # ── Connection Pool ───────────────────────────────────────────────────────────
 _pool: Optional[psycopg2.pool.ThreadedConnectionPool] = None
 _pool_lock = threading.Lock()
+_db_initialized: bool = False  # prevents duplicate init_db() runs per process
 
 _DB_RECONNECT_ATTEMPTS = 10
 _DB_RECONNECT_DELAY    = 5
@@ -355,30 +356,49 @@ def _run_migrations(pool: psycopg2.pool.ThreadedConnectionPool) -> None:
     deployment without touching existing data.
     """
     conn = pool.getconn()
+    logger.info("Running schema migrations...")
     try:
         with conn.cursor() as cur:
+            # Never let a migration block startup indefinitely (e.g. ALTER TABLE
+            # waiting for an ACCESS EXCLUSIVE lock held by a previous server process).
+            # 30 s is generous — PostgreSQL typically cleans up a dead backend's
+            # transactions within a few seconds of the process being killed.
+            cur.execute("SET lock_timeout = '30s'")
 
-            # Helper: check if a column exists in a table
-            def col_exists(table: str, column: str) -> bool:
-                cur.execute(
-                    """
-                    SELECT 1 FROM information_schema.columns
-                    WHERE table_name = %s AND column_name = %s
-                    """,
-                    (table, column),
-                )
-                return cur.fetchone() is not None
+            # Load ALL existing tables and columns in ONE query each so every
+            # migration check is an in-memory set lookup instead of a DB round-trip.
+            cur.execute(
+                "SELECT table_name FROM information_schema.tables "
+                "WHERE table_schema = 'public'"
+            )
+            _existing_tables: set = {r[0] for r in cur.fetchall()}
 
-            # Helper: check if a table exists
+            cur.execute(
+                "SELECT table_name, column_name FROM information_schema.columns "
+                "WHERE table_schema = 'public'"
+            )
+            _existing_cols: set = {(r[0], r[1]) for r in cur.fetchall()}
+
             def table_exists(table: str) -> bool:
+                return table in _existing_tables
+
+            def col_exists(table: str, column: str) -> bool:
+                return (table, column) in _existing_cols
+
+            def _refresh_schema() -> None:
+                """Call after CREATE TABLE so the caches stay accurate."""
                 cur.execute(
-                    """
-                    SELECT 1 FROM information_schema.tables
-                    WHERE table_name = %s
-                    """,
-                    (table,),
+                    "SELECT table_name FROM information_schema.tables "
+                    "WHERE table_schema = 'public'"
                 )
-                return cur.fetchone() is not None
+                _existing_tables.clear()
+                _existing_tables.update(r[0] for r in cur.fetchall())
+                cur.execute(
+                    "SELECT table_name, column_name FROM information_schema.columns "
+                    "WHERE table_schema = 'public'"
+                )
+                _existing_cols.clear()
+                _existing_cols.update((r[0], r[1]) for r in cur.fetchall())
 
             # Migration 1: readings.is_valid
             if table_exists("readings") and not col_exists("readings", "is_valid"):
@@ -1398,12 +1418,198 @@ def _run_migrations(pool: psycopg2.pool.ThreadedConnectionPool) -> None:
                 """
             )
 
+            # ── Migration 59: Phase 4 — Distributed hub-and-spoke aggregation tables ──
+            # These tables sit on the SuperAdmin server and will receive data pushed by
+            # remote company node installations.  Created now (dev/testing) so the schema
+            # is ready; the ingest API and sync agent are deferred to production.
+
+            # 59a: company_nodes — one row per registered remote installation
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS company_nodes (
+                    id              SERIAL PRIMARY KEY,
+                    company_id      INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+                    node_name       TEXT    NOT NULL,
+                    api_key         TEXT    NOT NULL UNIQUE,
+                    is_active       BOOLEAN NOT NULL DEFAULT TRUE,
+                    registered_at   TIMESTAMPTZ DEFAULT NOW(),
+                    contact_email   TEXT,
+                    location        TEXT,
+                    backend_version TEXT
+                )
+                """
+            )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_company_nodes_company "
+                "ON company_nodes(company_id)"
+            )
+            logger.info("Migration 59a: company_nodes table ready")
+
+            # 59b: company_heartbeats — last-known health per node
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS company_heartbeats (
+                    node_id        INTEGER PRIMARY KEY
+                                   REFERENCES company_nodes(id) ON DELETE CASCADE,
+                    last_seen_at   TIMESTAMPTZ NOT NULL,
+                    sensor_status  TEXT NOT NULL DEFAULT 'unknown',
+                    readings_today INTEGER DEFAULT 0,
+                    alerts_today   INTEGER DEFAULT 0,
+                    updated_at     TIMESTAMPTZ DEFAULT NOW()
+                )
+                """
+            )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_heartbeats_last_seen "
+                "ON company_heartbeats(last_seen_at)"
+            )
+            logger.info("Migration 59b: company_heartbeats table ready")
+
+            # 59c: synced_readings — readings received from remote nodes
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS synced_readings (
+                    id          BIGSERIAL PRIMARY KEY,
+                    node_id     INTEGER NOT NULL
+                                REFERENCES company_nodes(id) ON DELETE CASCADE,
+                    temperature DOUBLE PRECISION,
+                    extra_params JSONB DEFAULT '{}',
+                    recorded_at TIMESTAMPTZ NOT NULL,
+                    received_at TIMESTAMPTZ DEFAULT NOW()
+                )
+                """
+            )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_synced_readings_node_ts "
+                "ON synced_readings(node_id, recorded_at DESC)"
+            )
+            logger.info("Migration 59c: synced_readings table ready")
+
+            # 59d: synced_alerts — alerts received from remote nodes
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS synced_alerts (
+                    id              BIGSERIAL PRIMARY KEY,
+                    node_id         INTEGER NOT NULL
+                                    REFERENCES company_nodes(id) ON DELETE CASCADE,
+                    remote_alert_id INTEGER,
+                    parameter       TEXT    NOT NULL,
+                    value           DOUBLE PRECISION NOT NULL,
+                    threshold       DOUBLE PRECISION NOT NULL,
+                    direction       TEXT    NOT NULL,
+                    severity        TEXT    NOT NULL DEFAULT 'WARNING',
+                    acknowledged    BOOLEAN DEFAULT FALSE,
+                    fired_at        TIMESTAMPTZ NOT NULL,
+                    received_at     TIMESTAMPTZ DEFAULT NOW()
+                )
+                """
+            )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_synced_alerts_node_ts "
+                "ON synced_alerts(node_id, fired_at DESC)"
+            )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_synced_alerts_ack "
+                "ON synced_alerts(acknowledged)"
+            )
+            logger.info("Migration 59d: synced_alerts table ready")
+
+            # 59e: sync_error_log — failed sync attempts for debugging / "handle errors"
+            cur.execute(
+                """
+                CREATE TABLE IF NOT EXISTS sync_error_log (
+                    id            SERIAL PRIMARY KEY,
+                    node_id       INTEGER REFERENCES company_nodes(id) ON DELETE SET NULL,
+                    error_type    TEXT NOT NULL,
+                    error_message TEXT,
+                    payload_size  INTEGER,
+                    occurred_at   TIMESTAMPTZ DEFAULT NOW(),
+                    resolved      BOOLEAN DEFAULT FALSE
+                )
+                """
+            )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_sync_errors_node "
+                "ON sync_error_log(node_id, occurred_at DESC)"
+            )
+            cur.execute(
+                "CREATE INDEX IF NOT EXISTS idx_sync_errors_resolved "
+                "ON sync_error_log(resolved)"
+            )
+            logger.info("Migration 59e: sync_error_log table ready")
+
+            # Migration 60: add ph column to csv_sensor_history
+            cur.execute(
+                "ALTER TABLE csv_sensor_history ADD COLUMN IF NOT EXISTS ph NUMERIC(8,3)"
+            )
+            logger.info("Migration 60: added ph column to csv_sensor_history")
+
         conn.commit()
     except Exception as exc:
         conn.rollback()
         logger.warning("Migration warning: %s", exc)
     finally:
         pool.putconn(conn)
+
+    # ── Deferred migrations (require ACCESS EXCLUSIVE — run with retries) ────────
+    _run_deferred_migrations(pool)
+
+
+def _run_deferred_migrations(pool: psycopg2.pool.ThreadedConnectionPool) -> None:
+    """Migrations that need ACCESS EXCLUSIVE locks on busy tables.
+
+    These run outside the main migration batch so that lock-timeout failures
+    don't roll back all other migrations.  Each is retried up to 3 times
+    with a short sleep between attempts.
+    """
+    _DEFERRED = [
+        # (description, check_sql, apply_sql)
+        (
+            "Migration 60: companies.sampling_interval_seconds",
+            """SELECT 1 FROM information_schema.columns
+               WHERE table_schema='public' AND table_name='companies'
+               AND column_name='sampling_interval_seconds'""",
+            "ALTER TABLE companies ADD COLUMN sampling_interval_seconds INTEGER DEFAULT 5",
+        ),
+    ]
+
+    for desc, check_sql, apply_sql in _DEFERRED:
+        for attempt in range(1, 4):
+            conn = None
+            try:
+                conn = pool.getconn()
+                with conn.cursor() as cur:
+                    cur.execute("SET lock_timeout = '5s'")
+                    cur.execute(check_sql)
+                    if cur.fetchone():
+                        conn.commit()
+                        break  # already applied
+                    cur.execute(apply_sql)
+                conn.commit()
+                logger.info("%s — applied", desc)
+                break
+            except Exception as exc:
+                if conn:
+                    try:
+                        conn.rollback()
+                    except Exception:
+                        pass
+                if attempt < 3:
+                    logger.debug("%s attempt %d failed (%s) — retrying in 2 s", desc, attempt, exc)
+                    time.sleep(2)
+                else:
+                    logger.warning(
+                        "%s: could not apply after 3 attempts (%s) — "
+                        "server will start without this column; retry on next restart",
+                        desc, exc,
+                    )
+            finally:
+                if conn is not None:
+                    try:
+                        pool.putconn(conn)
+                    except Exception:
+                        pass
+                    conn = None
 
 
 def _backfill_readings_company_id() -> None:
@@ -1466,9 +1672,21 @@ def _backfill_readings_company_id() -> None:
 
 
 def init_db() -> None:
-    """Create all tables and indexes if they do not already exist."""
+    """Create all tables and indexes if they do not already exist.
+
+    Idempotent per process: the second call (e.g. from lifespan after the
+    module-level call in database/__init__.py) returns immediately so that
+    background threads started during module import don't create lock
+    contention with ALTER TABLE migrations.
+    """
+    global _db_initialized
+    if _db_initialized:
+        logger.debug("init_db: already initialised in this process — skipping")
+        return
+    _db_initialized = True
     try:
         pool = get_db_pool()
+        logger.info("init_db: creating base schema...")
         conn = pool.getconn()
         try:
             with conn.cursor() as cur:
@@ -1480,6 +1698,7 @@ def init_db() -> None:
             conn.commit()
         finally:
             pool.putconn(conn)
+        logger.info("init_db: base schema ready")
 
         _run_migrations(pool)
         migrate_pins_to_bcrypt()  # idempotent: skips already-bcrypt rows

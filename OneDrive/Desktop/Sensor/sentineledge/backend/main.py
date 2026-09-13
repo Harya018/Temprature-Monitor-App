@@ -37,8 +37,9 @@ import database
 import core.sensor as sensor
 import core.threshold as threshold
 import core.escalation as escalation
-import core.extra_sensor as extra_sensor  # secondary sensor reader (pH, etc.)
-import core.excel_sensor as excel_sensor  # Excel file reader (pro-server / HMI)
+import core.extra_sensor as extra_sensor  # tertiary stub (empty dict fallback)
+import core.excel_sensor as excel_sensor  # primary  sensor (Pro-Server EX file)
+import core.opc_sensor   as opc_sensor    # secondary sensor (OPC DA direct)
 from core.escalation_policy import run_escalation_check
 from core.anomaly_detector import run_anomaly_detection
 from modules.sms.receiver import run_sms_receiver
@@ -99,9 +100,9 @@ logger = get_logger(__name__)
 _SENTRY_DSN = os.getenv("SENTRY_DSN", "")
 if _SENTRY_DSN:
     try:
-        import sentry_sdk
-        from sentry_sdk.integrations.fastapi import FastApiIntegration
-        from sentry_sdk.integrations.starlette import StarletteIntegration
+        import sentry_sdk  # type: ignore[import-untyped]
+        from sentry_sdk.integrations.fastapi import FastApiIntegration  # type: ignore[import-untyped]
+        from sentry_sdk.integrations.starlette import StarletteIntegration  # type: ignore[import-untyped]
         sentry_sdk.init(
             dsn=_SENTRY_DSN,
             environment=os.getenv("APP_ENV", "development"),
@@ -262,13 +263,13 @@ async def _notification_retry_task() -> None:
 
                 try:
                     if channel == "email":
-                        from modules.email.smtp import send_alert_email
+                        from modules.email.smtp import send_email_async
                         sub_rows = execute_read(
                             "SELECT email FROM subscribers WHERE id = %s LIMIT 1",
                             (item["subscriber_id"],),
                         )
                         if sub_rows and sub_rows[0].get("email"):
-                            await send_alert_email(
+                            await send_email_async(
                                 sub_rows[0]["email"],
                                 payload.get("subject", "Alert Retry"),
                                 payload.get("body", ""),
@@ -349,6 +350,14 @@ async def _retention_policy_task() -> None:
 async def lifespan(app: FastAPI):
     # ── Startup ───────────────────────────────────────────────────────────────
 
+    # Write PID file so start.bat can reliably kill this exact process on restart
+    _pid_file = os.path.join(os.path.dirname(__file__), "server.pid")
+    try:
+        with open(_pid_file, "w") as _f:
+            _f.write(str(os.getpid()))
+    except Exception:
+        pass
+
     # 1. Initialise PostgreSQL connection pool + schema + admin password migration
     database.get_db_pool()
     database.init_db()
@@ -360,7 +369,8 @@ async def lifespan(app: FastAPI):
     #     file path was previously saved via Admin → Settings → Pro-Server EX).
     try:
         _ps_rows = database.execute_read(
-            "SELECT key, value FROM app_settings WHERE key LIKE 'proserver_%'"
+            "SELECT key, value FROM app_settings WHERE key LIKE %s",
+            ("proserver_%",),
         ) or []
         _ps_vals = {r["key"].replace("proserver_", "", 1): r["value"] for r in _ps_rows}
         if _ps_vals.get("file_path", "").strip():
@@ -370,8 +380,60 @@ async def lifespan(app: FastAPI):
                 "Startup: Pro-Server EX path loaded from DB: %s",
                 _ps_vals["file_path"],
             )
+        # Restore persisted enable/disable (live-only) state across restarts
+        import core.excel_sensor as _excel_sensor
+        _excel_sensor.load_persistent_settings()
     except Exception as _exc:
-        logger.warning("Startup: could not load proserver settings from DB: %s", _exc)
+        import traceback as _tb
+        logger.warning("Startup: could not load proserver settings from DB: %s\n%s", _exc, _tb.format_exc())
+
+    # 1b. Load OPC DA settings from DB (secondary sensor)
+    try:
+        _opc_rows = database.execute_read(
+            "SELECT key, value FROM app_settings WHERE key LIKE %s",
+            ("opc_%",),
+        ) or []
+        _opc_vals = {r["key"].replace("opc_", "", 1): r["value"] for r in _opc_rows}
+        if _opc_vals.get("server_name", "").strip():
+            opc_sensor.reload_settings(_opc_vals)
+            logger.info(
+                "Startup: OPC DA server loaded from DB: %s",
+                _opc_vals["server_name"],
+            )
+    except Exception as _exc:
+        import traceback as _tb
+        logger.warning("Startup: could not load OPC settings from DB: %s\n%s", _exc, _tb.format_exc())
+
+    # 1c. Load alert settings from DB (pH threshold, enable flags)
+    try:
+        _alert_rows = database.execute_read(
+            "SELECT key, value FROM app_settings WHERE key LIKE %s",
+            ("alert_%",),
+        ) or []
+        for _r in _alert_rows:
+            _k, _v = _r["key"], _r["value"]
+            if _k in ("alert_ph_threshold", "alert_ph_threshold_max"):
+                from config import RUNTIME_THRESHOLDS
+                try:
+                    RUNTIME_THRESHOLDS["ph_threshold_max"] = float(_v)
+                except ValueError:
+                    pass
+            elif _k == "alert_ph_threshold_min":
+                from config import RUNTIME_THRESHOLDS
+                try:
+                    RUNTIME_THRESHOLDS["ph_threshold_min"] = float(_v)
+                except ValueError:
+                    pass
+            elif _k == "alert_ph_enabled":
+                from config import RUNTIME_THRESHOLDS
+                RUNTIME_THRESHOLDS["ph_alerts_enabled"] = _v.lower() == "true"
+            elif _k == "alert_temp_enabled":
+                from config import RUNTIME_THRESHOLDS
+                RUNTIME_THRESHOLDS["temp_alerts_enabled"] = _v.lower() == "true"
+        if _alert_rows:
+            logger.info("Startup: alert settings loaded from DB")
+    except Exception as _exc:
+        logger.warning("Startup: could not load alert settings from DB: %s", _exc)
 
     # 2. Clean up any stale sessions from previous server runs
     try:
@@ -440,6 +502,10 @@ async def lifespan(app: FastAPI):
     yield
 
     # ── Shutdown ──────────────────────────────────────────────────────────────
+    try:
+        os.unlink(_pid_file)
+    except Exception:
+        pass
     logger.info("SentinelEdge shutting down...")
 
     shutdown_msg = json.dumps({"type": "server_shutdown"})
@@ -493,6 +559,8 @@ Admin endpoints require header:
 )
 
 configure_cors(app)
+from fastapi.middleware.gzip import GZipMiddleware
+app.add_middleware(GZipMiddleware, minimum_size=500)
 app.add_middleware(BaseHTTPMiddleware, dispatch=log_requests)
 
 # ── Security headers ──────────────────────────────────────────────────────────
@@ -572,11 +640,13 @@ async def global_error_handler(request: Request, exc: Exception):
 
 @app.exception_handler(404)
 async def not_found_handler(request: Request, exc):
+    detail = getattr(exc, "detail", None)
+    message = str(detail) if detail and detail != "Not Found" else f"Path {request.url.path} not found"
     return JSONResponse(
         status_code=404,
         content={
             "error":     "NotFound",
-            "message":   f"Path {request.url.path} not found",
+            "message":   message,
             "timestamp": now_iso(),
         },
     )
@@ -596,6 +666,34 @@ async def internal_error_handler(request: Request, exc):
 # Per-parameter cooldown: {param_name: cooldown_epoch_seconds}
 _extra_param_cooldowns: dict = {}
 _EXTRA_PARAM_COOLDOWN = 300   # 5-minute cooldown between repeated alerts per param
+
+# Tracks which (company_id, param_name) pairs have already been registered so we
+# don't hammer the DB with ON CONFLICT inserts on every reading cycle.
+_registered_params: set = set()
+
+
+def _auto_register_extra_params(ep: dict, company_id: int) -> None:
+    """Ensure every live extra-sensor parameter exists in company_parameters.
+
+    Uses ON CONFLICT DO NOTHING so existing rows (with admin-set min/max) are
+    never overwritten.  Results are cached in _registered_params to avoid DB
+    round-trips on every reading cycle.
+    """
+    from database.connection import execute_write as _ew
+    for name in ep:
+        key = (company_id, name)
+        if key in _registered_params:
+            continue
+        try:
+            _ew(
+                """INSERT INTO company_parameters (company_id, name, is_active)
+                   VALUES (%s, %s, TRUE)
+                   ON CONFLICT (company_id, name) DO NOTHING""",
+                (company_id, name),
+            )
+            _registered_params.add(key)
+        except Exception:
+            pass
 
 def _check_extra_param_thresholds(extra_params: dict, breach_dicts: list) -> None:
     """
@@ -679,24 +777,33 @@ def _check_extra_param_thresholds(extra_params: dict, breach_dicts: list) -> Non
 # ─── WebSocket ───────────────────────────────────────────────────────────────
 
 def _ws_authenticate(token: str) -> dict | None:
-    """Validate a WebSocket Bearer token. Returns {"admin_id", "company_id"} or None."""
+    """Validate a WebSocket token. Accepts both admin sessions and subscriber sessions."""
     if not token:
         return None
     try:
         from database.queries.sessions import get_session
         from database.connection import execute_read
+
+        # 1. Try admin session (dashboard / web clients)
         session = get_session(token)
-        if session is None:
-            return None
-        admin_id = session.get("admin_id")
-        if admin_id is None:
-            return None
-        rows = execute_read(
-            "SELECT is_active, company_id FROM admins WHERE id = %s LIMIT 1", (admin_id,)
-        )
-        if not rows or rows[0].get("is_active") == 0:
-            return None
-        return {"admin_id": admin_id, "company_id": rows[0].get("company_id")}
+        if session is not None:
+            admin_id = session.get("admin_id")
+            if admin_id is not None:
+                rows = execute_read(
+                    "SELECT is_active, company_id FROM admins WHERE id = %s LIMIT 1", (admin_id,)
+                )
+                if rows and rows[0].get("is_active") != 0:
+                    return {"admin_id": admin_id, "company_id": rows[0].get("company_id")}
+
+        # 2. Try subscriber session (mobile app)
+        from database.queries.subscriber_sessions import get_sub_session
+        sub_session = get_sub_session(token)
+        if sub_session is not None:
+            sub = database.get_subscriber_by_id(sub_session["subscriber_id"])
+            company_id = sub.get("company_id") if sub else None
+            return {"admin_id": None, "company_id": company_id}
+
+        return None
     except Exception as exc:
         logger.warning("WS auth error: %s", exc)
         return None
@@ -726,16 +833,48 @@ async def websocket_endpoint(ws: WebSocket, token: str = ""):
             # instead of the CSV/serial fallback so each column maps exactly to
             # the correct parameter (temperature → temp, pH → pH, no interchange).
             if excel_sensor.is_active() and excel_sensor.current_temperature is not None:
+                # Primary: Excel/CSV file from Pro-Server EX
+                # is_live = False when replaying historical loop rows → no alerts fire
                 reading = {
                     "temperature": excel_sensor.current_temperature,
                     "timestamp":   excel_sensor.current_timestamp or reading["timestamp"],
+                    "is_live":     excel_sensor.is_live_data(),
+                }
+            elif opc_sensor.is_active() and opc_sensor.current_temperature is not None:
+                # Secondary: OPC DA direct connection (used when file reader is not active)
+                reading = {
+                    "temperature": opc_sensor.current_temperature,
+                    "timestamp":   opc_sensor.current_timestamp or reading["timestamp"],
                     "is_live":     True,
                 }
+            # Live-only idle: Excel sensor enabled but no recent live data →
+            # broadcast NULL so dashboard shows "—", skip DB insert entirely.
+            if (excel_sensor.is_active()
+                    and not excel_sensor._excel_enabled
+                    and excel_sensor.current_temperature is None):
+                await broadcast({
+                    "temperature":    None,
+                    "timestamp":      reading.get("timestamp", ""),
+                    "breaches":       [],
+                    "is_valid":       False,
+                    "extra_params":   {},
+                    "live_only_idle": True,
+                })
+                continue
+
             ep = (
-                dict(excel_sensor.extra_readings)
-                if excel_sensor.is_active()
+                dict(excel_sensor.extra_readings) if excel_sensor.is_active()
+                else dict(opc_sensor.extra_readings) if opc_sensor.is_active()
                 else dict(extra_sensor.extra_readings)
             )
+            # Normalize keys to lowercase so DB queries (analytics) match regardless
+            # of how Pro-Server EX capitalizes column headers (pH vs ph vs PH)
+            ep = {k.lower(): v for k, v in ep.items()}
+
+            # Auto-register any new extra-sensor parameters so they appear in
+            # the Super Admin company detail count and Config > Parameters tab.
+            if ep and company_id:
+                _auto_register_extra_params(ep, company_id)
 
             is_valid, reason = validate_reading(reading)
 
@@ -762,6 +901,7 @@ async def websocket_endpoint(ws: WebSocket, token: str = ""):
 
             # CSV fallback readings never trigger alerts — only real sensor data does.
             # Manual breach override (settings page) has no is_live key → defaults True.
+            reading["extra_params"] = ep
             breaches = threshold.check_threshold(reading) if reading.get("is_live", True) else []
 
             # Persisting alerts (DB insert) is fast — await it so the live

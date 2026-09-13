@@ -4,7 +4,7 @@ modules/email/templates.py — Professional HTML email builder (Module 2).
 
 Public API
 ----------
-build_alert_email(temperature, threshold, direction, severity,
+build_alert_email(parameter, value, threshold, direction, severity,
                   escalation_level, timestamp_utc, subscriber_name)
     -> {"subject": str, "html_body": str, "text_body": str}
 
@@ -29,6 +29,22 @@ _DEFAULT_STYLE = _SEV_STYLES["WARNING"]
 
 def _sev_style(severity: str) -> dict[str, str]:
     return _SEV_STYLES.get(str(severity).upper(), _DEFAULT_STYLE)
+
+
+# ── Parameter metadata ────────────────────────────────────────────────────────
+
+_PARAM_META: dict[str, dict[str, str]] = {
+    "temperature": {"label": "Temperature", "unit": "°C",  "icon": "🌡"},
+    "ph":          {"label": "pH",          "unit": "",    "icon": "🧪"},
+}
+
+
+def _get_meta(parameter: str) -> dict[str, str]:
+    return _PARAM_META.get(parameter.lower(), {
+        "label": parameter.capitalize(),
+        "unit":  "",
+        "icon":  "⚠️",
+    })
 
 
 # ── Timestamp conversion ──────────────────────────────────────────────────────
@@ -61,52 +77,73 @@ def _to_ist(timestamp_utc: str) -> str:
 
 # ── Level labels & subjects ───────────────────────────────────────────────────
 
-def _level_label(direction: str) -> str:
-    if direction == "low":
-        return "⚠️ ALERT — MACHINE READY"
-    return "⚠️ ALERT — HIGH TEMPERATURE"
+def _level_label(parameter: str, direction: str) -> str:
+    p = parameter.lower()
+    if p == "temperature":
+        return "⚠️ ALERT — MACHINE READY" if direction == "low" else "⚠️ ALERT — HIGH TEMPERATURE"
+    if p == "ph":
+        return "⚠️ ALERT — HIGH pH"
+    meta = _get_meta(parameter)
+    return f"⚠️ ALERT — {meta['label'].upper()} {direction.upper()}"
 
 
-def _direction_label(direction: str) -> str:
-    return "Machine Ready" if direction == "low" else "Overheating Danger"
+def _direction_label(parameter: str, direction: str) -> str:
+    p = parameter.lower()
+    if p == "temperature":
+        return "Machine Ready" if direction == "low" else "Overheating Danger"
+    if p == "ph":
+        return "pH High Alert"
+    meta = _get_meta(parameter)
+    return f"{meta['label']} {direction.capitalize()} Alert"
 
 
-def _build_subject(
-    temperature: float,
-    direction: str,
-    level: int,
-) -> str:
-    temp_str = f"{temperature}°C"
-    dir_label = _direction_label(direction)
+def _build_subject(parameter: str, value: float, direction: str, level: int) -> str:
+    meta = _get_meta(parameter)
+    val_str   = f"{value}{meta['unit']}"
+    dir_label = _direction_label(parameter, direction)
     if level == 1:
-        return f"SentinelEdge Alert — {dir_label} ({temp_str})"
+        return f"SentinelEdge Alert — {dir_label} ({val_str})"
     elif level == 2:
-        return f"SentinelEdge ESCALATION L2 — No Response ({temp_str})"
+        return f"SentinelEdge ESCALATION L2 — No Response ({val_str})"
     else:
         return "SentinelEdge CRITICAL L3 FINAL — Immediate Action Required"
 
 
 # ── Alert body message ────────────────────────────────────────────────────────
 
-def _alert_body_message(temperature: float, threshold: float, direction: str) -> str:
-    if direction == "low":
+def _alert_body_message(parameter: str, value: float, threshold: float, direction: str) -> str:
+    meta = _get_meta(parameter)
+    unit = meta["unit"]
+    p    = parameter.lower()
+    if p == "temperature":
+        if direction == "low":
+            return (
+                f"Machine has cooled to {value}{unit} and is ready "
+                f"for the next process. The temperature has dropped below "
+                f"the low threshold of {threshold}{unit}."
+            )
         return (
-            f"Machine has cooled to {temperature}°C and is ready "
-            f"for the next process. The temperature has dropped below "
-            f"the low threshold of {threshold}°C."
-        )
-    else:
-        return (
-            f"Temperature has exceeded {temperature}°C — overheating danger. "
-            f"The high threshold of {threshold}°C has been breached. "
+            f"Temperature has exceeded {value}{unit} — overheating danger. "
+            f"The high threshold of {threshold}{unit} has been breached. "
             f"Immediate attention required."
         )
+    if p == "ph":
+        return (
+            f"pH has exceeded {value} — above the alert threshold of {threshold}. "
+            f"Immediate attention required."
+        )
+    label = meta["label"]
+    return (
+        f"{label} is {value}{unit} — above the threshold of {threshold}{unit}. "
+        f"Immediate attention required."
+    )
 
 
 # ── Plain-text fallback ───────────────────────────────────────────────────────
 
 def _build_text_body(
-    temperature: float,
+    parameter: str,
+    value: float,
     threshold: float,
     direction: str,
     severity: str,
@@ -114,16 +151,18 @@ def _build_text_body(
     timestamp_ist: str,
     subscriber_name: str,
 ) -> str:
-    dir_label = _direction_label(direction)
+    meta      = _get_meta(parameter)
+    unit      = meta["unit"]
+    param_lbl = meta["label"]
     lines = [
-        "SentinelEdge — Industrial Temperature Monitoring",
+        f"SentinelEdge — Industrial Monitoring ({param_lbl})",
         "=" * 50,
         "",
         f"Hello {subscriber_name},",
         "",
-        f"ALERT ({severity}): {_direction_label(direction)}",
-        f"Current Temperature : {temperature}°C",
-        f"Threshold           : {threshold}°C ({direction})",
+        f"ALERT ({severity}): {_direction_label(parameter, direction)}",
+        f"Current {param_lbl} : {value}{unit}",
+        f"Threshold           : {threshold}{unit} ({direction})",
         f"Severity            : {severity}",
         f"Alert Time (IST)    : {timestamp_ist}",
         "",
@@ -146,7 +185,8 @@ def _build_text_body(
 # ── HTML builder ──────────────────────────────────────────────────────────────
 
 def _build_html_body(
-    temperature: float,
+    parameter: str,
+    value: float,
     threshold: float,
     direction: str,
     severity: str,
@@ -154,12 +194,17 @@ def _build_html_body(
     timestamp_ist: str,
     subscriber_name: str,
 ) -> str:
+    meta      = _get_meta(parameter)
+    unit      = meta["unit"]
+    param_lbl = meta["label"]
+    icon      = meta["icon"]
+
     style  = _sev_style(severity)
     bg     = style["bg"]
     color  = style["color"]
     border = style["border"]
-    lvl_lbl  = _level_label(direction)
-    body_msg = _alert_body_message(temperature, threshold, direction)
+    lvl_lbl  = _level_label(parameter, direction)
+    body_msg = _alert_body_message(parameter, value, threshold, direction)
     dir_str  = direction.capitalize()
 
     # Escalation warning block (only for level 2+)
@@ -188,10 +233,10 @@ def _build_html_body(
   <!-- Header bar -->
   <div style="background:#1E1B4B;padding:20px 30px;">
     <h1 style="color:white;margin:0;font-size:20px;font-weight:bold;">
-      🌡 SentinelEdge
+      {icon} SentinelEdge
     </h1>
     <p style="color:#A5B4FC;margin:4px 0 0;font-size:13px;">
-      Industrial Temperature Monitoring System
+      Industrial {param_lbl} Monitoring System
     </p>
   </div>
 
@@ -204,10 +249,10 @@ def _build_html_body(
       {lvl_lbl}
     </p>
 
-    <!-- Big temperature display -->
+    <!-- Big value display -->
     <div style="font-size:56px;font-weight:bold;color:{color};
                 line-height:1;margin:12px 0;letter-spacing:-1px;">
-      {temperature}°C
+      {value}{unit}
     </div>
 
     <p style="color:#374151;margin:8px 0 0;font-size:15px;line-height:1.5;">
@@ -227,15 +272,15 @@ def _build_html_body(
     <table style="width:100%;border-collapse:collapse;">
       <tr style="border-bottom:1px solid #F3F4F6;">
         <td style="padding:8px 0;color:#6B7280;font-size:13px;width:40%;">Parameter</td>
-        <td style="padding:8px 0;color:#1F2937;font-size:13px;font-weight:bold;">Temperature</td>
+        <td style="padding:8px 0;color:#1F2937;font-size:13px;font-weight:bold;">{param_lbl}</td>
       </tr>
       <tr style="border-bottom:1px solid #F3F4F6;">
         <td style="padding:8px 0;color:#6B7280;font-size:13px;">Current Reading</td>
-        <td style="padding:8px 0;color:#1F2937;font-size:13px;font-weight:bold;">{temperature}°C</td>
+        <td style="padding:8px 0;color:#1F2937;font-size:13px;font-weight:bold;">{value}{unit}</td>
       </tr>
       <tr style="border-bottom:1px solid #F3F4F6;">
         <td style="padding:8px 0;color:#6B7280;font-size:13px;">Threshold</td>
-        <td style="padding:8px 0;color:#1F2937;font-size:13px;">{threshold}°C ({dir_str})</td>
+        <td style="padding:8px 0;color:#1F2937;font-size:13px;">{threshold}{unit} ({dir_str})</td>
       </tr>
       <tr style="border-bottom:1px solid #F3F4F6;">
         <td style="padding:8px 0;color:#6B7280;font-size:13px;">Severity</td>
@@ -265,41 +310,48 @@ def _build_html_body(
 # ── Public API ────────────────────────────────────────────────────────────────
 
 def build_alert_email(
-    temperature: float,
+    value: float,
     threshold: float,
     direction: str,
     severity: str,
     escalation_level: int,
     timestamp_utc: str,
     subscriber_name: str = "Operator",
+    parameter: str = "temperature",
+    # legacy positional alias so old callers passing temperature= still work
+    temperature: float | None = None,
 ) -> dict:
     """
     Build a complete professional HTML alert email.
 
     Parameters
     ----------
-    temperature      : current sensor reading (e.g. 37.5)
-    threshold        : breach threshold value (e.g. 38.0)
+    parameter        : "temperature" | "ph" | …  (default "temperature")
+    value            : current sensor reading (e.g. 7.5555 for pH)
+    threshold        : breach threshold value
     direction        : "low" | "high"
     severity         : "WARNING" | "CRITICAL" | "EMERGENCY"
     escalation_level : 1 | 2 | 3
-    timestamp_utc    : ISO-8601 UTC string (e.g. "2026-06-04T08:15:00Z")
-    subscriber_name  : recipient's name for the plain-text salutation
+    timestamp_utc    : ISO-8601 UTC string
+    subscriber_name  : recipient's name
 
     Returns
     -------
-    {
-        "subject":   str,   # e.g. "SentinelEdge Alert — Machine Ready (37.5°C)"
-        "html_body": str,   # full HTML email
-        "text_body": str,   # plain-text fallback
-    }
+    {"subject": str, "html_body": str, "text_body": str}
     """
+    # Accept legacy callers that pass temperature= as the first positional arg
+    if temperature is not None and value == temperature:
+        pass  # already the same
+    elif temperature is not None:
+        value = temperature
+
     timestamp_ist = _to_ist(timestamp_utc)
 
-    subject = _build_subject(temperature, direction, escalation_level)
+    subject = _build_subject(parameter, value, direction, escalation_level)
 
     html_body = _build_html_body(
-        temperature=temperature,
+        parameter=parameter,
+        value=value,
         threshold=threshold,
         direction=direction,
         severity=severity,
@@ -309,7 +361,8 @@ def build_alert_email(
     )
 
     text_body = _build_text_body(
-        temperature=temperature,
+        parameter=parameter,
+        value=value,
         threshold=threshold,
         direction=direction,
         severity=severity,

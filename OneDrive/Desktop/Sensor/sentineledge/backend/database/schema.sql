@@ -85,6 +85,64 @@ CREATE TABLE IF NOT EXISTS admin_sessions (
     last_used_at TIMESTAMPTZ DEFAULT NOW()
 );
 
+-- ── Phase 4: Distributed hub-and-spoke aggregation (Migration 59) ─────────────
+-- These tables live on the SuperAdmin server and store data synced from remote
+-- company node installations.  Ingest API + sync agent are deferred to production.
+
+CREATE TABLE IF NOT EXISTS company_nodes (
+    id              SERIAL PRIMARY KEY,
+    company_id      INTEGER NOT NULL REFERENCES companies(id) ON DELETE CASCADE,
+    node_name       TEXT    NOT NULL,
+    api_key         TEXT    NOT NULL UNIQUE,
+    is_active       BOOLEAN NOT NULL DEFAULT TRUE,
+    registered_at   TIMESTAMPTZ DEFAULT NOW(),
+    contact_email   TEXT,
+    location        TEXT,
+    backend_version TEXT
+);
+
+CREATE TABLE IF NOT EXISTS company_heartbeats (
+    node_id        INTEGER PRIMARY KEY REFERENCES company_nodes(id) ON DELETE CASCADE,
+    last_seen_at   TIMESTAMPTZ NOT NULL,
+    sensor_status  TEXT NOT NULL DEFAULT 'unknown',
+    readings_today INTEGER DEFAULT 0,
+    alerts_today   INTEGER DEFAULT 0,
+    updated_at     TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS synced_readings (
+    id           BIGSERIAL PRIMARY KEY,
+    node_id      INTEGER NOT NULL REFERENCES company_nodes(id) ON DELETE CASCADE,
+    temperature  DOUBLE PRECISION,
+    extra_params JSONB DEFAULT '{}',
+    recorded_at  TIMESTAMPTZ NOT NULL,
+    received_at  TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS synced_alerts (
+    id              BIGSERIAL PRIMARY KEY,
+    node_id         INTEGER NOT NULL REFERENCES company_nodes(id) ON DELETE CASCADE,
+    remote_alert_id INTEGER,
+    parameter       TEXT    NOT NULL,
+    value           DOUBLE PRECISION NOT NULL,
+    threshold       DOUBLE PRECISION NOT NULL,
+    direction       TEXT    NOT NULL,
+    severity        TEXT    NOT NULL DEFAULT 'WARNING',
+    acknowledged    BOOLEAN DEFAULT FALSE,
+    fired_at        TIMESTAMPTZ NOT NULL,
+    received_at     TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS sync_error_log (
+    id            SERIAL PRIMARY KEY,
+    node_id       INTEGER REFERENCES company_nodes(id) ON DELETE SET NULL,
+    error_type    TEXT NOT NULL,
+    error_message TEXT,
+    payload_size  INTEGER,
+    occurred_at   TIMESTAMPTZ DEFAULT NOW(),
+    resolved      BOOLEAN DEFAULT FALSE
+);
+
 -- Performance indexes
 CREATE INDEX IF NOT EXISTS idx_alerts_timestamp
     ON alerts(timestamp);
@@ -98,3 +156,12 @@ CREATE INDEX IF NOT EXISTS idx_admin_sessions_token
     ON admin_sessions(token);
 CREATE INDEX IF NOT EXISTS idx_admin_sessions_expires
     ON admin_sessions(expires_at);
+
+-- Phase 4 indexes
+CREATE INDEX IF NOT EXISTS idx_company_nodes_company   ON company_nodes(company_id);
+CREATE INDEX IF NOT EXISTS idx_heartbeats_last_seen    ON company_heartbeats(last_seen_at);
+CREATE INDEX IF NOT EXISTS idx_synced_readings_node_ts ON synced_readings(node_id, recorded_at DESC);
+CREATE INDEX IF NOT EXISTS idx_synced_alerts_node_ts   ON synced_alerts(node_id, fired_at DESC);
+CREATE INDEX IF NOT EXISTS idx_synced_alerts_ack       ON synced_alerts(acknowledged);
+CREATE INDEX IF NOT EXISTS idx_sync_errors_node        ON sync_error_log(node_id, occurred_at DESC);
+CREATE INDEX IF NOT EXISTS idx_sync_errors_resolved    ON sync_error_log(resolved);

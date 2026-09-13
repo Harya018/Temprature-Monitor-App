@@ -1,0 +1,73 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_USER: sentineledge
+          POSTGRES_PASSWORD: sentineledge123
+          POSTGRES_DB: sentineledge
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      DATABASE_URL: postgresql://sentineledge:sentineledge123@localhost:5432/sentineledge
+      APP_ENV: test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: sentineledge/backend/requirements.txt
+
+      - name: Install Python dependencies
+        run: pip install -r sentineledge/backend/requirements.txt
+
+      - name: Start backend server
+        working-directory: sentineledge/backend
+        run: |
+          python main.py &
+          echo $! > /tmp/server.pid
+          # Wait for server to be ready (init_db runs on startup)
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:5000/api/health > /dev/null 2>&1; then
+              echo "Server ready after ${i}s"
+              break
+            fi
+            sleep 1
+          done
+
+      - name: Run multi-tenancy isolation tests
+        working-directory: sentineledge
+        env:
+          PYTHONPATH: ${{ github.workspace }}/sentineledge:${{ github.workspace }}/sentineledge/backend
+        run: python backend/tests/test_multi_tenancy.py
+
+      - name: Run tier and escalation tests
+        working-directory: sentineledge
+        env:
+          PYTHONPATH: ${{ github.workspace }}/sentineledge:${{ github.workspace }}/sentineledge/backend
+        run: python backend/tests/test_tier_and_escalation.py
+
+      - name: Stop backend server
+        if: always()
+        run: kill $(cat /tmp/server.pid) || true

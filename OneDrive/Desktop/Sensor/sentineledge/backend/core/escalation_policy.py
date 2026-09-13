@@ -28,6 +28,7 @@ from __future__ import annotations
 import asyncio
 
 from database.connection import execute_read, execute_write
+from config import is_alert_enabled
 from utils.logger import get_logger
 
 logger = get_logger("sentineledge.core.escalation_policy")
@@ -93,6 +94,21 @@ async def _send_reminder_and_mark_done(alert: dict, policy: dict) -> None:
     alert_id   = alert["id"]
     company_id = alert["company_id"]
     severity   = alert["severity"]
+    parameter  = str(alert.get("parameter") or "temperature")
+
+    # Gate: if this parameter's alerts are currently disabled, skip the reminder.
+    # The log entry is still written so this alert is never retried.
+    if not is_alert_enabled(parameter):
+        execute_write(
+            """INSERT INTO policy_escalation_log (alert_id, escalation_level, notified_at)
+               VALUES (%s, 1, NOW())""",
+            (alert_id,),
+        )
+        logger.info(
+            "Escalation reminder suppressed for alert %d — %s alerts are disabled",
+            alert_id, parameter,
+        )
+        return
 
     # Mark done first — alert will never be processed again
     execute_write(
@@ -130,6 +146,7 @@ async def _send_reminder_and_mark_done(alert: dict, policy: dict) -> None:
             direction=str(alert.get("direction", "high")),
             severity=severity,
             timestamp_utc=timestamp_utc,
+            parameter=parameter,
         ))
     if routing["sms"]:
         tasks.append(send_sms_to_all(
@@ -138,6 +155,7 @@ async def _send_reminder_and_mark_done(alert: dict, policy: dict) -> None:
             threshold=float(alert["threshold"]),
             direction=str(alert.get("direction", "high")),
             timestamp_utc=timestamp_utc,
+            parameter=parameter,
         ))
 
     if tasks:

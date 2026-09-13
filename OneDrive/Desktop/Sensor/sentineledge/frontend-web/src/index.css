@@ -89,6 +89,12 @@ body {
   transition: width 0.25s ease;
   overflow: hidden;
 }
+.sidebar.sidebar-collapsed {
+  width: 64px;
+}
+.sidebar.sidebar-collapsed .sidebar-label {
+  display: none;
+}
 @media (max-width: 768px) {
   .sidebar { width: 60px; }
   .sidebar-label { display: none; }
@@ -110,7 +116,35 @@ body {
 }
 
 /* ── Layout content offset ── */
-.layout-content { margin-left: 240px; }
+.layout-content { margin-left: 240px; transition: margin-left 0.25s ease; }
+.layout-content.sidebar-collapsed { margin-left: 64px; }
+
+/* ── Subscriber tabs (used inside SubscribersPage) ── */
+.sub-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 4px;
+  background: #F3F4F6;
+  border-radius: 10px;
+  margin-bottom: 20px;
+  width: fit-content;
+}
+.sub-tab-btn {
+  padding: 7px 20px;
+  border-radius: 8px;
+  border: none;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 600;
+  transition: all 0.15s;
+  background: transparent;
+  color: #6B7280;
+}
+.sub-tab-btn.active {
+  background: #fff;
+  color: #7C3AED;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.10);
+}
 @media (max-width: 768px) {
   .layout-content { margin-left: 60px; }
 }

@@ -142,58 +142,90 @@ def build_sms_message(
     threshold: float,
     direction: str,
     timestamp_utc: str,
+    parameter: str = "temperature",
 ) -> str:
     """
     Build a formatted SMS alert message strictly under 160 characters.
 
-    LOW direction  → machine ready (cooled below threshold)
-    HIGH direction → overheating danger
-
     Parameters
     ----------
-    value         : float  — measured temperature in °C
+    value         : float  — measured sensor value
     threshold     : float  — the threshold that was breached
     direction     : str    — "low" or "high"
     timestamp_utc : str    — UTC ISO 8601 timestamp of the breach
+    parameter     : str    — "temperature" | "ph" | …
 
     Returns
     -------
     str — formatted message, always under 160 chars
     """
     time_ist = _utc_to_ist(timestamp_utc)
-    val_str   = f"{value:.1f}"
-    thr_str   = f"{threshold:.1f}"
+    p = parameter.lower()
 
-    if direction.lower() == "low":
+    if p == "temperature":
+        val_str = f"{value:.1f}"
+        thr_str = f"{threshold:.1f}"
+        if direction.lower() == "low":
+            message = (
+                f"SentinelEdge Alert\n"
+                f"Machine READY: {val_str}C\n"
+                f"Below threshold {thr_str}C\n"
+                f"Time: {time_ist}\n"
+                f"-SentinelEdge"
+            )
+        else:
+            message = (
+                f"SentinelEdge Alert\n"
+                f"HIGH TEMP: {val_str}C\n"
+                f"Above threshold {thr_str}C\n"
+                f"Time: {time_ist}\n"
+                f"-SentinelEdge"
+            )
+    elif p == "ph":
+        val_str = f"{value:.4f}"
+        thr_str = f"{threshold:.1f}"
         message = (
             f"SentinelEdge Alert\n"
-            f"Machine READY: {val_str}C\n"
-            f"Below threshold {thr_str}C\n"
+            f"HIGH pH: {val_str}\n"
+            f"Above threshold {thr_str}\n"
             f"Time: {time_ist}\n"
             f"-SentinelEdge"
         )
-    else:  # "high" (overheating)
+    else:
+        # Generic fallback for any future parameter
+        val_str = f"{value}"
+        thr_str = f"{threshold}"
+        label   = parameter.upper()
         message = (
             f"SentinelEdge Alert\n"
-            f"HIGH TEMP: {val_str}C\n"
-            f"Above threshold {thr_str}C\n"
+            f"HIGH {label}: {val_str}\n"
+            f"Above threshold {thr_str}\n"
             f"Time: {time_ist}\n"
             f"-SentinelEdge"
         )
 
     # Safety check — SMS standard is 160 chars for GSM-7 encoding
     if len(message) > 160:
-        # Truncate time_ist to save space — very rare edge case
-        short_time = time_ist[:8]  # just "HH:MM IS"
-        if direction.lower() == "low":
+        short_time = time_ist[:8]
+        if p == "temperature" and direction.lower() == "low":
             message = (
                 f"SentinelEdge: Machine READY {val_str}C "
                 f"(below {thr_str}C) at {short_time} -SentinelEdge"
             )
-        else:
+        elif p == "temperature":
             message = (
                 f"SentinelEdge: HIGH TEMP {val_str}C "
                 f"(above {thr_str}C) at {short_time} -SentinelEdge"
+            )
+        elif p == "ph":
+            message = (
+                f"SentinelEdge: HIGH pH {val_str} "
+                f"(above {thr_str}) at {short_time} -SentinelEdge"
+            )
+        else:
+            message = (
+                f"SentinelEdge: {parameter.upper()} {val_str} "
+                f"(above {thr_str}) at {short_time} -SentinelEdge"
             )
         logger.warning(
             "SMS message truncated to fit 160 chars (%d chars original)",
@@ -256,6 +288,7 @@ def send_alert_sms(
     threshold: float,
     direction: str,
     timestamp_utc: str,
+    parameter: str = "temperature",
 ) -> bool:
     """
     Build and send an alert SMS synchronously.
@@ -263,16 +296,17 @@ def send_alert_sms(
     Parameters
     ----------
     phone         : str   — destination phone number
-    value         : float — current sensor reading (°C)
-    threshold     : float — breached threshold (°C)
+    value         : float — current sensor reading
+    threshold     : float — breached threshold
     direction     : str   — "low" or "high"
     timestamp_utc : str   — UTC ISO timestamp of the breach
+    parameter     : str   — "temperature" | "ph" | …
 
     Returns
     -------
     bool — True on success
     """
-    message = build_sms_message(value, threshold, direction, timestamp_utc)
+    message = build_sms_message(value, threshold, direction, timestamp_utc, parameter)
     return send_sms(phone, message)
 
 
@@ -282,30 +316,22 @@ async def send_alert_sms_async(
     threshold: float,
     direction: str,
     timestamp_utc: str,
+    parameter: str = "temperature",
 ) -> bool:
     """
     Build and send an alert SMS asynchronously (non-blocking).
 
     Runs `send_alert_sms` in a thread-pool executor so it never blocks
     the async event loop during USB/serial I/O.
-
-    Parameters
-    ----------
-    phone         : str   — destination phone number
-    value         : float — current sensor reading (°C)
-    threshold     : float — breached threshold (°C)
-    direction     : str   — "low" or "high"
-    timestamp_utc : str   — UTC ISO timestamp of the breach
-
-    Returns
-    -------
-    bool — True on success
     """
+    import functools
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(
         None,
-        send_alert_sms,
-        phone, value, threshold, direction, timestamp_utc,
+        functools.partial(
+            send_alert_sms,
+            phone, value, threshold, direction, timestamp_utc, parameter,
+        ),
     )
 
 
@@ -408,6 +434,7 @@ async def send_sms_to_all(
     threshold: float,
     direction: str,
     timestamp_utc: str,
+    parameter: str = "temperature",
 ) -> list:
     """
     Queue SMS alerts for ALL active subscribers simultaneously.
@@ -440,7 +467,7 @@ async def send_sms_to_all(
         logger.warning("send_sms_to_all: no active subscribers with phone")
         return []
 
-    message = build_sms_message(value, threshold, direction, timestamp_utc)
+    message = build_sms_message(value, threshold, direction, timestamp_utc, parameter)
 
     # ── Serial modem path: use the queue worker ─────────────────────────────
     # Both gammu and sim7600 own a single physical serial port — cannot be
@@ -490,6 +517,7 @@ async def send_sms_to_all(
                 threshold=threshold,
                 direction=direction,
                 timestamp_utc=timestamp_utc,
+                parameter=parameter,
             )
             holder["status"] = "sent" if ok else "failed"
             if not ok:

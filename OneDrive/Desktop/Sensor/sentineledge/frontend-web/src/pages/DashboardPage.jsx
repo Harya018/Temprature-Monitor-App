@@ -11,12 +11,16 @@ import StatusCard       from '../components/dashboard/StatusCard.jsx'
 import AlertsTodayCard  from '../components/dashboard/AlertsTodayCard.jsx'
 import UptimeCard       from '../components/dashboard/UptimeCard.jsx'
 import LiveChart        from '../components/dashboard/LiveChart.jsx'
+import PhLiveChart      from '../components/dashboard/PhLiveChart.jsx'
 import MiniAlertLog     from '../components/dashboard/MiniAlertLog.jsx'
 import SensorCard       from '../components/dashboard/SensorCard.jsx'
 
+/* ── Truncate to 3 decimal places without rounding ──────────────────────────── */
+const trunc3 = v => { const n = Number(v); return isNaN(n) ? '—' : (Math.trunc(n * 1000) / 1000).toFixed(3) }
+
 /* ── Random helpers ─────────────────────────────────────────────────────────── */
 const randomInRange = (min, max) =>
-  (Math.random() * (max - min) + min).toFixed(2)
+  trunc3(Math.random() * (max - min) + min)
 
 /* ── Error boundary ── catches any render crash and shows a readable message ── */
 class ErrorBoundary extends Component {
@@ -44,6 +48,40 @@ class ErrorBoundary extends Component {
     }
     return this.props.children
   }
+}
+
+/* ── pH breach banner — full-width pulsing red bar ───────────────────────────── */
+function PhBreachBanner({ breaches }) {
+  const phBreach = breaches?.find(b => b.parameter === 'ph')
+  if (!phBreach) return null
+  return (
+    <div style={{
+      background: '#DC2626',
+      color: '#fff',
+      padding: '12px 20px',
+      borderRadius: 10,
+      display: 'flex',
+      alignItems: 'center',
+      gap: 12,
+      fontWeight: 700,
+      fontSize: 14,
+      animation: 'phPulse 1s ease-in-out infinite',
+      boxShadow: '0 0 0 0 rgba(220,38,38,0.7)',
+      marginBottom: 4,
+    }}>
+      <span style={{ fontSize: 22 }}>🔴</span>
+      <span>pH ALERT — Current pH: {phBreach.value?.toFixed(2)} ≥ {phBreach.threshold} (threshold)</span>
+      <span style={{
+        marginLeft: 'auto',
+        background: 'rgba(255,255,255,0.2)',
+        borderRadius: 6,
+        padding: '2px 10px',
+        fontSize: 12,
+        fontWeight: 700,
+        letterSpacing: '0.05em',
+      }}>⚠ ACTION REQUIRED</span>
+    </div>
+  )
 }
 
 /* ── Dashboard page ─────────────────────────────────────────────────────────── */
@@ -116,8 +154,19 @@ export default function DashboardPage({ wsData, health, thresholds, onAlertCount
     setTimeout(() => setParamToast(''), 4000)
   }, [lastEvent, companyId])
 
+  const breaches = lastReading?.breaches ?? []
+  const phBreach = breaches.find(b => b.parameter === 'ph')
+
   return (
     <ErrorBoundary>
+      {/* pH pulse keyframe injected once */}
+      <style>{`
+        @keyframes phPulse {
+          0%,100% { box-shadow: 0 0 0 0 rgba(220,38,38,0.7); }
+          50%      { box-shadow: 0 0 0 12px rgba(220,38,38,0); }
+        }
+      `}</style>
+
       {paramToast && (
         <div style={{
           position: 'fixed', top: 20, right: 20, zIndex: 2000,
@@ -128,6 +177,8 @@ export default function DashboardPage({ wsData, health, thresholds, onAlertCount
         </div>
       )}
       <div className="space-y-5">
+        {/* pH breach banner — appears at top when pH ≥ threshold */}
+        <PhBreachBanner breaches={breaches} />
 
         {/* Row 1 — Stat cards (4 columns) */}
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
@@ -140,9 +191,11 @@ export default function DashboardPage({ wsData, health, thresholds, onAlertCount
         {/* Row 2 — Sensor parameter cards (show simulated unless real sensor data exists for that name) */}
         <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
           {(() => {
-            const liveP = lastReading?.extra_params?.['Pressure'] ?? lastReading?.extra_params?.['pressure'] ?? null
-            const liveH = lastReading?.extra_params?.['Humidity'] ?? lastReading?.extra_params?.['humidity'] ?? null
-            const liveV = lastReading?.extra_params?.['Vibration'] ?? lastReading?.extra_params?.['vibration'] ?? null
+            const ep    = lastReading?.extra_params ?? {}
+            const xlsP  = Object.entries(ep).find(([k]) => k.toLowerCase() === 'pressure')?.[1] ?? null
+            const liveP = xlsP
+            const liveH = Object.entries(ep).find(([k]) => k.toLowerCase() === 'humidity')?.[1]  ?? null
+            const liveV = Object.entries(ep).find(([k]) => k.toLowerCase() === 'vibration')?.[1] ?? null
             const hasP  = extraParams.some(p => p.name.toLowerCase() === 'pressure')
             const hasH  = extraParams.some(p => p.name.toLowerCase() === 'humidity')
             const hasV  = extraParams.some(p => p.name.toLowerCase() === 'vibration')
@@ -150,7 +203,9 @@ export default function DashboardPage({ wsData, health, thresholds, onAlertCount
               <>
                 {!hasP && (
                   <SensorCard icon={Gauge} iconColor="#0EA5E9" label="Pressure"
-                    value={pressure} unit="bar" subtitle="Δ −0.2 predicted"
+                    value={liveP != null ? trunc3(liveP) : pressure}
+                    unit="bar"
+                    subtitle={liveP != null ? 'From Pro-Server EX' : 'Δ −0.2 predicted'}
                     footer="Operating range 1.5 – 3.0 bar" />
                 )}
                 {!hasH && (
@@ -182,29 +237,42 @@ export default function DashboardPage({ wsData, health, thresholds, onAlertCount
               const inRange = liveValue != null && mn != null && mx != null
                 ? liveValue >= mn && liveValue <= mx
                 : null
-              const subtitle = liveValue != null && inRange != null
-                ? inRange ? 'Within normal range' : 'Out of range!'
-                : (mn != null && mx != null ? `Range: ${mn} – ${mx}` : undefined)
+              const isPhParam   = p.name.toLowerCase() === 'ph'
+              const isPhBreached = isPhParam && !!phBreach
+              const subtitle = isPhBreached
+                ? `⚠ pH ALERT — ${liveValue?.toFixed(2)} ≥ threshold`
+                : liveValue != null && inRange != null
+                  ? inRange ? 'Within normal range' : 'Out of range!'
+                  : (mn != null && mx != null ? `Range: ${mn} – ${mx}` : undefined)
               return (
-                <SensorCard
+                <div
                   key={p.name}
-                  icon={Cpu}
-                  iconColor={
-                    liveValue != null && inRange === false ? '#EF4444' : '#7C3AED'
-                  }
-                  label={p.name}
-                  value={liveValue != null ? Number(liveValue).toFixed(2) : null}
-                  unit={p.unit || ''}
-                  subtitle={subtitle}
-                  footer={p.unit ? `Live ${p.name} reading (${p.unit})` : `Live ${p.name} reading`}
-                />
+                  style={isPhBreached ? {
+                    animation: 'phPulse 1s ease-in-out infinite',
+                    borderRadius: 12,
+                    outline: '2px solid #DC2626',
+                  } : undefined}
+                >
+                  <SensorCard
+                    icon={Cpu}
+                    iconColor={isPhBreached ? '#DC2626' : liveValue != null && inRange === false ? '#EF4444' : '#7C3AED'}
+                    label={p.name}
+                    value={liveValue != null ? trunc3(liveValue) : null}
+                    unit={p.unit || ''}
+                    subtitle={subtitle}
+                    footer={p.unit ? `Live ${p.name} reading (${p.unit})` : `Live ${p.name} reading`}
+                  />
+                </div>
               )
             })}
           </div>
         )}
 
-        {/* Row 4 — Live chart */}
-        <LiveChart readings={readings} thresholds={thresholds} />
+        {/* Row 4 — Live charts side-by-side: Temperature | pH */}
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          <LiveChart readings={readings} thresholds={thresholds} />
+          <PhLiveChart readings={readings} />
+        </div>
 
         {/* Row 5 — Mini alert preview */}
         <div className="card">

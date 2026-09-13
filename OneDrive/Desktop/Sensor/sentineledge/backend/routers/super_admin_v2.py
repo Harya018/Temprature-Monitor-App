@@ -29,7 +29,9 @@ New routes (supplements super_admin.py which is left untouched):
 import csv
 import io as _io
 import json
+import os
 from datetime import datetime, timezone, timedelta
+from pathlib import Path
 from typing import Any, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -260,25 +262,40 @@ async def overview(
     week  = _week_str()
 
     try:
-        total_companies  = execute_read("SELECT COUNT(*) AS cnt FROM companies")[0]["cnt"]
-        active_admins    = execute_read("SELECT COUNT(*) AS cnt FROM admins WHERE is_active = 1 OR is_active IS NULL")[0]["cnt"]
-        total_subs       = execute_read("SELECT COUNT(*) AS cnt FROM subscribers WHERE is_active = 1 OR is_active IS NULL")[0]["cnt"]
-        alerts_today     = execute_read("SELECT COUNT(*) AS cnt FROM alerts WHERE timestamp >= %s", (today,))[0]["cnt"]
-        alerts_week      = execute_read("SELECT COUNT(*) AS cnt FROM alerts WHERE timestamp >= %s", (week,))[0]["cnt"]
-        pending_approvals = execute_read("SELECT COUNT(*) AS cnt FROM pending_approvals WHERE status = 'pending'")[0]["cnt"]
-        active_sessions  = execute_read("SELECT COUNT(*) AS cnt FROM admin_sessions WHERE expires_at > NOW()")[0]["cnt"]
-        readings_today   = execute_read("SELECT COUNT(*) AS cnt FROM readings WHERE timestamp >= %s", (today,))[0]["cnt"]
-        suspended_admins = execute_read("SELECT COUNT(*) AS cnt FROM admins WHERE is_active = 0")[0]["cnt"]
-        maintenance_cos  = execute_read("SELECT COUNT(*) AS cnt FROM companies WHERE COALESCE(maintenance_mode, 0) = 1")[0]["cnt"]
+        # All 10 scalar stats in one round trip (was 10 serial queries)
+        s = execute_read(
+            """
+            SELECT
+                (SELECT COUNT(*)::int FROM companies)                                              AS total_companies,
+                (SELECT COUNT(*)::int FROM admins WHERE is_active = 1 OR is_active IS NULL)        AS active_admins,
+                (SELECT COUNT(*)::int FROM admins WHERE is_active = 0)                             AS suspended_admins,
+                (SELECT COUNT(*)::int FROM subscribers WHERE is_active = 1 OR is_active IS NULL)   AS total_subs,
+                (SELECT COUNT(*)::int FROM alerts WHERE timestamp >= %s)                           AS alerts_today,
+                (SELECT COUNT(*)::int FROM alerts WHERE timestamp >= %s)                           AS alerts_week,
+                (SELECT COUNT(*)::int FROM pending_approvals WHERE status = 'pending')             AS pending_approvals,
+                (SELECT COUNT(*)::int FROM admin_sessions WHERE expires_at > NOW())                AS active_sessions,
+                (SELECT COUNT(*)::int FROM readings WHERE timestamp >= %s)                         AS readings_today,
+                (SELECT COUNT(*)::int FROM companies WHERE COALESCE(maintenance_mode, 0) = 1)      AS maintenance_cos
+            """,
+            (today, week, today),
+        )[0]
 
+        # Company rows: use aggregated JOINs instead of correlated subqueries per row
         company_rows = execute_read(
             """
             SELECT c.id, c.name, c.is_active,
                    COALESCE(c.maintenance_mode, 0)    AS maintenance_mode,
                    COALESCE(c.maintenance_reason, '') AS maintenance_reason,
-                   (SELECT COUNT(*) FROM subscribers WHERE company_id = c.id) AS subscriber_count,
-                   (SELECT COUNT(*) FROM alerts WHERE company_id = c.id AND timestamp >= %s) AS alerts_today
-            FROM companies c ORDER BY c.id
+                   COALESCE(s_cnt.cnt, 0)             AS subscriber_count,
+                   COALESCE(a_cnt.cnt, 0)             AS alerts_today
+            FROM companies c
+            LEFT JOIN (
+                SELECT company_id, COUNT(*) AS cnt FROM subscribers GROUP BY company_id
+            ) s_cnt ON s_cnt.company_id = c.id
+            LEFT JOIN (
+                SELECT company_id, COUNT(*) AS cnt FROM alerts WHERE timestamp >= %s GROUP BY company_id
+            ) a_cnt ON a_cnt.company_id = c.id
+            ORDER BY c.id
             """,
             (today,),
         )
@@ -310,19 +327,19 @@ async def overview(
         )
 
         return {
-            "total_companies":    total_companies,
-            "active_admins":      active_admins,
-            "total_subscribers":  total_subs,
-            "alerts_today":       alerts_today,
-            "alerts_week":        alerts_week,
-            "pending_approvals":  pending_approvals,
-            "active_sessions":    active_sessions,
-            "readings_today":     readings_today,
-            "suspended_admins":   suspended_admins,
-            "maintenance_companies": maintenance_cos,
-            "companies":          company_rows,
-            "recent_alerts":      recent_alerts,
-            "pending_list":       pending_list,
+            "total_companies":       s["total_companies"],
+            "active_admins":         s["active_admins"],
+            "total_subscribers":     s["total_subs"],
+            "alerts_today":          s["alerts_today"],
+            "alerts_week":           s["alerts_week"],
+            "pending_approvals":     s["pending_approvals"],
+            "active_sessions":       s["active_sessions"],
+            "readings_today":        s["readings_today"],
+            "suspended_admins":      s["suspended_admins"],
+            "maintenance_companies": s["maintenance_cos"],
+            "companies":             company_rows,
+            "recent_alerts":         recent_alerts,
+            "pending_list":          pending_list,
         }
     except Exception as exc:
         logger.error("overview failed: %s", exc)
@@ -423,15 +440,20 @@ async def get_company_detail(
             (company_id,),
         )
 
-        # Custom parameters
-        parameters = execute_read(
+        # Parameters: Temperature (always built-in) + active company_parameters rows
+        custom_params = execute_read(
             """
             SELECT id, name, unit, min_value, max_value,
                    COALESCE(is_active, false) AS is_active, created_at::TEXT
-            FROM company_parameters WHERE company_id = %s ORDER BY name
+            FROM company_parameters WHERE company_id = %s AND is_active = TRUE ORDER BY name
             """,
             (company_id,),
         )
+        parameters = [
+            {"id": None, "name": "temperature", "unit": "°C",
+             "min_value": None, "max_value": None, "is_active": True,
+             "created_at": None, "builtin": True}
+        ] + [dict(p, builtin=False) for p in custom_params]
 
         # Alert stats
         alert_stats = execute_read(
@@ -469,9 +491,7 @@ async def get_company_detail(
             SELECT s.id, s.created_at::TEXT, s.expires_at::TEXT, s.last_used_at::TEXT,
                    a.name AS admin_name, a.role AS admin_role
             FROM admin_sessions s
-            JOIN admins a ON a.id = (
-                SELECT admin_id FROM admin_sessions WHERE token = s.token LIMIT 1
-            )
+            JOIN admins a ON a.id = s.admin_id
             WHERE a.company_id = %s AND s.expires_at > NOW()
             ORDER BY s.last_used_at DESC LIMIT 20
             """,
@@ -1059,34 +1079,61 @@ async def companies_health(
     """
     try:
         today = _today_str()
+        # Use CTEs so each table is aggregated independently before joining.
+        # The old 4-way JOIN created a cross-product before GROUP BY which grew
+        # exponentially with row counts, causing very slow or hanging queries.
         rows = execute_read(
             """
-            SELECT
-                c.id,
-                c.name,
-                c.slug,
-                COALESCE(c.is_active,        1) AS is_active,
-                COALESCE(c.maintenance_mode, 0) AS maintenance_mode,
-                COALESCE(c.maintenance_reason, '') AS maintenance_reason,
-                MAX(r.timestamp)               AS last_reading_at,
-                EXTRACT(EPOCH FROM (NOW() - MAX(r.timestamp))) / 60
-                                               AS minutes_since_reading,
-                COUNT(DISTINCT CASE WHEN (a.acknowledged = 0 OR a.acknowledged IS NULL)
-                                     AND a.severity = 'critical' THEN a.id END) AS unack_critical,
-                COUNT(DISTINCT CASE WHEN (a.acknowledged = 0 OR a.acknowledged IS NULL)
-                                     AND a.severity = 'warning'  THEN a.id END) AS unack_warning,
-                COUNT(DISTINCT CASE WHEN (a.acknowledged = 0 OR a.acknowledged IS NULL) THEN a.id END) AS unack_total,
-                COUNT(DISTINCT CASE WHEN a.timestamp >= %s THEN a.id END) AS alerts_today,
-                COUNT(DISTINCT CASE WHEN (s.is_active IS NULL OR s.is_active = 1) THEN s.id END) AS subscriber_count,
-                COUNT(DISTINCT CASE WHEN adm.role != 'super_admin'
-                                     AND (adm.is_active IS NULL OR adm.is_active = 1) THEN adm.id END) AS admin_count
-            FROM companies c
-            LEFT JOIN readings    r   ON r.company_id = c.id
-            LEFT JOIN alerts      a   ON a.company_id = c.id
-            LEFT JOIN subscribers s   ON s.company_id = c.id
-            LEFT JOIN admins      adm ON adm.company_id = c.id
-            GROUP BY c.id, c.name, c.slug, c.is_active, c.maintenance_mode, c.maintenance_reason
-            ORDER BY c.id
+            WITH reading_stats AS (
+                SELECT company_id,
+                       MAX(timestamp::timestamptz) AS last_reading_at
+                FROM   readings
+                GROUP  BY company_id
+            ),
+            alert_stats AS (
+                SELECT company_id,
+                       COUNT(*) FILTER (WHERE (acknowledged = 0 OR acknowledged IS NULL)
+                                          AND severity = 'critical')      AS unack_critical,
+                       COUNT(*) FILTER (WHERE (acknowledged = 0 OR acknowledged IS NULL)
+                                          AND severity = 'warning')       AS unack_warning,
+                       COUNT(*) FILTER (WHERE  acknowledged = 0 OR acknowledged IS NULL) AS unack_total,
+                       COUNT(*) FILTER (WHERE  timestamp >= %s)           AS alerts_today
+                FROM   alerts
+                GROUP  BY company_id
+            ),
+            sub_stats AS (
+                SELECT company_id,
+                       COUNT(*) FILTER (WHERE is_active IS NULL OR is_active = 1) AS subscriber_count
+                FROM   subscribers
+                GROUP  BY company_id
+            ),
+            admin_stats AS (
+                SELECT company_id,
+                       COUNT(*) FILTER (WHERE role != 'super_admin'
+                                          AND (is_active IS NULL OR is_active = 1)) AS admin_count
+                FROM   admins
+                GROUP  BY company_id
+            )
+            SELECT c.id,
+                   c.name,
+                   c.slug,
+                   COALESCE(c.is_active,        1)  AS is_active,
+                   COALESCE(c.maintenance_mode,  0)  AS maintenance_mode,
+                   COALESCE(c.maintenance_reason, '') AS maintenance_reason,
+                   rs.last_reading_at,
+                   EXTRACT(EPOCH FROM (NOW() - rs.last_reading_at)) / 60 AS minutes_since_reading,
+                   COALESCE(als.unack_critical,  0)  AS unack_critical,
+                   COALESCE(als.unack_warning,   0)  AS unack_warning,
+                   COALESCE(als.unack_total,     0)  AS unack_total,
+                   COALESCE(als.alerts_today,    0)  AS alerts_today,
+                   COALESCE(ss.subscriber_count, 0)  AS subscriber_count,
+                   COALESCE(asm.admin_count,     0)  AS admin_count
+            FROM   companies c
+            LEFT JOIN reading_stats rs  ON rs.company_id  = c.id
+            LEFT JOIN alert_stats   als ON als.company_id = c.id
+            LEFT JOIN sub_stats     ss  ON ss.company_id  = c.id
+            LEFT JOIN admin_stats   asm ON asm.company_id = c.id
+            ORDER  BY c.id
             """,
             (today,),
         )
@@ -1214,15 +1261,15 @@ async def alerts_triage(
                 a.threshold,
                 a.direction,
                 a.severity,
-                a.timestamp::TEXT                           AS timestamp,
+                a.timestamp                                 AS timestamp,
                 COALESCE(a.acknowledged, 0)                AS acknowledged,
-                a.acknowledged_at::TEXT                    AS acknowledged_at,
-                EXTRACT(EPOCH FROM (NOW() - a.timestamp)) / 60 AS minutes_open,
-                c.id    AS company_id,
-                c.name  AS company_name,
-                c.slug  AS company_slug
+                a.acknowledged_at                          AS acknowledged_at,
+                EXTRACT(EPOCH FROM (NOW() - a.timestamp::timestamptz)) / 60 AS minutes_open,
+                c.id                                       AS company_id,
+                COALESCE(c.name, 'Unassigned')             AS company_name,
+                c.slug                                     AS company_slug
             FROM alerts a
-            JOIN companies c ON c.id = a.company_id
+            LEFT JOIN companies c ON c.id = a.company_id
             {where}
             ORDER BY
                 CASE WHEN COALESCE(a.acknowledged, 0) = 0 THEN 0 ELSE 1 END,
@@ -3981,3 +4028,65 @@ async def export_incidents_csv(
         media_type="text/csv",
         headers={"Content-Disposition": "attachment; filename=incidents.csv"},
     )
+
+
+# ─── System Logs ─────────────────────────────────────────────────────────────
+
+_LOG_PATH = (Path(__file__).parent.parent / "logs" / "sentineledge.log").resolve()
+
+_LEVEL_KEYWORDS = ("CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG")
+
+def _detect_level(line: str) -> str:
+    u = line.upper()
+    for lvl in _LEVEL_KEYWORDS:
+        if lvl in u:
+            return lvl
+    return "INFO"
+
+
+@router.get("/system-logs", summary="Read recent lines from the backend log file")
+@limiter.limit("60/minute")
+async def system_logs(
+    request: Request,
+    lines: int  = Query(default=200, ge=10, le=500),
+    level: str  = Query(default=""),
+    search: str = Query(default=""),
+    _admin: dict = Depends(require_super_admin),
+):
+    """
+    Return the last `lines` entries from sentineledge.log.
+    Optional filters: level (INFO/WARNING/ERROR/CRITICAL/DEBUG), search (substring).
+    Each entry: {text, level}.
+    """
+    if not _LOG_PATH.exists():
+        return {"lines": [], "total": 0, "exists": False, "path": str(_LOG_PATH)}
+
+    try:
+        # Tail-read: read last 64 KB so we never load the whole file
+        CHUNK = 1024 * 64
+        with open(_LOG_PATH, "rb") as f:
+            f.seek(0, 2)
+            size = f.tell()
+            f.seek(-min(size, CHUNK), 2)
+            raw = f.read()
+
+        all_lines = raw.decode("utf-8", errors="replace").splitlines()
+        all_lines = [l for l in all_lines if l.strip()]
+
+        level_upper  = level.upper().strip()
+        search_lower = search.lower().strip()
+
+        result = []
+        for line in all_lines[-lines:]:
+            lvl = _detect_level(line)
+            if level_upper and level_upper not in lvl:
+                continue
+            if search_lower and search_lower not in line.lower():
+                continue
+            result.append({"text": line, "level": lvl})
+
+        return {"lines": result, "total": len(result), "exists": True}
+
+    except Exception as exc:
+        logger.error("system_logs failed: %s", exc)
+        return JSONResponse(status_code=500, content={"error": str(exc)})

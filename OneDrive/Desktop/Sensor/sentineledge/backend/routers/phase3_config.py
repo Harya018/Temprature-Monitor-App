@@ -519,3 +519,148 @@ async def delete_parameter(
         rows[0]["company_id"],
     )
     return {"status": "deleted", "param_id": param_id}
+
+
+# ─── Companies + Parameters Overview (Config Page) ────────────────────────────
+
+class _DirectParamIn(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
+    unit: Optional[str] = Field(default="", max_length=50)
+    min_value: Optional[float] = None
+    max_value: Optional[float] = None
+
+    @field_validator("name", mode="before")
+    @classmethod
+    def _strip(cls, v):
+        return v.strip() if isinstance(v, str) else v
+
+
+class _TempThresholdIn(BaseModel):
+    min_value: Optional[float] = None
+    max_value: Optional[float] = None
+
+
+class _SamplingIn(BaseModel):
+    sampling_interval_seconds: int
+
+
+@router.get("/companies-params", summary="All companies with parameters and sampling interval")
+async def all_companies_params(_: dict = Depends(require_super_admin)):
+    from collections import defaultdict
+    # sampling_interval_seconds is added by Migration 60 (deferred); fall back
+    # gracefully if the column isn't present yet (lock-timeout on first start).
+    try:
+        companies = execute_read(
+            "SELECT id, name, COALESCE(sampling_interval_seconds, 5) AS sampling_interval_seconds "
+            "FROM companies ORDER BY name"
+        )
+    except Exception:
+        companies = execute_read("SELECT id, name FROM companies ORDER BY name")
+        for c in companies:
+            c["sampling_interval_seconds"] = 5
+    params = execute_read(
+        "SELECT id, company_id, name, unit, min_value, max_value "
+        "FROM company_parameters WHERE is_active = TRUE ORDER BY company_id, name"
+    )
+    temp_cfg = execute_read(
+        "SELECT company_id, field, value FROM company_config "
+        "WHERE field IN ('temp_high', 'temp_low')"
+    )
+    params_by_co: dict = defaultdict(list)
+    for p in (params or []):
+        params_by_co[p["company_id"]].append({
+            "id": p["id"], "name": p["name"], "unit": p["unit"] or "",
+            "min_value": float(p["min_value"]) if p.get("min_value") is not None else None,
+            "max_value": float(p["max_value"]) if p.get("max_value") is not None else None,
+            "builtin": False,
+        })
+    temp_by_co: dict = defaultdict(dict)
+    for t in (temp_cfg or []):
+        try:
+            temp_by_co[t["company_id"]][t["field"]] = float(t["value"])
+        except (TypeError, ValueError):
+            pass
+    result = []
+    for co in companies:
+        cid = co["id"]
+        tt = temp_by_co.get(cid, {})
+        result.append({
+            "id": cid, "name": co["name"],
+            "sampling_interval_seconds": co["sampling_interval_seconds"],
+            "parameters": [
+                {"id": None, "name": "Temperature", "unit": "°C",
+                 "min_value": tt.get("temp_low"), "max_value": tt.get("temp_high"),
+                 "builtin": True}
+            ] + params_by_co.get(cid, []),
+        })
+    return result
+
+
+@router.post("/companies/{company_id}/parameters/direct", status_code=201,
+             summary="Directly add a parameter to a company (no approval)")
+async def add_parameter_direct(
+    company_id: int, body: _DirectParamIn, sa: dict = Depends(require_super_admin),
+):
+    cos = execute_read("SELECT id FROM companies WHERE id = %s", (company_id,))
+    if not cos:
+        return JSONResponse(status_code=404, content={"error": "Company not found"})
+    result = execute_write(
+        """
+        INSERT INTO company_parameters (company_id, name, unit, min_value, max_value, is_active)
+        VALUES (%s, %s, %s, %s, %s, TRUE)
+        ON CONFLICT (company_id, name)
+        DO UPDATE SET unit=EXCLUDED.unit, min_value=EXCLUDED.min_value,
+                      max_value=EXCLUDED.max_value, is_active=TRUE, updated_at=NOW()
+        RETURNING id
+        """,
+        (company_id, body.name, body.unit or "", body.min_value, body.max_value),
+    )
+    log_activity(sa["id"], "parameter_added", "company_parameters",
+                 f"company_id:{company_id} name:{body.name}", company_id)
+    return {"status": "created", "param_id": result.lastrowid}
+
+
+@router.put("/companies/{company_id}/temperature",
+            summary="Set per-company temperature thresholds")
+async def set_company_temperature(
+    company_id: int, body: _TempThresholdIn, sa: dict = Depends(require_super_admin),
+):
+    cos = execute_read("SELECT id FROM companies WHERE id = %s", (company_id,))
+    if not cos:
+        return JSONResponse(status_code=404, content={"error": "Company not found"})
+    for field, val in [("temp_high", body.max_value), ("temp_low", body.min_value)]:
+        if val is not None:
+            execute_write(
+                """
+                INSERT INTO company_config (company_id, field, value, locked, set_by, set_at)
+                VALUES (%s, %s, %s, 0, %s, NOW())
+                ON CONFLICT (company_id, field)
+                DO UPDATE SET value=EXCLUDED.value, set_by=EXCLUDED.set_by, set_at=NOW()
+                """,
+                (company_id, field, str(val), sa["id"]),
+            )
+    log_activity(sa["id"], "company_temp_threshold_set", "company_config",
+                 f"company_id:{company_id}", company_id)
+    return {"ok": True}
+
+
+@router.put("/companies/{company_id}/sampling",
+            summary="Set sampling interval for a company")
+async def set_company_sampling(
+    company_id: int, body: _SamplingIn, sa: dict = Depends(require_super_admin),
+):
+    cos = execute_read("SELECT id FROM companies WHERE id = %s", (company_id,))
+    if not cos:
+        return JSONResponse(status_code=404, content={"error": "Company not found"})
+    interval = max(1, min(body.sampling_interval_seconds, 86400))
+    try:
+        execute_write(
+            "UPDATE companies SET sampling_interval_seconds=%s WHERE id=%s",
+            (interval, company_id),
+        )
+    except Exception:
+        return JSONResponse(status_code=503,
+                            content={"error": "sampling_interval_seconds column not ready yet — retry after server restart"})
+    log_activity(sa["id"], "company_sampling_set", "companies",
+                 f"company_id:{company_id} interval:{interval}s", company_id)
+    return {"ok": True, "sampling_interval_seconds": interval}

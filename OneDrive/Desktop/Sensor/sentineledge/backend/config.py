@@ -30,6 +30,10 @@ load_dotenv(dotenv_path=os.path.join(_root, f".env.{APP_ENV}"))
 TEMP_THRESHOLD_HIGH: float = float(os.getenv("TEMP_THRESHOLD_HIGH", "90.0"))
 TEMP_THRESHOLD_LOW: float  = float(os.getenv("TEMP_THRESHOLD_LOW",  "42.0"))
 
+# pH alert range: fire when pH < PH_THRESHOLD_MIN or pH > PH_THRESHOLD_MAX
+PH_THRESHOLD_MIN: float = float(os.getenv("PH_THRESHOLD_MIN", "5.5"))
+PH_THRESHOLD_MAX: float = float(os.getenv("PH_THRESHOLD_MAX", os.getenv("PH_THRESHOLD", "7.0")))
+
 # ── SMTP ──────────────────────────────────────────────────────────────────────
 SMTP_HOST: str = os.getenv("SMTP_HOST", "smtp.gmail.com")
 SMTP_PORT: int = int(os.getenv("SMTP_PORT", "587"))
@@ -129,7 +133,38 @@ RUNTIME_THRESHOLDS: dict = {
         "high": TEMP_THRESHOLD_HIGH,
         "low":  TEMP_THRESHOLD_LOW,
     },
+    # pH range thresholds (fire when pH < min OR pH > max)
+    "ph_threshold_min": PH_THRESHOLD_MIN,
+    "ph_threshold_max": PH_THRESHOLD_MAX,
+    # Per-parameter alert enable flags (disable = readings still happen, no alerts sent)
+    "temp_alerts_enabled": True,
+    "ph_alerts_enabled":   True,
 }
+
+# ── Alert-enabled gate ────────────────────────────────────────────────────────
+
+def is_alert_enabled(parameter: str) -> bool:
+    """
+    Return True when alerts for *parameter* are active.
+
+    Called at two points in the pipeline:
+      1. threshold.py  — skips breach detection entirely (no BreachEvent created)
+      2. escalation.py — skips notification dispatch (email/SMS/push) even if a
+                         BreachEvent somehow reached the escalation layer
+
+    Both gates together guarantee that disabling a parameter stops ALL three
+    channels (email, SMS, in-app / mobile push) with no special per-channel logic.
+
+    Supported parameter names: "temperature", "ph"
+    """
+    p = parameter.lower()
+    if p == "temperature":
+        return bool(RUNTIME_THRESHOLDS.get("temp_alerts_enabled", True))
+    if p == "ph":
+        return bool(RUNTIME_THRESHOLDS.get("ph_alerts_enabled", True))
+    # Unknown parameters are allowed by default so future sensors work out-of-the-box
+    return True
+
 
 # Tracks whether RUNTIME_THRESHOLDS have been overridden at runtime
 RUNTIME_SOURCE: str = "default"        # "default" | "runtime_override"

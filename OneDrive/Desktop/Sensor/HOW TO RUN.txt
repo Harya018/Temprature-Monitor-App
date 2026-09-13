@@ -1,0 +1,20 @@
+SENTINELEDGE — HOW TO RUN
+==========================
+
+TO START:
+  Double-click START.bat
+  Wait about 10 seconds
+  Browser will open automatically
+
+TO STOP:
+  Double-click STOP.bat
+
+DASHBOARD URL:  http://localhost:5173
+BACKEND URL:    http://localhost:5000
+
+NOTES:
+  - Do NOT close the two black terminal windows while using the system
+  - PostgreSQL starts automatically if not already running
+  - If browser doesn't open, manually go to http://localhost:5173
+
+FOR ISSUES CONTACT: Harya

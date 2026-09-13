@@ -1063,12 +1063,13 @@ class _ProServerTestIn(BaseModel):
 def api_get_proserver_settings():
     """Return the current Pro-Server EX file path and column settings."""
     rows = database.execute_read(
-        "SELECT key, value FROM app_settings WHERE key LIKE 'proserver_%'"
+        "SELECT key, value FROM app_settings WHERE key LIKE %s",
+        ("proserver_%",),
     ) or []
     out: dict = {
         "file_path":     "",
-        "temp_col":      "Temperature",
-        "date_col":      "Date",
+        "temp_col":      "TEMPERATURE",
+        "date_col":      "DATE/TIME",
         "time_col":      "Time",
         "timestamp_col": "",
         "poll_interval": 1.0,
@@ -1091,8 +1092,8 @@ def api_save_proserver_settings(body: _ProServerSettingsIn):
     """Save Pro-Server EX settings to DB and hot-reload the reader thread."""
     vals = {
         "file_path":     body.file_path.strip(),
-        "temp_col":      body.temp_col.strip() or "Temperature",
-        "date_col":      body.date_col.strip() or "Date",
+        "temp_col":      body.temp_col.strip() or "TEMPERATURE",
+        "date_col":      body.date_col.strip() or "DATE/TIME",
         "time_col":      body.time_col.strip() or "Time",
         "timestamp_col": body.timestamp_col.strip(),
         "poll_interval": body.poll_interval,
@@ -1112,6 +1113,22 @@ def api_save_proserver_settings(body: _ProServerSettingsIn):
     excel_sensor.reload_settings(vals)
 
     return JSONResponse({"status": "saved", "active": excel_sensor.is_active()})
+
+
+@router.get("/admin/proserver/reading-status", dependencies=[Depends(require_admin)])
+def api_proserver_reading_status():
+    """Return current Excel reading enabled state and live/loop status."""
+    import core.excel_sensor as excel_sensor
+    return JSONResponse(excel_sensor.get_enabled_status())
+
+
+@router.post("/admin/proserver/reading-enabled", dependencies=[Depends(require_admin)])
+def api_set_proserver_reading_enabled(body: dict):
+    """Enable or disable Excel reading. Watchdog keeps running when disabled."""
+    import core.excel_sensor as excel_sensor
+    enabled = bool(body.get("enabled", True))
+    excel_sensor.set_enabled(enabled)
+    return JSONResponse({"enabled": enabled})
 
 
 @router.post("/admin/proserver/test", dependencies=[Depends(require_admin)])
@@ -1149,3 +1166,78 @@ def api_test_proserver(body: _ProServerTestIn):
         "columns":    columns,
         "latest_row": preview,
     })
+
+
+# ─── OPC DA secondary sensor settings ─────────────────────────────────────────
+
+class _OpcSettingsIn(BaseModel):
+    server_name:   str   = Field("",  max_length=256)
+    temp_tag:      str   = Field("",  max_length=512)
+    extra_tags:    str   = Field("",  max_length=1024)
+    poll_interval: float = Field(2.0, ge=0.5, le=60.0)
+
+
+@router.get("/admin/opc/settings", dependencies=[Depends(require_admin)])
+def api_get_opc_settings():
+    """Return the current OPC DA secondary sensor settings."""
+    rows = database.execute_read(
+        "SELECT key, value FROM app_settings WHERE key LIKE %s",
+        ("opc_%",),
+    ) or []
+    out: dict = {
+        "server_name":   "",
+        "temp_tag":      "",
+        "extra_tags":    "",
+        "poll_interval": 2.0,
+    }
+    for row in rows:
+        k = row["key"].replace("opc_", "", 1)
+        v = row["value"]
+        if k == "poll_interval":
+            try:
+                out[k] = float(v)
+            except (ValueError, TypeError):
+                pass
+        elif k in out:
+            out[k] = v
+
+    import core.opc_sensor as opc_sensor
+    out["status"] = opc_sensor.get_status()
+    return JSONResponse(out)
+
+
+@router.post("/admin/opc/settings", dependencies=[Depends(require_admin)])
+def api_save_opc_settings(body: _OpcSettingsIn):
+    """Save OPC DA settings to DB and hot-reload the reader thread."""
+    vals = {
+        "server_name":   body.server_name.strip(),
+        "temp_tag":      body.temp_tag.strip(),
+        "extra_tags":    body.extra_tags.strip(),
+        "poll_interval": body.poll_interval,
+    }
+    for k, v in vals.items():
+        database.execute_write(
+            """
+            INSERT INTO app_settings (key, value, updated_at)
+            VALUES (%s, %s, NOW())
+            ON CONFLICT (key) DO UPDATE
+              SET value = EXCLUDED.value, updated_at = NOW()
+            """,
+            (f"opc_{k}", str(v)),
+        )
+
+    import core.opc_sensor as opc_sensor
+    opc_sensor.reload_settings(vals)
+
+    return JSONResponse({
+        "status":    "saved",
+        "connected": opc_sensor._connected,
+        "active":    opc_sensor.is_active(),
+    })
+
+
+@router.get("/admin/opc/status", dependencies=[Depends(require_admin)])
+def api_opc_status():
+    """Return live OPC DA connection status."""
+    import core.opc_sensor as opc_sensor
+    return JSONResponse(opc_sensor.get_status())

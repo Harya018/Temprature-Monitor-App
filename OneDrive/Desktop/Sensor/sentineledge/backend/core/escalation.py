@@ -40,7 +40,7 @@ from modules.mobilepush.expo_push import send_expo_push_async
 from modules.mobilepush.fcm_direct import send_fcm_direct_async
 from utils.formatter import format_alert_message   # used by _build_message (SMS body)
 from utils.severity_router import get_routing
-from config import ALERT_COOLDOWN_SECONDS, RUNTIME_THRESHOLDS
+from config import ALERT_COOLDOWN_SECONDS, RUNTIME_THRESHOLDS, is_alert_enabled
 from models import BreachEvent
 
 logger = logging.getLogger("sentineledge.escalation")
@@ -59,7 +59,8 @@ def _build_message(
     severity: str = "WARNING",
 ) -> str:
     """Build the SMS/plain-text alert body. Always level 1 language."""
-    unit = "°C" if parameter == "temperature" else "%"
+    _units = {"temperature": "°C", "ph": ""}
+    unit = _units.get(parameter.lower(), "")
     base = format_alert_message(parameter, value, threshold, direction, severity, unit)
     return f"SentinelEdge Alert: {base}. Please check the dashboard."
 
@@ -218,6 +219,15 @@ async def _notify_all_subscribers(
     ─────────────────────────────────────────────────────────────────
     Always fires at escalation level 1. Receipts logged for every channel.
     """
+    # Second gate: if the parameter was disabled between breach detection and
+    # notification dispatch (e.g. admin disabled during cooldown window),
+    # skip ALL channels so no email, SMS, or push reaches subscribers.
+    if not is_alert_enabled(parameter):
+        logger.info(
+            "Alert %d skipped — %s alerts are disabled", alert_id, parameter
+        )
+        return
+
     alert_meta = database.get_alert(alert_id) or {}
     severity   = alert_meta.get("severity", "WARNING")
     timestamp_utc = str(alert_meta.get("timestamp", "") or "")
@@ -249,6 +259,7 @@ async def _notify_all_subscribers(
                 direction=direction,
                 severity=severity,
                 timestamp_utc=timestamp_utc,
+                parameter=parameter,
             )
             # Log receipts for each subscriber
             for sub, res in zip(active_subs, results):
@@ -301,6 +312,7 @@ async def _notify_all_subscribers(
                 threshold=threshold,
                 direction=direction,
                 timestamp_utc=timestamp_utc,
+                parameter=parameter,
             )
 
             # Log receipts for targeted subscribers
@@ -440,14 +452,27 @@ async def trigger_alert(reading: dict, breaches: list) -> list:
     cooldown_until = (now + timedelta(seconds=ALERT_COOLDOWN_SECONDS)).isoformat()
 
     for breach in breaches:
+        # Gate: if this parameter's alerts were disabled between sensor read and
+        # here, skip entirely — no DB insert, no notification on any channel.
+        if not is_alert_enabled(breach.parameter):
+            logger.info(
+                "Alert suppressed (gate 1) — %s alerts are disabled", breach.parameter
+            )
+            alert_ids.append(None)
+            continue
+
         severity = getattr(breach, "severity", "WARNING")
 
-        # Read threshold from RUNTIME_THRESHOLDS (stays current after updates)
-        rt = RUNTIME_THRESHOLDS.get("temperature", {})
-        if breach.direction == "high":
-            live_threshold = rt.get("high", breach.threshold)
+        # For temperature use RUNTIME_THRESHOLDS so live edits are reflected;
+        # for other parameters (pH, etc.) use the threshold from the breach itself.
+        if breach.parameter == "temperature":
+            rt = RUNTIME_THRESHOLDS.get("temperature", {})
+            if breach.direction == "high":
+                live_threshold = rt.get("high", breach.threshold)
+            else:
+                live_threshold = rt.get("low", breach.threshold)
         else:
-            live_threshold = rt.get("low", breach.threshold)
+            live_threshold = breach.threshold
 
         alert_id = database.insert_alert(
             parameter=breach.parameter,

@@ -96,9 +96,12 @@ export default function App() {
     try {
       playAlarm(breach?.severity)
     } catch { /* AudioContext blocked */ }
+    const isPh = breach?.parameter === 'ph'
     addToast({
       type: 'error',
-      message: `⚠️ BREACH: ${breach?.value?.toFixed(1) ?? '—'}°C — ${breach?.severity ?? ''}`,
+      message: isPh
+        ? `🔴 pH ALERT: ${breach?.value?.toFixed(2) ?? '—'} pH ≥ ${breach?.threshold ?? '—'} — ${breach?.severity ?? ''}`
+        : `⚠️ BREACH: ${breach?.value?.toFixed(1) ?? '—'}°C — ${breach?.severity ?? ''}`,
       duration: 8000,
     })
   }, [playAlarm, addToast])

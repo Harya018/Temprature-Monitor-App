@@ -62,6 +62,7 @@ def send_alert_email(
     severity: str,
     escalation_level: int,
     timestamp_utc: str,
+    parameter: str = "temperature",
 ) -> bool:
     """
     Build a professional HTML email and send it via SMTP.
@@ -74,7 +75,8 @@ def send_alert_email(
 
     try:
         content = build_alert_email(
-            temperature=temperature,
+            parameter=parameter,
+            value=temperature,
             threshold=threshold,
             direction=direction,
             severity=severity,
@@ -112,15 +114,20 @@ async def send_alert_email_async(
     severity: str,
     escalation_level: int,
     timestamp_utc: str,
+    parameter: str = "temperature",
 ) -> bool:
     """Async wrapper around send_alert_email() using a thread-pool executor."""
+    import functools
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(
         None,
-        send_alert_email,
-        recipient_email, recipient_name,
-        temperature, threshold, direction,
-        severity, escalation_level, timestamp_utc,
+        functools.partial(
+            send_alert_email,
+            recipient_email, recipient_name,
+            temperature, threshold, direction,
+            severity, escalation_level, timestamp_utc,
+            parameter,
+        ),
     )
 
 
@@ -166,6 +173,7 @@ async def send_alert_email_to_all(
     direction: str,
     severity: str,
     timestamp_utc: str,
+    parameter: str = "temperature",
 ) -> list:
     """
     Send the HTML alert email to ALL active subscribers simultaneously.
@@ -213,6 +221,7 @@ async def send_alert_email_to_all(
                 severity=severity,
                 escalation_level=1,
                 timestamp_utc=timestamp_utc,
+                parameter=parameter,
             )
             result["status"] = "sent" if ok else "failed"
             if not ok:

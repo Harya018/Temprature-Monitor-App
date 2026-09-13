@@ -47,7 +47,7 @@ _BREACH_TEMP   = 92.0   # °C — above the 90.0°C HIGH threshold
 _RECOVERY_TEMP = 55.0   # °C — well above LOW threshold, clears breach state
 
 
-async def _inject_reading(temperature: float, *, label: str = "") -> list:
+async def _inject_reading(temperature: float, *, label: str = "", extra_params: dict | None = None) -> list:
     """
     Inject a synthetic reading DIRECTLY into the pipeline — no spike validation.
 
@@ -55,10 +55,11 @@ async def _inject_reading(temperature: float, *, label: str = "") -> list:
     fires escalation tasks if any thresholds are breached.
     Returns the list of BreachEvent objects (may be empty).
     """
-    reading = {"temperature": temperature, "timestamp": now_iso()}
+    ep = extra_params or {}
+    reading = {"temperature": temperature, "timestamp": now_iso(), "extra_params": ep}
 
     # 1. Persist to database (marked valid=True — it's intentional)
-    database.insert_reading(temperature, reading["timestamp"], is_valid=True)
+    database.insert_reading(temperature, reading["timestamp"], is_valid=True, extra_params=ep)
 
     # 2. Threshold check
     breaches = threshold.check_threshold(reading)
@@ -145,6 +146,45 @@ async def _schedule_recovery(wait_seconds: int) -> None:
     await asyncio.sleep(wait_seconds)
     await _inject_reading(_RECOVERY_TEMP, label="recovery")
     logger.info("Breach simulation recovery complete.")
+
+
+_PH_TEST_VALUE = 7.5555   # above the 7.0 production threshold
+
+
+@router.post(
+    "/simulate/ph-breach",
+    summary="Simulate a pH threshold breach",
+    description=(
+        "Injects a synthetic pH=7.5555 reading into the alert pipeline. "
+        "Fires threshold check, alert creation, email/SMS/in-app notifications. "
+        "Requires admin auth. Rate limited to 5/min."
+    ),
+    dependencies=[Depends(require_admin)],
+)
+@limiter.limit("5/minute")
+async def simulate_ph_breach(request: Request):
+    # Use current temperature so the reading looks realistic
+    try:
+        import core.excel_sensor as _excel
+        temp = _excel.current_temperature or 25.0
+    except Exception:
+        temp = 25.0
+
+    breaches = await _inject_reading(
+        temp,
+        label="ph-breach",
+        extra_params={"PH": _PH_TEST_VALUE},
+    )
+    logger.info(
+        "simulate/ph-breach: injected pH=%.4f — %d breach(es) fired",
+        _PH_TEST_VALUE, len(breaches),
+    )
+    return {
+        "status":         "injected",
+        "ph_value":       _PH_TEST_VALUE,
+        "breaches_fired": len(breaches),
+        "message":        f"pH {_PH_TEST_VALUE} injected — threshold check fired",
+    }
 
 
 # ─── Demo playback ────────────────────────────────────────────────────────────

@@ -129,7 +129,7 @@ function CustomTooltip({ active, payload, label, unit = '' }) {
 // ─────────────────────────────────────────────────────────────────────────────
 // Chart 1 — Live Trend
 // ─────────────────────────────────────────────────────────────────────────────
-function LiveTrendChart({ source, parameter, fromDate, toDate, wsData, unit = '' }) {
+function LiveTrendChart({ source, parameter, fromDate, toDate, wsData, unit = '', thresholdOverride = null, h = 240 }) {
   const [data,      setData]      = useState([])
   const [thresholds, setThresholds] = useState({ high: null, low: null })
   const [loading,   setLoading]   = useState(true)
@@ -162,6 +162,10 @@ function LiveTrendChart({ source, parameter, fromDate, toDate, wsData, unit = ''
   }, [buildUrl])
 
   useEffect(() => {
+    if (thresholdOverride) {
+      setThresholds(thresholdOverride)
+      return
+    }
     apiFetch('/api/health')
       .then(h => {
         if (h?.thresholds) {
@@ -169,7 +173,7 @@ function LiveTrendChart({ source, parameter, fromDate, toDate, wsData, unit = ''
         }
       })
       .catch(() => {})
-  }, [])
+  }, [thresholdOverride])
 
   // Initial API fetch + polling fallback (for non-live sources or when WS has no data yet)
   useEffect(() => {
@@ -203,7 +207,7 @@ function LiveTrendChart({ source, parameter, fromDate, toDate, wsData, unit = ''
       <div className="chart-card-header">
         <span className="chart-card-title">
           <TrendingUp size={15} color={PURPLE} />
-          Live Sensor Trend — {parameter}
+          Live Sensor Trend — {parameter === 'ph' ? 'pH' : parameter.charAt(0).toUpperCase() + parameter.slice(1)}
           {isLive && (
             <span className="chart-live-badge">
               <span className="chart-live-dot" /> LIVE
@@ -213,10 +217,10 @@ function LiveTrendChart({ source, parameter, fromDate, toDate, wsData, unit = ''
         <button className="btn-export-small" onClick={() => exportRows(data, `live-trend-${parameter}.csv`)}>↓ CSV</button>
       </div>
 
-      {loading && !data.length ? <Skeleton h={240} /> :
-       error ? <ChartError h={240} onRetry={load} /> :
-       !data.length ? <Empty h={240} /> : (
-        <ResponsiveContainer width="100%" height={240}>
+      {loading && !data.length ? <Skeleton h={h} /> :
+       error ? <ChartError h={h} onRetry={load} /> :
+       !data.length ? <Empty h={h} /> : (
+        <ResponsiveContainer width="100%" height={h}>
           <LineChart data={data} margin={{ top: 4, right: 16, bottom: 0, left: 0 }}>
             <CartesianGrid strokeDasharray="3 3" stroke="#F3F4F6" />
             <XAxis dataKey="ts" tick={{ fontSize: 10, fill: '#9CA3AF' }} interval="preserveStartEnd" />
@@ -253,7 +257,7 @@ function LiveTrendChart({ source, parameter, fromDate, toDate, wsData, unit = ''
 // ─────────────────────────────────────────────────────────────────────────────
 // Chart 2 — Daily Average
 // ─────────────────────────────────────────────────────────────────────────────
-function DailyAvgChart({ source, parameter, fromDate, toDate }) {
+function DailyAvgChart({ source, parameter, fromDate, toDate, h = 220 }) {
   const unit = parameter === 'temperature' ? '°C' : 'hPa'
   const url = `/api/analytics/charts/daily-avg?parameter=${parameter}&source=${source}` +
     (fromDate ? `&from_date=${fromDate}` : '') + (toDate ? `&to_date=${toDate}` : '')
@@ -273,9 +277,9 @@ function DailyAvgChart({ source, parameter, fromDate, toDate }) {
         <span className="chart-card-title"><TrendingUp size={14} color={PURPLE} /> Daily Average</span>
         <button className="btn-export-small" onClick={() => exportRows(rows, `daily-avg-${parameter}.csv`)}>↓ CSV</button>
       </div>
-      {loading ? <Skeleton /> : error ? <ChartError onRetry={reload} /> :
-       !rows.length ? <Empty /> : (
-        <ResponsiveContainer width="100%" height={220}>
+      {loading ? <Skeleton h={h} /> : error ? <ChartError h={h} onRetry={reload} /> :
+       !rows.length ? <Empty h={h} /> : (
+        <ResponsiveContainer width="100%" height={h}>
           <ComposedChart data={rows} margin={{ top: 4, right: 12, bottom: 0, left: 0 }}>
             <CartesianGrid strokeDasharray="3 3" stroke="#F3F4F6" />
             <XAxis dataKey="date" tick={{ fontSize: 10, fill: '#9CA3AF' }} interval="preserveStartEnd" />
@@ -294,7 +298,7 @@ function DailyAvgChart({ source, parameter, fromDate, toDate }) {
 // ─────────────────────────────────────────────────────────────────────────────
 // Chart 3 — Hourly Average
 // ─────────────────────────────────────────────────────────────────────────────
-function HourlyAvgChart({ source, parameter, fromDate, toDate }) {
+function HourlyAvgChart({ source, parameter, fromDate, toDate, h = 220 }) {
   const unit = parameter === 'temperature' ? '°C' : 'hPa'
   const url = `/api/analytics/charts/hourly-avg?parameter=${parameter}&source=${source}` +
     (fromDate ? `&from_date=${fromDate}` : '') + (toDate ? `&to_date=${toDate}` : '')
@@ -310,9 +314,9 @@ function HourlyAvgChart({ source, parameter, fromDate, toDate }) {
         <span className="chart-card-title"><Clock size={14} color={PURPLE} /> Avg by Hour of Day</span>
         <button className="btn-export-small" onClick={() => exportRows(rows, `hourly-avg-${parameter}.csv`)}>↓ CSV</button>
       </div>
-      {loading ? <Skeleton /> : error ? <ChartError onRetry={reload} /> :
-       !data?.length ? <Empty /> : (
-        <ResponsiveContainer width="100%" height={220}>
+      {loading ? <Skeleton h={h} /> : error ? <ChartError h={h} onRetry={reload} /> :
+       !data?.length ? <Empty h={h} /> : (
+        <ResponsiveContainer width="100%" height={h}>
           <BarChart data={rows} margin={{ top: 4, right: 12, bottom: 0, left: 0 }}>
             <CartesianGrid strokeDasharray="3 3" stroke="#F3F4F6" vertical={false} />
             <XAxis dataKey="hour" tick={{ fontSize: 10, fill: '#9CA3AF' }} />
@@ -441,7 +445,7 @@ function DistributionChart({ source, parameter, fromDate, toDate }) {
 // ─────────────────────────────────────────────────────────────────────────────
 const BREACH_COLORS = [PURPLE, CORAL, AMBER, TEAL, '#EC4899', '#8B5CF6']
 
-function BreachFrequencyChart({ fromDate, toDate }) {
+function BreachFrequencyChart({ fromDate, toDate, h = 240 }) {
   const url = `/api/analytics/charts/breach-frequency` +
     `?${fromDate ? `from_date=${fromDate}&` : ''}${toDate ? `to_date=${toDate}` : ''}`
   const { data, loading, error, reload } = useChartData(url)
@@ -460,8 +464,8 @@ function BreachFrequencyChart({ fromDate, toDate }) {
     return row
   })
 
-  if (loading) return <div className="chart-card"><Skeleton h={240} /></div>
-  if (error)   return <div className="chart-card"><ChartError h={240} onRetry={reload} /></div>
+  if (loading) return <div className="chart-card"><Skeleton h={h} /></div>
+  if (error)   return <div className="chart-card"><ChartError h={h} onRetry={reload} /></div>
   if (!series.length || series.every(s => s.breach_count === 0))
     return (
       <div className="chart-card">
@@ -479,7 +483,7 @@ function BreachFrequencyChart({ fromDate, toDate }) {
         <span className="chart-card-title"><AlertCircle size={14} color={CORAL} /> Breach Frequency</span>
         <button className="btn-export-small" onClick={() => exportRows(chartData, 'breach-frequency.csv')}>↓ CSV</button>
       </div>
-      <ResponsiveContainer width="100%" height={240}>
+      <ResponsiveContainer width="100%" height={h}>
         <BarChart data={chartData} margin={{ top: 4, right: 16, bottom: 0, left: 0 }}>
           <CartesianGrid strokeDasharray="3 3" stroke="#F3F4F6" />
           <XAxis dataKey="date" tick={{ fontSize: 10, fill: '#9CA3AF' }} interval="preserveStartEnd" />
@@ -672,31 +676,37 @@ function ChannelDeliveryChart({ fromDate, toDate }) {
           exportRows(chs.map(k => ({ channel: k, ...(data?.[k] || { sent: 0, failed: 0, rate_percent: 0 }) })), 'channel-delivery.csv')
         }}>↓ CSV</button>
       </div>
-      {loading ? <Skeleton /> : error ? <ChartError onRetry={reload} /> :
+      {loading ? <Skeleton h={160} /> : error ? <ChartError h={160} onRetry={reload} /> :
        data?.available === false ? (
-         <div className="chart-empty" style={{ height: 180 }}>
+         <div className="chart-empty" style={{ height: 160 }}>
            <WifiOff size={24} />
            <span>No delivery data available</span>
          </div>
        ) : (
-        <div className="delivery-rings" style={{ minHeight: 180 }}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10, paddingTop: 4 }}>
           {[
-            { key: 'email',        label: 'Email'       },
-            { key: 'sms',          label: 'SMS'         },
-            { key: 'push',         label: 'Web Push'    },
-            { key: 'mobile_push',  label: 'Mobile Push' },
-            { key: 'inapp',        label: 'In-App'      },
+            { key: 'email',       label: 'Email'       },
+            { key: 'sms',         label: 'SMS'         },
+            { key: 'push',        label: 'Web Push'    },
+            { key: 'mobile_push', label: 'Mobile Push' },
+            { key: 'inapp',       label: 'In-App'      },
           ].map(({ key, label }) => {
-            const d = data?.[key] || { sent: 0, failed: 0, rate_percent: 0 }
+            const d    = data?.[key] || { sent: 0, failed: 0, rate_percent: 0 }
+            const rate = d.rate_percent ?? 0
+            const clr  = ringColor(rate)
             return (
-              <DeliveryRing
-                key={key}
-                label={label}
-                sent={d.sent}
-                failed={d.failed}
-                rate={d.rate_percent}
-                color={ringColor(d.rate_percent)}
-              />
+              <div key={key}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, marginBottom: 3 }}>
+                  <span style={{ color: '#6B7280', fontWeight: 500 }}>{label}</span>
+                  <span style={{ color: clr, fontWeight: 700 }}>{rate}%</span>
+                </div>
+                <div style={{ background: '#F3F4F6', borderRadius: 4, height: 6, overflow: 'hidden' }}>
+                  <div style={{ width: `${rate}%`, height: '100%', background: clr, borderRadius: 4, transition: 'width 0.4s' }} />
+                </div>
+                <div style={{ fontSize: 10, color: '#9CA3AF', marginTop: 2 }}>
+                  {d.sent} sent · {d.failed} failed
+                </div>
+              </div>
             )
           })}
         </div>
@@ -864,6 +874,7 @@ function CsvImportPanel({ onImported }) {
 // ─────────────────────────────────────────────────────────────────────────────
 const DEFAULT_PARAMS = [
   { value: 'temperature', label: 'Temperature', unit: '°C' },
+  { value: 'ph',          label: 'pH',          unit: ' pH' },
 ]
 const RANGES = [
   { value: '1d',     label: 'Last 24h' },
@@ -881,108 +892,94 @@ function rangeToDates(range) {
   return null
 }
 
+// ── KPI card ──────────────────────────────────────────────────────────────────
+function KpiCard({ label, value, unit = '', color = '#1F2937', icon: Icon, bg = '#F5F3FF', iconColor = PURPLE }) {
+  return (
+    <div className="anl-kpi-card">
+      <div className="anl-kpi-icon" style={{ background: bg }}>
+        {Icon && <Icon size={18} color={iconColor} />}
+      </div>
+      <div className="anl-kpi-body">
+        <div className="anl-kpi-val" style={{ color }}>{value ?? '—'}<span className="anl-kpi-unit">{unit}</span></div>
+        <div className="anl-kpi-label">{label}</div>
+      </div>
+    </div>
+  )
+}
+
 export default function AnalyticsPage({ wsData }) {
-  const [source,      setSource]      = useState('live')
-  const [parameter,   setParameter]   = useState('temperature')
-  const [range,       setRange]       = useState('7d')
-  const [customFrom,  setCustomFrom]  = useState('')
-  const [customTo,    setCustomTo]    = useState('')
-  const [csvRefresh,  setCsvRefresh]  = useState(0)
-  const [showCsvPanel,  setShowCsvPanel]  = useState(false)
-  const [predictions,   setPredictions]   = useState([])
-  const [paramList,     setParamList]     = useState(DEFAULT_PARAMS)
+  const [source,      setSource]    = useState('live')
+  const [parameter,   setParameter] = useState('temperature')
+  const [range,       setRange]     = useState('7d')
+  const [customFrom,  setCustomFrom] = useState('')
+  const [customTo,    setCustomTo]   = useState('')
+  const [paramList,   setParamList]  = useState(DEFAULT_PARAMS)
+  const [phThresholds, setPhThresholds] = useState({ high: 7.0, low: 5.5 })
+  const [summaryStats, setSummaryStats] = useState(null)
 
-  // Load approved company parameters and merge with defaults
-  useEffect(() => {
-    fetchCompanyParams().then(rows => {
-      const extras = rows.map(p => ({
-        value: p.name.toLowerCase(),
-        label: p.name.charAt(0).toUpperCase() + p.name.slice(1),
-        unit:  p.unit || '',
-      }))
-      const existing = new Set(DEFAULT_PARAMS.map(p => p.value))
-      const merged = [
-        ...DEFAULT_PARAMS,
-        ...extras.filter(p => !existing.has(p.value)),
-      ]
-      setParamList(merged)
-    })
-  }, [])
-
-  const dates = range === 'custom'
-    ? { from: customFrom, to: customTo }
-    : (rangeToDates(range) || {})
-
+  const dates    = range === 'custom' ? { from: customFrom, to: customTo } : (rangeToDates(range) || {})
   const fromDate = dates.from || ''
   const toDate   = dates.to   || ''
 
-  // Show CSV import panel when source includes csv and no data yet
+  // Load pH thresholds
   useEffect(() => {
-    if (source === 'csv' || source === 'both') {
-      setShowCsvPanel(true)
-    } else {
-      setShowCsvPanel(false)
-    }
-  }, [source])
+    apiFetch('/api/config/alert-settings')
+      .then(s => setPhThresholds({ high: s.ph_threshold_max ?? 7.0, low: s.ph_threshold_min ?? 5.5 }))
+      .catch(() => {})
+  }, [])
 
-  // Predictions — always use live source; refresh every 5 min
+  // Load company parameters
   useEffect(() => {
-    const fetchPredictions = async () => {
-      try {
-        const data = await apiFetch(
-          `/api/analytics/charts/predictions?parameter=${parameter}&source=live`
-        )
-        setPredictions(Array.isArray(data) ? data : [])
-      } catch { setPredictions([]) }
-    }
-    fetchPredictions()
-    const t = setInterval(fetchPredictions, 300_000)
-    return () => clearInterval(t)
-  }, [parameter])
+    fetchCompanyParams().then(rows => {
+      const extras   = rows.map(p => ({ value: p.name.toLowerCase(), label: p.name.charAt(0).toUpperCase() + p.name.slice(1), unit: p.unit || '' }))
+      const existing = new Set(DEFAULT_PARAMS.map(p => p.value))
+      setParamList([...DEFAULT_PARAMS, ...extras.filter(p => !existing.has(p.value))])
+    })
+  }, [])
+
+  // Summary stats for KPI cards
+  useEffect(() => {
+    const url = `/api/analytics/charts/summary-stats?parameter=${parameter}&source=${source}` +
+      (fromDate ? `&from_date=${fromDate}` : '') + (toDate ? `&to_date=${toDate}` : '')
+    apiFetch(url).then(d => setSummaryStats(Array.isArray(d) ? d[0] : null)).catch(() => setSummaryStats(null))
+  }, [parameter, source, fromDate, toDate])
+
+  const unit = paramList.find(p => p.value === parameter)?.unit || ''
 
   const exportCsv = async () => {
     const url = `/api/analytics/charts/daily-avg?parameter=${parameter}&source=${source}` +
       (fromDate ? `&from_date=${fromDate}` : '') + (toDate ? `&to_date=${toDate}` : '')
     try {
-      const data = await apiFetch(url)
+      const data   = await apiFetch(url)
       const header = Object.keys(data[0] || {}).join(',')
       const rows   = data.map(r => Object.values(r).join(',')).join('\n')
       const blob   = new Blob([header + '\n' + rows], { type: 'text/csv' })
-      const a      = document.createElement('a')
-      a.href       = URL.createObjectURL(blob)
-      a.download   = `analytics_${parameter}_${fromDate || 'all'}.csv`
-      a.click()
+      const a      = document.createElement('a'); a.href = URL.createObjectURL(blob)
+      a.download   = `analytics_${parameter}_${fromDate || 'all'}.csv`; a.click()
     } catch { /* silent */ }
   }
 
   return (
-    <div className="analytics-page">
-      {/* ── Top bar ── */}
-      <div className="analytics-topbar">
-        <div className="analytics-title-block">
-          <div className="analytics-title">
-            <TrendingUp size={18} color={PURPLE} />
-            Analytics
-          </div>
-          <div className="analytics-subtitle">Sensor data insights</div>
-        </div>
+    <div className="analytics-page anl-onescreen">
 
+      {/* ── Header ── */}
+      <div className="anl-header-bar">
+        <div className="anl-header-title">
+          <TrendingUp size={16} color={PURPLE} />
+          <span>Analytics</span>
+          <span className="anl-header-sub">Sensor data insights</span>
+        </div>
         <div className="analytics-controls">
-          {/* Source toggle */}
           <div className="toggle-group">
-            {['live', 'csv', 'both'].map(s => (
+            {['live','csv','both'].map(s => (
               <button key={s} className={source === s ? 'active' : ''} onClick={() => setSource(s)}>
                 {s.charAt(0).toUpperCase() + s.slice(1)}
               </button>
             ))}
           </div>
-
-          {/* Parameter */}
           <select className="analytics-select" value={parameter} onChange={e => setParameter(e.target.value)}>
             {paramList.map(p => <option key={p.value} value={p.value}>{p.label}</option>)}
           </select>
-
-          {/* Date range */}
           <div className="toggle-group">
             {RANGES.map(r => (
               <button key={r.value} className={range === r.value ? 'active' : ''} onClick={() => setRange(r.value)}>
@@ -990,99 +987,40 @@ export default function AnalyticsPage({ wsData }) {
               </button>
             ))}
           </div>
-
-          {/* Custom date inputs */}
           {range === 'custom' && (
             <>
-              <input type="date" className="date-input" value={customFrom}
-                onChange={e => setCustomFrom(e.target.value)} />
-              <input type="date" className="date-input" value={customTo}
-                onChange={e => setCustomTo(e.target.value)} />
+              <input type="date" className="date-input" value={customFrom} onChange={e => setCustomFrom(e.target.value)} />
+              <input type="date" className="date-input" value={customTo}   onChange={e => setCustomTo(e.target.value)} />
             </>
           )}
-
-          <button className="btn-export" onClick={exportCsv}>
-            <Download size={13} /> Export CSV
-          </button>
+          <button className="btn-export" onClick={exportCsv}><Download size={13} /> Export</button>
         </div>
       </div>
 
-      {/* ── 1. CSV import panel ── */}
-      {showCsvPanel && (
-        <CsvImportPanel onImported={() => setCsvRefresh(n => n + 1)} />
-      )}
-
-      {/* ── Predictions (live feed, auto-refresh 5 min) ── */}
-      {predictions.length > 0 && (
-        <div className="predictions-section">
-          <div className="predictions-header">
-            <AlertCircle size={16} />
-            Breach Predictions
-          </div>
-          <div className="predictions-cards">
-            {predictions.map((p, i) => (
-              <div
-                key={i}
-                className={`prediction-card ${p.hours_to_breach < 1 ? 'prediction-urgent' : 'prediction-warning'}`}
-              >
-                <div className="prediction-param">
-                  {p.parameter.charAt(0).toUpperCase() + p.parameter.slice(1)}
-                  {p.unit && <span className="prediction-unit"> ({p.unit})</span>}
-                </div>
-                <div className="prediction-row">
-                  <span className="prediction-label">Current</span>
-                  <strong>{p.current_value}{p.unit}</strong>
-                </div>
-                <div className="prediction-row">
-                  <span className="prediction-label">Threshold ({p.direction})</span>
-                  <strong>{p.threshold}{p.unit}</strong>
-                </div>
-                <div className="prediction-time">
-                  {p.hours_to_breach < 1
-                    ? `Breach in ~${Math.round(p.hours_to_breach * 60)} min`
-                    : `Breach in ~${p.hours_to_breach}h`}
-                </div>
-                <div className="prediction-confidence">
-                  Confidence: {p.confidence_pct}%
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* ── 2. Live Trend (full width) ── */}
-      <LiveTrendChart
-        source={source} parameter={parameter} fromDate={fromDate} toDate={toDate} wsData={wsData}
-        unit={(paramList.find(p => p.value === parameter) || {}).unit || ''}
-      />
-
-      {/* ── 3. Daily Avg + Hourly Avg ── */}
-      <div className="analytics-row">
-        <DailyAvgChart  source={source} parameter={parameter} fromDate={fromDate} toDate={toDate} />
-        <HourlyAvgChart source={source} parameter={parameter} fromDate={fromDate} toDate={toDate} />
+      {/* ── KPI strip ── */}
+      <div className="anl-kpi-row">
+        <KpiCard label="Average"       value={summaryStats?.avg}   unit={unit}      icon={TrendingUp}   bg="#F5F3FF" iconColor={PURPLE} />
+        <KpiCard label="Minimum"       value={summaryStats?.min}   unit={unit}      icon={TrendingUp}   bg="#ECFDF5" iconColor={TEAL}   color={TEAL}  />
+        <KpiCard label="Maximum"       value={summaryStats?.max}   unit={unit}      icon={TrendingUp}   bg="#FEF2F2" iconColor={CORAL}  color={CORAL} />
+        <KpiCard label="Std Deviation" value={summaryStats?.std_dev} unit={unit}    icon={BarChart2}    bg="#FFF7ED" iconColor={AMBER}  />
+        <KpiCard label="Total Readings" value={summaryStats?.reading_count != null ? Number(summaryStats.reading_count).toLocaleString() : '—'} icon={Wifi} bg="#EFF6FF" iconColor="#3B82F6" color="#3B82F6" />
+        <KpiCard label="Breaches"      value={summaryStats?.breach_count ?? '—'}    icon={AlertCircle}  bg="#FEF2F2" iconColor={CORAL}  color={summaryStats?.breach_count > 0 ? CORAL : '#22C55E'} />
       </div>
 
-      {/* ── 4. Weekly Avg + Distribution ── */}
-      <div className="analytics-row">
-        <WeeklyAvgChart    source={source} parameter={parameter} fromDate={fromDate} toDate={toDate} />
-        <DistributionChart source={source} parameter={parameter} fromDate={fromDate} toDate={toDate} />
+      {/* ── Row 1: Temperature trend | Daily avg | Hourly avg ── */}
+      <div className="anl-row3">
+        <LiveTrendChart source={source} parameter="temperature" fromDate={fromDate} toDate={toDate} wsData={wsData} unit="°C" h={160} />
+        <DailyAvgChart  source={source} parameter={parameter}   fromDate={fromDate} toDate={toDate} h={160} />
+        <HourlyAvgChart source={source} parameter={parameter}   fromDate={fromDate} toDate={toDate} h={160} />
       </div>
 
-      {/* ── 5. Breach Frequency (full width) ── */}
-      <BreachFrequencyChart fromDate={fromDate} toDate={toDate} />
-
-      {/* ── 6. Alert Heatmap (full width) ── */}
-      <AlertHeatmap fromDate={fromDate} toDate={toDate} />
-
-      {/* ── 7. Subscriber Response + Channel Delivery ── */}
-      <div className="analytics-row">
-        <SubscriberResponseTable fromDate={fromDate} toDate={toDate} />
-        <ChannelDeliveryChart    fromDate={fromDate} toDate={toDate} />
+      {/* ── Row 2: pH trend | Breach frequency | Channel delivery ── */}
+      <div className="anl-row3">
+        <LiveTrendChart source={source} parameter="ph" fromDate={fromDate} toDate={toDate} wsData={wsData} unit=" pH" thresholdOverride={phThresholds} h={160} />
+        <BreachFrequencyChart fromDate={fromDate} toDate={toDate} h={160} />
+        <ChannelDeliveryChart fromDate={fromDate} toDate={toDate} />
       </div>
 
-      {/* ── 8. Summary Stats (full width) ── */}
-      <SummaryStats source={source} parameter={parameter} fromDate={fromDate} toDate={toDate} />
     </div>
   )
 }

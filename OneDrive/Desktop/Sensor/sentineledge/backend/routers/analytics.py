@@ -107,8 +107,8 @@ def _batch_insert_csv(rows: list[tuple]) -> int:
             cur.executemany(
                 """
                 INSERT INTO csv_sensor_history
-                    (recorded_at, date_only, hour, week_number, temperature, pressure)
-                VALUES (%s, %s, %s, %s, %s, %s)
+                    (recorded_at, date_only, hour, week_number, temperature, pressure, ph)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
                 """,
                 rows,
             )
@@ -141,7 +141,7 @@ def _live_extra_filter(parameter: str) -> str:
     return f"AND extra_params ? '{parameter}'"
 
 def _csv_param_col(parameter: str) -> Optional[str]:
-    mapping = {"temperature": "temperature", "pressure": "pressure"}
+    mapping = {"temperature": "temperature", "pressure": "pressure", "ph": "ph"}
     return mapping.get(parameter)
 
 
@@ -183,6 +183,7 @@ async def import_csv(file: UploadFile = File(...)):
 
     temp_col  = _find(["temperature", "temp"])
     press_col = _find(["pressure", "press"])
+    ph_col    = _find(["ph", "p_h", "acidity"])
     hour_col  = _find(["hour"])
     week_col  = _find(["week number", "week_number", "weeknumber", "week"])
 
@@ -229,8 +230,9 @@ async def import_csv(file: UploadFile = File(...)):
 
         temp  = _float(temp_col)
         press = _float(press_col)
+        ph    = _float(ph_col)
 
-        batch.append((dt, dt_date, hr, wk, temp, press))
+        batch.append((dt, dt_date, hr, wk, temp, press, ph))
 
         if len(batch) >= 500:
             try:

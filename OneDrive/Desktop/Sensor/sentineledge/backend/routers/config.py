@@ -11,7 +11,10 @@ Additions:
 import logging
 from datetime import datetime, timezone
 
+from typing import Optional
+
 from fastapi import APIRouter, Depends
+from pydantic import BaseModel
 
 import database
 from config import (
@@ -22,6 +25,14 @@ from config import (
 import config as _config
 from middleware.auth import require_admin
 from models import ThresholdConfigIn, ThresholdConfigOut, ThresholdConfigDetailOut
+
+
+class AlertSettingsIn(BaseModel):
+    temp_alerts_enabled: Optional[bool]  = None
+    ph_alerts_enabled:   Optional[bool]  = None
+    ph_threshold_max:    Optional[float] = None
+    ph_threshold_min:    Optional[float] = None
+    ph_threshold:        Optional[float] = None  # legacy alias → treated as ph_threshold_max
 
 router = APIRouter(prefix="/api")
 logger = logging.getLogger("sentineledge.routers.config")
@@ -142,3 +153,81 @@ async def reset_thresholds():
 @router.get("/config/vapid-public-key")
 async def get_vapid_public_key():
     return {"vapid_public_key": VAPID_PUBLIC_KEY}
+
+
+@router.get("/config/alert-settings")
+async def get_alert_settings():
+    """Return alert enable/disable flags and the pH min/max thresholds."""
+    return {
+        "temp_alerts_enabled": RUNTIME_THRESHOLDS.get("temp_alerts_enabled", True),
+        "ph_alerts_enabled":   RUNTIME_THRESHOLDS.get("ph_alerts_enabled",   True),
+        "ph_threshold_max":    RUNTIME_THRESHOLDS.get("ph_threshold_max",    7.0),
+        "ph_threshold_min":    RUNTIME_THRESHOLDS.get("ph_threshold_min",    5.5),
+    }
+
+
+@router.post("/config/alert-settings", dependencies=[Depends(require_admin)])
+async def update_alert_settings(body: AlertSettingsIn):
+    """Enable/disable temperature or pH alerts, or change the pH threshold."""
+    if body.temp_alerts_enabled is not None:
+        RUNTIME_THRESHOLDS["temp_alerts_enabled"] = body.temp_alerts_enabled
+        database.log_config_change(
+            changed_by="admin",
+            field_name="temp_alerts_enabled",
+            old_value=str(not body.temp_alerts_enabled),
+            new_value=str(body.temp_alerts_enabled),
+        )
+        database.execute_write(
+            "INSERT INTO app_settings (key, value, updated_at) VALUES (%s, %s, NOW()) "
+            "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()",
+            ("alert_temp_enabled", str(body.temp_alerts_enabled)),
+        )
+    if body.ph_alerts_enabled is not None:
+        RUNTIME_THRESHOLDS["ph_alerts_enabled"] = body.ph_alerts_enabled
+        database.log_config_change(
+            changed_by="admin",
+            field_name="ph_alerts_enabled",
+            old_value=str(not body.ph_alerts_enabled),
+            new_value=str(body.ph_alerts_enabled),
+        )
+        database.execute_write(
+            "INSERT INTO app_settings (key, value, updated_at) VALUES (%s, %s, NOW()) "
+            "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()",
+            ("alert_ph_enabled", str(body.ph_alerts_enabled)),
+        )
+    # ph_threshold_max (also accept legacy ph_threshold as alias)
+    new_max = body.ph_threshold_max if body.ph_threshold_max is not None else body.ph_threshold
+    if new_max is not None:
+        RUNTIME_THRESHOLDS["ph_threshold_max"] = new_max
+        database.log_config_change(
+            changed_by="admin", field_name="ph_threshold_max",
+            old_value="", new_value=str(new_max),
+        )
+        database.execute_write(
+            "INSERT INTO app_settings (key, value, updated_at) VALUES (%s, %s, NOW()) "
+            "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()",
+            ("alert_ph_threshold_max", str(new_max)),
+        )
+    if body.ph_threshold_min is not None:
+        RUNTIME_THRESHOLDS["ph_threshold_min"] = body.ph_threshold_min
+        database.log_config_change(
+            changed_by="admin", field_name="ph_threshold_min",
+            old_value="", new_value=str(body.ph_threshold_min),
+        )
+        database.execute_write(
+            "INSERT INTO app_settings (key, value, updated_at) VALUES (%s, %s, NOW()) "
+            "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()",
+            ("alert_ph_threshold_min", str(body.ph_threshold_min)),
+        )
+    logger.info("Alert settings saved to DB: %s", {
+        "temp_alerts_enabled": RUNTIME_THRESHOLDS.get("temp_alerts_enabled"),
+        "ph_alerts_enabled":   RUNTIME_THRESHOLDS.get("ph_alerts_enabled"),
+        "ph_threshold_min":    RUNTIME_THRESHOLDS.get("ph_threshold_min"),
+        "ph_threshold_max":    RUNTIME_THRESHOLDS.get("ph_threshold_max"),
+    })
+    return {
+        "temp_alerts_enabled": RUNTIME_THRESHOLDS.get("temp_alerts_enabled", True),
+        "ph_alerts_enabled":   RUNTIME_THRESHOLDS.get("ph_alerts_enabled",   True),
+        "ph_threshold_max":    RUNTIME_THRESHOLDS.get("ph_threshold_max",    7.0),
+        "ph_threshold_min":    RUNTIME_THRESHOLDS.get("ph_threshold_min",    5.5),
+    }

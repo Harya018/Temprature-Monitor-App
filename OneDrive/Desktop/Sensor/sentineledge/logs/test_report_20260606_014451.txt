@@ -1,0 +1,112 @@
+
+=======================================================
+  SENTINELEDGE FULL TEST REPORT
+  Generated : 2026-06-06 01:46:10
+  Server    : https://localhost:5000
+=======================================================
+
+  UNIT TESTS
+  --------------------------------------------------
+  PASS  Validator — valid reading within range passes
+  PASS  Validator — spike > 10°C/s is rejected
+  PASS  Validator — temperature below -50°C is rejected
+  PASS  Validator — exactly at spike limit (10°C/s) passes
+  PASS  Validator — recovery step after spike is accepted
+  PASS  Validator — missing timestamp field is rejected
+  PASS  Validator — null temperature value is rejected
+  PASS  Threshold — 92°C triggers HIGH breach
+  PASS  Threshold — 35°C triggers LOW breach
+  PASS  Threshold — 65°C (in range) does NOT trigger
+  PASS  Threshold — exactly 90.0°C does NOT trigger (strict boundary)
+  PASS  Threshold — exactly 38.0°C does NOT trigger (strict boundary)
+  PASS  Threshold — second breach within cooldown is suppressed
+  PASS  Threshold — severity EMERGENCY correct (>25% over threshold)
+  PASS  Database — insert + retrieve reading round-trip
+  PASS  Database — insert + retrieve alert round-trip
+  PASS  Database — subscriber CRUD (create/read/set-PIN/verify-PIN/delete)
+  PASS  Auth — valid name + PIN returns subscriber record
+  PASS  Auth — wrong PIN returns None (not found)
+  PASS  Auth — nonexistent name returns None
+  PASS  Auth — PIN stored as SHA-256 hash (not plain text)
+  PASS  Database — delivery receipt insert + retrieve
+  SKIP  SMS — ADB sender  [hardware test (ADB/Android phone)]
+  SKIP  SMS — GSM Dongle sender  [hardware test (USB GSM dongle)]
+
+  API ENDPOINT TESTS
+  --------------------------------------------------
+  PASS  GET /api/health → 200 + {status: ok}
+  FAIL  GET /api/temperature/latest → 200
+         -> Expecting value: line 1 column 1 (char 0)
+  FAIL  GET /api/temperature/history → 200 + array
+         -> Expecting value: line 1 column 1 (char 0)
+  PASS  GET /api/alerts → 200 + array
+  PASS  GET /api/subscribers → 200 + array
+  PASS  GET /api/config/thresholds → 200 + thresholds
+  PASS  POST /api/auth/login (valid) → 200 + token
+  PASS  POST /api/auth/login (wrong PIN) → 401
+  PASS  POST /api/auth/login (missing pin) → 422
+  PASS  GET /api/auth/me (valid token) → 200 + subscriber info
+  PASS  GET /api/auth/me (no token) → 401
+  PASS  GET /api/auth/me (invalid token) → 401
+  FAIL  POST /api/simulate/breach (admin) → 200 + activated
+         -> status='injected'
+  PASS  POST /api/simulate/breach (no auth) → 401
+  PASS  POST /api/subscribers (invalid data) → 422
+  PASS  POST /api/config/thresholds (valid) → 200 + updated values
+  PASS  POST /api/config/thresholds (invalid value) → 422
+  PASS  POST /api/config/thresholds/reset → 200 + restored defaults
+  PASS  GET /api/receipts (admin) → 200 + array
+  PASS  GET /api/receipts (no auth) → 401
+  PASS  Simulate breach → alert in DB (id=86, 92.0°C)
+  SKIP  POST /api/simulate/sms (ADB)  [hardware test]
+  SKIP  POST /api/simulate/sms (dongle)  [hardware test]
+
+  INTEGRATION TESTS
+  --------------------------------------------------
+  FAIL  INT-1: Full breach cycle
+         -> simulate/breach failed: 200 {"status":"injected","message":"92.0°C reading injected directly — bypas
+  PASS  INT-2: Auth + mobile app token flow (login → use token → bad token 401)
+  FAIL  INT-3: Spike validator + simulate bypass
+         -> simulate/breach failed: {"status":"injected","message":"92.0°C reading injected directly — bypassed 
+  PASS  INT-4: Delivery receipts created (34 email, 100 total)
+  FAIL  INT-5: Cooldown enforcement
+         -> Unexpected status: {'status': 'injected', 'message': '92.0°C reading injected directly — bypassed sp
+  PASS  INT-6: WebSocket live streaming (3 messages received in 10s)
+  PASS  INT-7: Threshold update persists and is readable immediately
+  SKIP  INT-SMS-1: Full breach → ADB SMS delivery  [hardware test (ADB/Android)]
+  SKIP  INT-SMS-2: Full breach → GSM Dongle SMS delivery  [hardware test (USB dongle)]
+
+=======================================================
+  SUMMARY
+=======================================================
+  Total Tests  : 56
+  Passed       : 44
+  Failed       : 6
+  Skipped(SMS) : 6
+  Pass Rate    : 88.0%
+
+  FAILED TESTS:
+  - [API Endpoint Tests] GET /api/temperature/latest → 200
+    Reason : Expecting value: line 1 column 1 (char 0)
+  - [API Endpoint Tests] GET /api/temperature/history → 200 + array
+    Reason : Expecting value: line 1 column 1 (char 0)
+  - [API Endpoint Tests] POST /api/simulate/breach (admin) → 200 + activated
+    Reason : status='injected'
+  - [Integration Tests] INT-1: Full breach cycle
+    Reason : simulate/breach failed: 200 {"status":"injected","message":"92.0°C reading injected directly — bypas
+  - [Integration Tests] INT-3: Spike validator + simulate bypass
+    Reason : simulate/breach failed: {"status":"injected","message":"92.0°C reading injected directly — bypassed 
+  - [Integration Tests] INT-5: Cooldown enforcement
+    Reason : Unexpected status: {'status': 'injected', 'message': '92.0°C reading injected directly — bypassed sp
+
+  MODULE STATUS:
+  OK  Temperature Validator         
+  OK  Threshold Engine              
+  OK  Database                      
+  OK  Auth                          
+  FAIL  API Endpoints                 
+  FAIL  Integration                   
+  SKIP  SMS via ADB                     — SKIPPED (demo hardware only)
+  SKIP  SMS via GSM Dongle              — SKIPPED (no hardware)
+
+=======================================================
