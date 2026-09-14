@@ -862,11 +862,15 @@ async def websocket_endpoint(ws: WebSocket, token: str = ""):
                 })
                 continue
 
-            ep = (
-                dict(excel_sensor.extra_readings) if excel_sensor.is_active()
-                else dict(opc_sensor.extra_readings) if opc_sensor.is_active()
-                else dict(extra_sensor.extra_readings)
-            )
+            if excel_sensor.is_active():
+                # Start with fallback values (humidity, vibration, etc.) then
+                # overlay real Excel readings so ph/pressure overwrite the fallback.
+                ep = dict(extra_sensor.extra_readings)
+                ep.update(excel_sensor.extra_readings)
+            elif opc_sensor.is_active():
+                ep = dict(opc_sensor.extra_readings)
+            else:
+                ep = dict(extra_sensor.extra_readings)
             # Normalize keys to lowercase so DB queries (analytics) match regardless
             # of how Pro-Server EX capitalizes column headers (pH vs ph vs PH)
             ep = {k.lower(): v for k, v in ep.items()}
