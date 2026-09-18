@@ -688,7 +688,8 @@ def _auto_register_extra_params(ep: dict, company_id: int) -> None:
             _ew(
                 """INSERT INTO company_parameters (company_id, name, is_active)
                    VALUES (%s, %s, TRUE)
-                   ON CONFLICT (company_id, name) DO NOTHING""",
+                   ON CONFLICT (company_id, name) DO UPDATE SET is_active = TRUE
+                   WHERE company_parameters.is_active = FALSE""",
                 (company_id, name),
             )
             _registered_params.add(key)

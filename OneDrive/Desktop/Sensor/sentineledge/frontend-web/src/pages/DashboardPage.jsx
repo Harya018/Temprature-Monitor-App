@@ -5,7 +5,7 @@
  */
 import { Component, useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { ArrowRight, Gauge, Droplets, Activity, Cpu } from 'lucide-react'
+import { ArrowRight, Gauge, Droplets, Activity, Cpu, FlaskConical } from 'lucide-react'
 import TemperatureCard  from '../components/dashboard/TemperatureCard.jsx'
 import StatusCard       from '../components/dashboard/StatusCard.jsx'
 import AlertsTodayCard  from '../components/dashboard/AlertsTodayCard.jsx'
@@ -193,10 +193,12 @@ export default function DashboardPage({ wsData, health, thresholds, onAlertCount
           {(() => {
             const ep    = lastReading?.extra_params ?? {}
             const xlsP  = Object.entries(ep).find(([k]) => k.toLowerCase() === 'pressure')?.[1] ?? null
+            const livePh = Object.entries(ep).find(([k]) => k.toLowerCase() === 'ph')?.[1] ?? null
             const liveP = xlsP
             const liveH = Object.entries(ep).find(([k]) => k.toLowerCase() === 'humidity')?.[1]  ?? null
             const liveV = Object.entries(ep).find(([k]) => k.toLowerCase() === 'vibration')?.[1] ?? null
             const hasP  = extraParams.some(p => p.name.toLowerCase() === 'pressure')
+            const hasPh = extraParams.some(p => p.name.toLowerCase() === 'ph')
             const hasH  = extraParams.some(p => p.name.toLowerCase() === 'humidity')
             const hasV  = extraParams.some(p => p.name.toLowerCase() === 'vibration')
             return (
@@ -207,6 +209,13 @@ export default function DashboardPage({ wsData, health, thresholds, onAlertCount
                     unit="bar"
                     subtitle={liveP != null ? 'From Pro-Server EX' : 'Δ −0.2 predicted'}
                     footer="Operating range 1.5 – 3.0 bar" />
+                )}
+                {!hasPh && (
+                  <SensorCard icon={FlaskConical} iconColor="#8B5CF6" label="pH"
+                    value={livePh != null ? trunc3(livePh) : '—'}
+                    unit="pH"
+                    subtitle={livePh != null ? 'From Pro-Server EX' : 'Awaiting sensor data'}
+                    footer="Range: 0 – 14" />
                 )}
                 {!hasH && (
                   <SensorCard icon={Droplets} iconColor="#10B981" label="Humidity"
