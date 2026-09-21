@@ -864,14 +864,31 @@ def _load_all_rows() -> List[Dict]:
     Read every data row from the configured file into a list of dicts.
     Called once when the file is detected as static so playback can step
     through the full history without relying on per-call row indexing.
+
+    Falls back to the single-row reader when bulk loaders return nothing.
+    This handles XLS files where COM and BIFF parsing both fail but
+    xlrd direct-read still works (e.g. when Excel is not running).
     """
     ext = Path(EXCEL_FILE_PATH).suffix.lower()
     if ext == ".xlsx":
-        return _load_all_xlsx(EXCEL_FILE_PATH)
+        rows = _load_all_xlsx(EXCEL_FILE_PATH)
     elif ext == ".xls":
-        return _load_all_xls(EXCEL_FILE_PATH)
+        rows = _load_all_xls(EXCEL_FILE_PATH)
     else:
-        return _load_all_csv(EXCEL_FILE_PATH)
+        rows = _load_all_csv(EXCEL_FILE_PATH)
+
+    if not rows:
+        # All bulk loaders returned empty — try the single-row reader as a fallback.
+        # This succeeds when xlrd can read the file directly even though COM/BIFF
+        # parsing failed (e.g. Excel is not open, file has no ring-buffer blocks).
+        row = _read_latest_row()
+        if row:
+            logger.info(
+                "ProFace | Bulk load returned 0 rows — seeding cache from single-row reader"
+            )
+            rows = [row]
+
+    return rows
 
 
 def _load_all_xls(filepath: str) -> List[Dict[str, object]]:
