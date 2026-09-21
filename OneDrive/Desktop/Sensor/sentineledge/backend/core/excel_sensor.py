@@ -862,12 +862,7 @@ def _apply_row(row: Dict) -> None:
 def _load_all_rows() -> List[Dict]:
     """
     Read every data row from the configured file into a list of dicts.
-    Called once when the file is detected as static so playback can step
-    through the full history without relying on per-call row indexing.
-
     Falls back to the single-row reader when bulk loaders return nothing.
-    This handles XLS files where COM and BIFF parsing both fail but
-    xlrd direct-read still works (e.g. when Excel is not running).
     """
     ext = Path(EXCEL_FILE_PATH).suffix.lower()
     if ext == ".xlsx":
@@ -878,14 +873,9 @@ def _load_all_rows() -> List[Dict]:
         rows = _load_all_csv(EXCEL_FILE_PATH)
 
     if not rows:
-        # All bulk loaders returned empty — try the single-row reader as a fallback.
-        # This succeeds when xlrd can read the file directly even though COM/BIFF
-        # parsing failed (e.g. Excel is not open, file has no ring-buffer blocks).
         row = _read_latest_row()
         if row:
-            logger.info(
-                "ProFace | Bulk load returned 0 rows — seeding cache from single-row reader"
-            )
+            logger.info("ProFace | Bulk load returned 0 rows — seeding from single-row reader")
             rows = [row]
 
     return rows
@@ -1714,6 +1704,17 @@ def _poll_loop(stop_evt: threading.Event) -> None:
 
             # ── First load ────────────────────────────────────────────────────
             if not _cached_rows:
+                # Apply a quick read immediately so temperature shows on the
+                # dashboard without waiting for the slow COM/BIFF bulk loaders
+                # (which can take 30-90 seconds when Excel is not already running).
+                _quick_row = _read_latest_row()
+                if _quick_row is not None:
+                    _apply_row(_quick_row)
+                    logger.info(
+                        "ProFace | Quick seed: T=%.3f — building full cache now…",
+                        current_temperature or 0.0,
+                    )
+
                 _cached_rows = _load_all_rows()
                 if not _cached_rows:
                     logger.warning("ProFace | Could not load rows — retrying")
