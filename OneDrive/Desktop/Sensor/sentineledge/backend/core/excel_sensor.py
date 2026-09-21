@@ -169,6 +169,68 @@ def get_enabled_status() -> dict:
     }
 
 
+def get_diagnostic() -> dict:
+    """
+    Return a diagnostic snapshot: file existence, raw columns, column matching,
+    and current reading state — to help debug why temperature is not showing.
+    """
+    fp = EXCEL_FILE_PATH
+    if not fp:
+        return {
+            "status": "no_path",
+            "message": "No file path configured — go to Settings → Pro-Server EX and set the file path.",
+            "file_path": "",
+        }
+
+    from pathlib import Path as _Path
+    p = _Path(fp)
+    if not p.exists():
+        return {
+            "status": "file_not_found",
+            "message": f"File not found on disk: {fp}",
+            "file_path": fp,
+        }
+
+    # Try to read the last row fresh from disk/COM
+    try:
+        row = _read_latest_row()
+    except Exception as exc:
+        row = None
+        read_error = str(exc)
+    else:
+        read_error = None
+
+    if row is None:
+        return {
+            "status": "read_failed",
+            "message": read_error or "Could not read any rows from the file.",
+            "file_path": fp,
+            "configured_temp_col": EXCEL_TEMP_COL,
+        }
+
+    raw_cols = list(row.keys())
+    # Find which column matched temperature
+    temp_col_match = next((k for k in row if _col_match(k, EXCEL_TEMP_COL)), None)
+    temp_raw       = row.get(temp_col_match) if temp_col_match else None
+    temp_float     = _to_float(temp_raw) if temp_raw is not None else None
+
+    return {
+        "status":              "ok",
+        "file_path":           fp,
+        "file_exists":         True,
+        "columns_in_file":     raw_cols,
+        "configured_temp_col": EXCEL_TEMP_COL,
+        "temp_col_matched":    temp_col_match,
+        "temp_raw_value":      str(temp_raw) if temp_raw is not None else None,
+        "temp_float":          temp_float,
+        "current_temperature": current_temperature,
+        "is_active":           _active,
+        "in_loop_mode":        _in_loop_mode,
+        "last_timestamp":      current_timestamp,
+        "last_row_preview":    {k: str(v) for k, v in list(row.items())[:8]},
+    }
+
+
 def _clear_readings() -> None:
     """Set all shared readings to None — signals 'no live data' to main.py."""
     global current_temperature, current_timestamp

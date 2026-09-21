@@ -333,6 +333,8 @@ export default function SettingsPage() {
   const [psTestResult, setPsTestResult] = useState(null)
   const [psEnabled,    setPsEnabled]    = useState(true)
   const [psStatus,     setPsStatus]     = useState(null)  // {enabled, is_active, in_loop_mode}
+  const [psDiag,       setPsDiag]       = useState(null)
+  const [psDiagLoading, setPsDiagLoading] = useState(false)
 
   const [opcSettings, setOpcSettings] = useState({
     server_name: '', temp_tag: '', extra_tags: '', poll_interval: 2.0,
@@ -637,6 +639,17 @@ export default function SettingsPage() {
     } catch (err) {
       setPsMsg({ type: 'error', text: err.message })
     } finally { setPsSaving(false) }
+  }
+
+  const handlePsDiagnose = async () => {
+    setPsDiagLoading(true); setPsDiag(null)
+    try {
+      const res = await fetch('/api/admin/proserver/diagnostic', { headers: _bearerHeaders() })
+      const data = await res.json()
+      setPsDiag(data)
+    } catch (err) {
+      setPsDiag({ status: 'error', message: err.message })
+    } finally { setPsDiagLoading(false) }
   }
 
   const handlePsTest = async () => {
@@ -1347,7 +1360,72 @@ export default function SettingsPage() {
                   : 'Save Settings'
                 }
               </button>
+              <button
+                onClick={handlePsDiagnose}
+                disabled={psDiagLoading}
+                className="btn btn-sm flex items-center gap-1.5"
+                style={{ background: '#0F766E', color: '#fff', border: 'none' }}
+              >
+                {psDiagLoading
+                  ? <><RefreshCw size={13} className="animate-spin" /> Diagnosing…</>
+                  : '🔍 Diagnose'
+                }
+              </button>
             </div>
+
+            {/* ── Diagnostic result panel ── */}
+            {psDiag && (() => {
+              const ok = psDiag.status === 'ok'
+              const bg = ok ? '#F0FDF4' : '#FFF7ED'
+              const border = ok ? '#BBF7D0' : '#FED7AA'
+              const titleColor = ok ? '#065F46' : '#92400E'
+              return (
+                <div className="rounded-xl border p-3 text-xs space-y-2" style={{ background: bg, borderColor: border }}>
+                  <p className="font-bold" style={{ color: titleColor }}>
+                    {ok ? '✅ Diagnostic OK' : `⚠️ Issue: ${psDiag.status?.replace(/_/g, ' ')}`}
+                  </p>
+                  {psDiag.message && <p style={{ color: titleColor }}>{psDiag.message}</p>}
+                  {ok && (
+                    <>
+                      <div className="grid grid-cols-2 gap-x-4 gap-y-1" style={{ color: '#1F2937' }}>
+                        <p><span className="font-medium">File:</span> {psDiag.file_path}</p>
+                        <p><span className="font-medium">Active:</span> {psDiag.is_active ? 'Yes' : 'No'}</p>
+                        <p><span className="font-medium">Mode:</span> {psDiag.in_loop_mode ? '↻ Looping' : '● Live'}</p>
+                        <p><span className="font-medium">Temp column setting:</span> {psDiag.configured_temp_col}</p>
+                        <p><span className="font-medium">Matched column:</span> {psDiag.temp_col_matched ?? <span className="text-red-600 font-semibold">NOT FOUND</span>}</p>
+                        <p><span className="font-medium">Raw value:</span> {psDiag.temp_raw_value ?? '—'}</p>
+                        <p><span className="font-medium">Parsed °C:</span> {psDiag.temp_float != null ? psDiag.temp_float : <span className="text-red-600">null (parse failed)</span>}</p>
+                        <p><span className="font-medium">Live reading:</span> {psDiag.current_temperature ?? '—'}</p>
+                      </div>
+                      <div>
+                        <p className="font-medium mb-1" style={{ color: '#374151' }}>Columns in file:</p>
+                        <p style={{ color: '#6B7280' }}>{psDiag.columns_in_file?.join(', ')}</p>
+                      </div>
+                      {psDiag.last_row_preview && (
+                        <div>
+                          <p className="font-medium mb-1" style={{ color: '#374151' }}>Last row preview:</p>
+                          <div className="grid grid-cols-2 gap-x-4 gap-y-0.5" style={{ color: '#6B7280' }}>
+                            {Object.entries(psDiag.last_row_preview).map(([k, v]) => (
+                              <p key={k}><span className="font-medium">{k}:</span> {v}</p>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                      {!psDiag.temp_col_matched && (
+                        <div className="rounded-lg p-2 mt-1" style={{ background: '#FEF2F2', border: '1px solid #FCA5A5' }}>
+                          <p className="font-semibold text-red-700">Column not matched!</p>
+                          <p className="text-red-600 mt-0.5">
+                            Your Temperature Column setting is <strong>"{psDiag.configured_temp_col}"</strong> but the
+                            file has: <strong>{psDiag.columns_in_file?.join(', ')}</strong>.<br/>
+                            Update the Temperature Column to exactly match one of the file's columns.
+                          </p>
+                        </div>
+                      )}
+                    </>
+                  )}
+                </div>
+              )
+            })()}
           </div>
         </Section>
 

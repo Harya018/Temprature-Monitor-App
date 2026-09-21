@@ -1136,6 +1136,13 @@ def api_set_proserver_reading_enabled(body: dict):
     return JSONResponse({"enabled": enabled})
 
 
+@router.get("/admin/proserver/diagnostic", dependencies=[Depends(require_admin)])
+def api_proserver_diagnostic():
+    """Return a diagnostic snapshot: file existence, column matching, current readings."""
+    import core.excel_sensor as excel_sensor
+    return JSONResponse(excel_sensor.get_diagnostic())
+
+
 @router.post("/admin/proserver/test", dependencies=[Depends(require_admin)])
 def api_test_proserver(body: _ProServerTestIn):
     """Read the latest row from the given file and return detected columns."""
