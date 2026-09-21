@@ -1053,6 +1053,7 @@ class _ProServerSettingsIn(BaseModel):
     time_col:      str   = Field("Time",        max_length=100)
     timestamp_col: str   = Field("",            max_length=100)
     poll_interval: float = Field(1.0, ge=0.1, le=60.0)
+    auto_save:     bool  = Field(False)
 
 
 class _ProServerTestIn(BaseModel):
@@ -1073,6 +1074,7 @@ def api_get_proserver_settings():
         "time_col":      "Time",
         "timestamp_col": "",
         "poll_interval": 1.0,
+        "auto_save":     False,
     }
     for row in rows:
         k = row["key"].replace("proserver_", "", 1)
@@ -1082,6 +1084,8 @@ def api_get_proserver_settings():
                 out[k] = float(v)
             except (ValueError, TypeError):
                 pass
+        elif k == "auto_save":
+            out[k] = (v == "1")
         elif k in out:
             out[k] = v
     return JSONResponse(out)
@@ -1111,8 +1115,9 @@ def api_save_proserver_settings(body: _ProServerSettingsIn):
 
     import core.excel_sensor as excel_sensor
     excel_sensor.reload_settings(vals)
+    excel_sensor.set_auto_save(body.auto_save)
 
-    return JSONResponse({"status": "saved", "active": excel_sensor.is_active()})
+    return JSONResponse({"status": "saved", "active": excel_sensor.is_active(), "auto_save": body.auto_save})
 
 
 @router.get("/admin/proserver/reading-status", dependencies=[Depends(require_admin)])

@@ -77,8 +77,10 @@ _in_loop_mode   : bool  = True
 # The watchdog checks every poll cycle for new rows whose timestamp is recent
 # (within LIVE_STALE_SECONDS of now), then temporarily serves those live rows
 # without looping historical data.  Alerts fire only for live rows.
-_excel_enabled  : bool  = True
+_excel_enabled   : bool  = True
+_auto_save_enabled: bool  = False   # auto-save .xls via COM every 5 s
 
+AUTO_SAVE_INTERVAL: int = 5    # seconds between COM force-saves
 REPLAY_WINDOW     : int = 20   # rows cycled when idle (no new live data)
 LIVE_STALE_SECONDS: int = 300  # rows timestamped within 5 min of now = live
 
@@ -123,23 +125,43 @@ def set_enabled(enabled: bool) -> None:
 
 
 def load_persistent_settings() -> None:
-    """Load persisted enable/disable state from DB — called at server startup."""
-    global _excel_enabled
+    """Load persisted enable/disable state and auto-save flag from DB — called at startup."""
+    global _excel_enabled, _auto_save_enabled
     try:
         from database.connection import execute_read
         rows = execute_read(
-            "SELECT value FROM app_settings WHERE key = 'proserver_live_only'",
+            "SELECT key, value FROM app_settings WHERE key IN ('proserver_live_only', 'proserver_auto_save')",
         )
-        if rows and rows[0]["value"] == "1":
-            _excel_enabled = False
-            logger.info("Pro-Server EX: loaded live-only mode (disabled loop) from DB")
+        for row in (rows or []):
+            if row["key"] == "proserver_live_only" and row["value"] == "1":
+                _excel_enabled = False
+                logger.info("Pro-Server EX: loaded live-only mode (disabled loop) from DB")
+            elif row["key"] == "proserver_auto_save" and row["value"] == "1":
+                _auto_save_enabled = True
+                logger.info("Pro-Server EX: auto-save enabled from DB")
     except Exception as exc:
-        logger.debug("Could not load proserver_live_only from DB: %s", exc)
+        logger.debug("Could not load proserver persistent settings from DB: %s", exc)
+
+
+def set_auto_save(enabled: bool) -> None:
+    """Enable or disable COM auto-save and persist to DB."""
+    global _auto_save_enabled
+    _auto_save_enabled = enabled
+    try:
+        from database.connection import execute_write
+        execute_write(
+            "INSERT INTO app_settings (key, value) VALUES (%s, %s) "
+            "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()",
+            ("proserver_auto_save", "1" if enabled else "0"),
+        )
+    except Exception as exc:
+        logger.warning("Could not persist proserver_auto_save setting: %s", exc)
 
 
 def get_enabled_status() -> dict:
     return {
         "enabled":             _excel_enabled,
+        "auto_save":           _auto_save_enabled,
         "is_active":           _active,
         "in_loop_mode":        _in_loop_mode,
         "current_temperature": current_temperature,
@@ -233,6 +255,38 @@ def _com_read_last_row() -> Optional[Dict[str, object]]:
                 pass
     except Exception:
         return None
+
+
+def _com_force_save() -> bool:
+    """
+    Force-save the Excel workbook via COM so Pro-Server EX data is flushed to disk.
+    This makes the on-disk .xls reflect in-memory rows, allowing xlrd to read them
+    without waiting for Pro-Server EX to trigger its own save.
+    Returns True on success, False if COM is unavailable or the file is not .xls.
+    """
+    if not EXCEL_FILE_PATH or Path(EXCEL_FILE_PATH).suffix.lower() != ".xls":
+        return False
+    try:
+        import win32com.client
+        import pythoncom
+        try:
+            pythoncom.CoInitialize()
+        except Exception:
+            pass
+        try:
+            abs_path = os.path.abspath(EXCEL_FILE_PATH)
+            wb = win32com.client.GetObject(abs_path)
+            wb.Save()
+            logger.debug("Pro-Server EX: auto-saved workbook via COM")
+            return True
+        finally:
+            try:
+                pythoncom.CoUninitialize()
+            except Exception:
+                pass
+    except Exception as exc:
+        logger.debug("COM auto-save failed: %s", exc)
+        return False
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1525,6 +1579,7 @@ def _poll_loop(stop_evt: threading.Event) -> None:
     _playback_idx: int        = 0
     _cached_rows:  List[Dict] = []
     _live_from:    int        = 0   # rows at index >= _live_from are live rows
+    _last_save_ts: float      = 0.0  # monotonic time of last COM auto-save
 
     logger.info(
         "Pro-Server EX reader started: '%s' every %.1f s",
@@ -1557,6 +1612,26 @@ def _poll_loop(stop_evt: threading.Event) -> None:
             if file_changed:
                 _last_mtime     = mtime
                 _last_file_size = file_size
+
+            # ── COM auto-save (every AUTO_SAVE_INTERVAL seconds when enabled) ─
+            import time as _time
+            _now = _time.monotonic()
+            if _auto_save_enabled and (_now - _last_save_ts) >= AUTO_SAVE_INTERVAL:
+                if _com_force_save():
+                    _last_save_ts = _now
+                    # Re-check file stat so the next iteration detects the new mtime
+                    try:
+                        stat      = file_path.stat()
+                        mtime     = stat.st_mtime
+                        file_size = stat.st_size
+                        if mtime != _last_mtime or file_size != _last_file_size:
+                            file_changed    = True
+                            _last_mtime     = mtime
+                            _last_file_size = file_size
+                    except OSError:
+                        pass
+                else:
+                    _last_save_ts = _now  # avoid hammering COM on repeated failures
 
             # ── First load ────────────────────────────────────────────────────
             if not _cached_rows:

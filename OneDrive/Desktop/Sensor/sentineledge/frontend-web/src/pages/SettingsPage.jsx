@@ -325,7 +325,7 @@ export default function SettingsPage() {
   const [deletingId, setDeletingId] = useState(null)
 
   const [psSettings, setPsSettings] = useState({
-    file_path: '', temp_col: 'TEMPERATURE', timestamp_col: '', date_col: 'DATE/TIME', time_col: '',
+    file_path: '', temp_col: 'TEMPERATURE', timestamp_col: '', date_col: 'DATE/TIME', time_col: '', auto_save: false,
   })
   const [psSaving,     setPsSaving]     = useState(false)
   const [psTesting,    setPsTesting]    = useState(false)
@@ -409,6 +409,7 @@ export default function SettingsPage() {
           timestamp_col: d.timestamp_col || '',
           date_col:      d.date_col      || 'DATE/TIME',
           time_col:      d.time_col      || '',
+          auto_save:     !!d.auto_save,
         })
       }
     } catch { /* silent */ }
@@ -620,6 +621,7 @@ export default function SettingsPage() {
           date_col:      psSettings.date_col      || 'DATE/TIME',
           time_col:      psSettings.time_col      || '',
           poll_interval: 1.0,
+          auto_save:     !!psSettings.auto_save,
         }),
       })
       const data = await res.json()
@@ -1203,6 +1205,41 @@ export default function SettingsPage() {
                 </p>
               </div>
             )}
+
+            {/* ── Auto-Save toggle ── */}
+            <div className="flex items-center justify-between rounded-xl border p-3"
+              style={{ borderColor: psSettings.auto_save ? '#2563EB' : '#D1D5DB', background: psSettings.auto_save ? '#EFF6FF' : '#F9FAFB' }}>
+              <div>
+                <p className="text-sm font-semibold text-gray-800">Auto-Save File</p>
+                <p className="text-xs text-gray-500 mt-0.5">
+                  {psSettings.auto_save
+                    ? 'Saves the Excel file to disk every 5 s via COM so new rows are always readable'
+                    : 'Pro-Server EX controls when the file is saved to disk'}
+                </p>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => setPsSettings(s => ({ ...s, auto_save: !s.auto_save }))}
+                  style={{
+                    width: 44, height: 24, borderRadius: 99,
+                    background: psSettings.auto_save ? '#2563EB' : '#D1D5DB',
+                    border: 'none', cursor: 'pointer', position: 'relative',
+                    transition: 'background 0.2s',
+                  }}
+                >
+                  <span style={{
+                    position: 'absolute', top: 3,
+                    left: psSettings.auto_save ? 23 : 3,
+                    width: 18, height: 18, borderRadius: '50%',
+                    background: '#fff', transition: 'left 0.2s',
+                    boxShadow: '0 1px 3px rgba(0,0,0,0.2)',
+                  }} />
+                </button>
+                {psSettings.auto_save && (
+                  <span className="text-xs font-semibold text-blue-600">every 5 s</span>
+                )}
+              </div>
+            </div>
 
             <div>
               <label className="text-xs font-medium text-gray-600 mb-1 block">
