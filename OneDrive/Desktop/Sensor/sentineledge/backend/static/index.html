@@ -6,13 +6,41 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="description" content="SentinelEdge — Real-time IoT temperature monitoring dashboard with live alerts and threshold management." />
     <title>SentinelEdge — Admin Dashboard</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com" />
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap" rel="stylesheet" />
-    <script type="module" crossorigin src="/assets/index-CbnV7klO.js"></script>
+    <style>
+      /* System font stack — no external request, loads instantly */
+      :root { font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; }
+
+      /* Loading screen shown while React JS bundle parses */
+      #boot {
+        position: fixed; inset: 0;
+        display: flex; flex-direction: column; align-items: center; justify-content: center;
+        background: #0f172a; gap: 20px;
+        transition: opacity 0.3s ease;
+      }
+      #boot.fade { opacity: 0; pointer-events: none; }
+      #boot-logo { font-size: 48px; }
+      #boot-title { color: #f1f5f9; font-size: 22px; font-weight: 700; letter-spacing: -0.3px; }
+      #boot-sub { color: #94a3b8; font-size: 13px; }
+      #boot-ring {
+        width: 40px; height: 40px; border-radius: 50%;
+        border: 3px solid #334155;
+        border-top-color: #6366f1;
+        animation: spin 0.8s linear infinite;
+      }
+      @keyframes spin { to { transform: rotate(360deg); } }
+    </style>
+    <script type="module" crossorigin src="/assets/index-c7UhK8xh.js"></script>
     <link rel="stylesheet" crossorigin href="/assets/index-02ArvGlR.css">
   </head>
   <body>
+    <!-- Visible immediately — hidden once React mounts -->
+    <div id="boot">
+      <div id="boot-logo">🌡️</div>
+      <div id="boot-title">SentinelEdge</div>
+      <div id="boot-ring"></div>
+      <div id="boot-sub">Loading dashboard…</div>
+    </div>
+
     <div id="root"></div>
   </body>
 </html>

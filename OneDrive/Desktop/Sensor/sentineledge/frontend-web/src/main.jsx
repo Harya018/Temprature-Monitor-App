@@ -48,3 +48,12 @@ ReactDOM.createRoot(document.getElementById('root')).render(
     </RootBoundary>
   </React.StrictMode>,
 )
+
+// Fade out and remove the boot splash once React has painted
+requestAnimationFrame(() => {
+  const boot = document.getElementById('boot')
+  if (boot) {
+    boot.classList.add('fade')
+    setTimeout(() => boot.remove(), 350)
+  }
+})
