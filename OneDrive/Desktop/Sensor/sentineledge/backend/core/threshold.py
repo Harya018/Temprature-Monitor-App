@@ -1,9 +1,18 @@
 """
-core/threshold.py — SentinelEdge threshold checker (temperature only).
+core/threshold.py — SentinelEdge threshold checker.
 
-check_threshold() inspects a sensor reading against RUNTIME_THRESHOLDS
-and returns a list of BreachEvent objects for any exceeded thresholds,
-respecting per-direction cooldown windows.
+Handles two distinct threshold layers:
+
+1. check_threshold(reading) — temperature high/low + pH min/max.
+   Reads RUNTIME_THRESHOLDS (config.py). Returns list[BreachEvent].
+   Cooling-cycle direction logic prevents duplicate LOW alerts per run.
+
+2. auto_register_extra_params(ep, company_id) — ensures every live
+   custom sensor parameter exists in company_parameters (ON CONFLICT DO NOTHING).
+
+3. check_extra_param_thresholds(extra_params, breach_dicts) — reads
+   min/max from company_parameters and appends alert dicts to breach_dicts
+   for any out-of-range custom parameters. 5-minute flat cooldown per param.
 
 BREACH BOUNDARY (strict):
   temperature > HIGH  → high breach   (exactly HIGH is NOT a breach)
@@ -13,25 +22,18 @@ Severity levels:
   WARNING   — value within 0-10% beyond threshold
   CRITICAL  — value within 10-25% beyond threshold
   EMERGENCY — value more than 25% beyond threshold
-
-Cooldown is tracked per direction (high / low) independently.
-
-DIRECTION TRACKING (cooling-cycle logic):
-  For a machine that cools from HIGH → LOW, we only want to fire the
-  LOW alert once per cooling run:
-
-  - When temperature rises back above RESET_TEMP (60°C), the LOW
-    direction is "reset" so the next cooling cycle will fire again.
-  - This prevents multiple LOW alerts during the same cool-down run
-    while the temperature hovers just around the LOW threshold.
 """
 
 from __future__ import annotations
 
+import time as _time
 from datetime import datetime, timezone, timedelta
 
 from config import RUNTIME_THRESHOLDS, ALERT_COOLDOWN_SECONDS, MODULE_STATUS, is_alert_enabled
 from models import BreachEvent
+from utils.logger import get_logger
+
+_logger = get_logger(__name__)
 
 # ─── Severity bands ───────────────────────────────────────────────────────────
 _WARNING_PCT: float  = 0.05
@@ -182,3 +184,115 @@ def check_threshold(reading: dict) -> list[BreachEvent]:
         MODULE_STATUS["sensor"] = "ok"
 
     return breaches
+
+
+# ─── Custom / extra-parameter helpers ────────────────────────────────────────
+
+# Cache so we don't hammer the DB with ON CONFLICT inserts every cycle.
+_registered_params: set = set()
+
+# Per-parameter cooldown: {param_name: monotonic_epoch}
+_extra_param_cooldowns: dict = {}
+_EXTRA_PARAM_COOLDOWN = 300  # 5 minutes between repeated alerts per param
+
+
+def auto_register_extra_params(ep: dict, company_id: int) -> None:
+    """Ensure every live extra-sensor parameter exists in company_parameters.
+
+    Uses ON CONFLICT DO UPDATE so rows disabled by an admin get re-activated
+    when the sensor starts sending them again.  Cached in _registered_params
+    to avoid DB round-trips on every reading cycle.
+    """
+    from database.connection import execute_write as _ew
+    for name in ep:
+        key = (company_id, name)
+        if key in _registered_params:
+            continue
+        try:
+            _ew(
+                """INSERT INTO company_parameters (company_id, name, is_active)
+                   VALUES (%s, %s, TRUE)
+                   ON CONFLICT (company_id, name) DO UPDATE SET is_active = TRUE
+                   WHERE company_parameters.is_active = FALSE""",
+                (company_id, name),
+            )
+            _registered_params.add(key)
+        except Exception:
+            pass
+
+
+def check_extra_param_thresholds(extra_params: dict, breach_dicts: list) -> None:
+    """Check custom-parameter readings against company_parameters min/max.
+
+    Fetches configured ranges from company_parameters, inserts an alert row
+    for any value outside [min_value, max_value], and appends it to
+    breach_dicts so the caller can include it in the WebSocket payload.
+    Uses a 5-minute per-parameter cooldown to prevent alert floods.
+    """
+    import database
+
+    now = _time.monotonic()
+    try:
+        from database.connection import execute_read
+        params = execute_read(
+            "SELECT name, unit, min_value, max_value, company_id "
+            "FROM company_parameters WHERE is_active = TRUE"
+        )
+    except Exception:
+        return
+
+    param_map = {p["name"]: p for p in (params or [])}
+
+    for name, value in extra_params.items():
+        cfg = param_map.get(name)
+        if cfg is None:
+            continue
+
+        mn = cfg.get("min_value")
+        mx = cfg.get("max_value")
+        if mn is None or mx is None:
+            continue
+
+        try:
+            mn_f, mx_f = float(mn), float(mx)
+        except (TypeError, ValueError):
+            continue
+
+        if mn_f <= value <= mx_f:
+            continue  # within range
+
+        last_fired = _extra_param_cooldowns.get(name, 0)
+        if now - last_fired < _EXTRA_PARAM_COOLDOWN:
+            continue
+
+        direction = "high" if value > mx_f else "low"
+        threshold_val = mx_f if direction == "high" else mn_f
+        cooldown_until = (
+            datetime.now(timezone.utc) + timedelta(seconds=_EXTRA_PARAM_COOLDOWN)
+        ).isoformat()
+
+        try:
+            alert_id = database.insert_alert(
+                parameter=name,
+                value=value,
+                threshold=threshold_val,
+                direction=direction,
+                cooldown_until=cooldown_until,
+                severity="WARNING",
+                company_id=cfg.get("company_id"),
+            )
+            _extra_param_cooldowns[name] = now
+            _logger.info(
+                "Custom param alert: %s=%.3f %s threshold %.3f (alert_id=%s)",
+                name, value, direction, threshold_val, alert_id,
+            )
+            breach_dicts.append({
+                "parameter": name,
+                "value":     value,
+                "threshold": threshold_val,
+                "direction": direction,
+                "severity":  "WARNING",
+                "alert_id":  alert_id,
+            })
+        except Exception as exc:
+            _logger.warning("Failed to insert custom param alert for %s: %s", name, exc)

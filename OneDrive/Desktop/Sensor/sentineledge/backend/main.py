@@ -36,6 +36,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 import database
 import core.sensor as sensor
 import core.threshold as threshold
+from core.threshold import auto_register_extra_params, check_extra_param_thresholds
 import core.escalation as escalation
 import core.extra_sensor as extra_sensor  # tertiary stub (empty dict fallback)
 import core.excel_sensor as excel_sensor  # primary  sensor (Pro-Server EX file)
@@ -72,15 +73,13 @@ from routers.alerts import router as alerts_router
 from routers.subscribers import router as subscribers_router
 from routers.config import router as config_router
 from routers.simulate import router as simulate_router
-from routers.health import router as health_router
+from routers.health import router as health_router, start_sms_probe
 from routers.admin import router as admin_router
 from routers.auth import router as auth_router
 from routers.history import router as history_router
 from routers.reports import router as reports_router
 from routers.receipts import router as receipts_router
 from routers.events import router as events_router
-from routers.workers import router as workers_router
-from routers.super_admin import router as super_admin_router
 from routers.notifications import router as notifications_router
 from routers.super_admin_v2 import router as super_admin_v2_router
 from routers.phase1_command import router as phase1_command_router
@@ -435,6 +434,30 @@ async def lifespan(app: FastAPI):
     except Exception as _exc:
         logger.warning("Startup: could not load alert settings from DB: %s", _exc)
 
+    # 1d. Load temperature thresholds from DB (persisted by POST /api/config/thresholds)
+    try:
+        _thresh_rows = database.execute_read(
+            "SELECT key, value FROM app_settings WHERE key IN (%s, %s)",
+            ("threshold_temp_high", "threshold_temp_low"),
+        ) or []
+        for _r in _thresh_rows:
+            _k, _v = _r["key"], _r["value"]
+            from config import RUNTIME_THRESHOLDS
+            try:
+                if _k == "threshold_temp_high":
+                    RUNTIME_THRESHOLDS["temp_high"] = float(_v)
+                elif _k == "threshold_temp_low":
+                    RUNTIME_THRESHOLDS["temp_low"] = float(_v)
+            except ValueError:
+                pass
+        if _thresh_rows:
+            logger.info(
+                "Startup: temperature thresholds loaded from DB — high=%.1f low=%.1f",
+                RUNTIME_THRESHOLDS["temp_high"], RUNTIME_THRESHOLDS["temp_low"],
+            )
+    except Exception as _exc:
+        logger.warning("Startup: could not load temperature thresholds from DB: %s", _exc)
+
     # 2. Clean up any stale sessions from previous server runs
     try:
         from database.queries.sessions import cleanup_expired_sessions
@@ -494,10 +517,11 @@ async def lifespan(app: FastAPI):
     if APP_ENV != "production":
         logger.info("Running in %s mode — set APP_ENV=production for production checks", APP_ENV)
 
-    # 5. Start GSM SMS queue worker — owns the serial port for the server lifetime
+    # 5. Start GSM SMS queue worker + background SMS modem probe thread
     from modules.sms.sender import start_gsm_worker
     start_gsm_worker()
     asyncio.create_task(run_sms_receiver(), name="sms-receiver")
+    start_sms_probe()
 
     yield
 
@@ -661,118 +685,9 @@ async def internal_error_handler(request: Request, exc):
     )
 
 
-# ─── Custom parameter threshold helper ───────────────────────────────────────
-
-# Per-parameter cooldown: {param_name: cooldown_epoch_seconds}
-_extra_param_cooldowns: dict = {}
-_EXTRA_PARAM_COOLDOWN = 300   # 5-minute cooldown between repeated alerts per param
-
-# Tracks which (company_id, param_name) pairs have already been registered so we
-# don't hammer the DB with ON CONFLICT inserts on every reading cycle.
-_registered_params: set = set()
-
-
-def _auto_register_extra_params(ep: dict, company_id: int) -> None:
-    """Ensure every live extra-sensor parameter exists in company_parameters.
-
-    Uses ON CONFLICT DO NOTHING so existing rows (with admin-set min/max) are
-    never overwritten.  Results are cached in _registered_params to avoid DB
-    round-trips on every reading cycle.
-    """
-    from database.connection import execute_write as _ew
-    for name in ep:
-        key = (company_id, name)
-        if key in _registered_params:
-            continue
-        try:
-            _ew(
-                """INSERT INTO company_parameters (company_id, name, is_active)
-                   VALUES (%s, %s, TRUE)
-                   ON CONFLICT (company_id, name) DO UPDATE SET is_active = TRUE
-                   WHERE company_parameters.is_active = FALSE""",
-                (company_id, name),
-            )
-            _registered_params.add(key)
-        except Exception:
-            pass
-
-def _check_extra_param_thresholds(extra_params: dict, breach_dicts: list) -> None:
-    """
-    For each live custom-parameter reading, fetch its configured min/max from
-    company_parameters and insert an alert if the value is strictly outside range.
-    Appends alert dicts to breach_dicts so they ride the same WebSocket payload.
-    Uses a 5-minute per-parameter cooldown to avoid alert floods.
-    """
-    import time as _time
-    from datetime import datetime, timezone, timedelta
-    from database.connection import execute_read
-    import database
-
-    now = _time.monotonic()
-    try:
-        params = execute_read(
-            "SELECT name, unit, min_value, max_value, company_id "
-            "FROM company_parameters WHERE is_active = TRUE"
-        )
-    except Exception:
-        return
-
-    param_map = {p["name"]: p for p in (params or [])}
-
-    for name, value in extra_params.items():
-        cfg = param_map.get(name)
-        if cfg is None:
-            continue
-
-        mn = cfg.get("min_value")
-        mx = cfg.get("max_value")
-        if mn is None or mx is None:
-            continue
-
-        try:
-            mn_f, mx_f = float(mn), float(mx)
-        except (TypeError, ValueError):
-            continue
-
-        if mn_f <= value <= mx_f:
-            continue   # within range — no alert
-
-        # Check cooldown
-        last_fired = _extra_param_cooldowns.get(name, 0)
-        if now - last_fired < _EXTRA_PARAM_COOLDOWN:
-            continue
-
-        direction = "high" if value > mx_f else "low"
-        threshold_val = mx_f if direction == "high" else mn_f
-        cooldown_until = (
-            datetime.now(timezone.utc) + timedelta(seconds=_EXTRA_PARAM_COOLDOWN)
-        ).isoformat()
-
-        try:
-            alert_id = database.insert_alert(
-                parameter=name,
-                value=value,
-                threshold=threshold_val,
-                direction=direction,
-                cooldown_until=cooldown_until,
-                severity="WARNING",
-                company_id=cfg.get("company_id"),
-            )
-            _extra_param_cooldowns[name] = now
-            logger.info(
-                "Custom param alert: %s=%.3f %s threshold %.3f (alert_id=%s)",
-                name, value, direction, threshold_val, alert_id,
-            )
-            breach_dicts.append({
-                "parameter": name,
-                "value":     value,
-                "threshold": threshold_val,
-                "direction": direction,
-                "severity":  "WARNING",
-                "alert_id":  alert_id,
-            })
-        except Exception as exc:
-            logger.warning("Failed to insert custom param alert for %s: %s", name, exc)
+# Custom parameter threshold helpers live in core/threshold.py:
+#   auto_register_extra_params(ep, company_id)
+#   check_extra_param_thresholds(extra_params, breach_dicts)
 
 
 # ─── WebSocket ───────────────────────────────────────────────────────────────
@@ -879,7 +794,7 @@ async def websocket_endpoint(ws: WebSocket, token: str = ""):
             # Auto-register any new extra-sensor parameters so they appear in
             # the Super Admin company detail count and Config > Parameters tab.
             if ep and company_id:
-                _auto_register_extra_params(ep, company_id)
+                auto_register_extra_params(ep, company_id)
 
             is_valid, reason = validate_reading(reading)
 
@@ -932,7 +847,7 @@ async def websocket_endpoint(ws: WebSocket, token: str = ""):
             # For each live extra_param value, check against company_parameters
             # min/max and fire an alert if it falls outside the configured range.
             if ep:
-                _check_extra_param_thresholds(ep, breach_dicts)
+                check_extra_param_thresholds(ep, breach_dicts)
 
             payload = {
                 "temperature":  reading["temperature"],
@@ -1045,8 +960,6 @@ app.include_router(history_router)
 app.include_router(reports_router)
 app.include_router(receipts_router)
 app.include_router(events_router)
-app.include_router(workers_router)
-app.include_router(super_admin_router)
 app.include_router(notifications_router)
 app.include_router(super_admin_v2_router)
 from routers.analytics import router as analytics_router

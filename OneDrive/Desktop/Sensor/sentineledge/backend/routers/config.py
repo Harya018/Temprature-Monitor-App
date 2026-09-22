@@ -76,6 +76,12 @@ async def update_thresholds(body: ThresholdConfigIn):
                 new_value=str(new_val),
             )
             RUNTIME_THRESHOLDS[field] = new_val
+        # Always persist to DB so the value survives a server restart
+        database.execute_write(
+            "INSERT INTO app_settings (key, value, updated_at) VALUES (%s, %s, NOW()) "
+            "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()",
+            (f"threshold_{field}", str(new_val)),
+        )
 
     _config.RUNTIME_SOURCE = "runtime_override"
     _config.RUNTIME_LAST_CHANGED = datetime.now(timezone.utc).isoformat()

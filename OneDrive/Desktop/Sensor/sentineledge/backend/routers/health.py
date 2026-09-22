@@ -187,14 +187,20 @@ def _sms_probe_loop() -> None:
         time.sleep(30)
 
 
-# Start background probe thread at module import time.
-# daemon=True ensures it doesn't block server shutdown.
-_sms_probe_thread = threading.Thread(
-    target=_sms_probe_loop,
-    daemon=True,
-    name="sms-modem-probe",
-)
-_sms_probe_thread.start()
+_sms_probe_thread: threading.Thread | None = None
+
+
+def start_sms_probe() -> None:
+    """Start the background SMS modem probe thread. Call once from lifespan startup."""
+    global _sms_probe_thread
+    if _sms_probe_thread is not None and _sms_probe_thread.is_alive():
+        return
+    _sms_probe_thread = threading.Thread(
+        target=_sms_probe_loop,
+        daemon=True,
+        name="sms-modem-probe",
+    )
+    _sms_probe_thread.start()
 
 
 # ── Status helpers ─────────────────────────────────────────────────────────────
