@@ -80,7 +80,7 @@ _in_loop_mode   : bool  = True
 _excel_enabled   : bool  = True
 _auto_save_enabled: bool  = False   # auto-save .xls via COM every 5 s
 
-AUTO_SAVE_INTERVAL: int = 5    # seconds between COM force-saves
+AUTO_SAVE_INTERVAL: int = 1    # seconds between COM reads (was save interval)
 REPLAY_WINDOW     : int = 20   # rows cycled when idle (no new live data)
 LIVE_STALE_SECONDS: int = 300  # rows timestamped within 5 min of now = live
 
@@ -239,41 +239,52 @@ def _clear_readings() -> None:
     extra_readings.clear()
 
 
-def _com_save_and_read() -> Optional[Dict[str, object]]:
+class _ComReader:
     """
-    Single COM round-trip for a .xls file:
-      1. Attach to the running Excel session via GetObject (Pro-Server EX is writing here)
-      2. Save the workbook  → flushes in-memory rows to disk so xlrd can see them
-      3. Read ALL columns from the last data row  → returns a full row dict
+    Persistent Excel COM connection for a single .xls workbook.
 
-    This replaces the old separate _com_force_save + _com_read_last_row pair and
-    halves the number of COM sessions opened per poll cycle.
+    Opening a COM session (GetObject + CoInitialize) costs ~200 ms.
+    By keeping the workbook reference alive across poll cycles we pay
+    that cost ONCE and then each subsequent read is ~5-20 ms — fast
+    enough to show sensor data with <50 ms end-to-end latency.
 
-    Returns None if Excel is not running with the file open or COM is unavailable.
+    Thread-safety: each call to read_last_row() is synchronous and the
+    poll loop is single-threaded, so no lock is needed.
     """
-    if not EXCEL_FILE_PATH or Path(EXCEL_FILE_PATH).suffix.lower() not in (".xls",):
-        return None
-    try:
-        import win32com.client
-        import pythoncom
-        import datetime as _dt
-        try:
-            pythoncom.CoInitialize()
-        except Exception:
-            pass
-        try:
-            abs_path = os.path.abspath(EXCEL_FILE_PATH)
-            wb = win32com.client.GetObject(abs_path)
 
-            # ── 1. Save (flush Pro-Server EX in-memory rows to disk) ──────────
-            try:
-                wb.Save()
-                logger.debug("Pro-Server EX: workbook saved via COM")
-            except Exception as save_exc:
-                logger.debug("COM save skipped: %s", save_exc)
+    def __init__(self) -> None:
+        self._wb   = None   # win32com workbook proxy
+        self._ws   = None   # worksheet proxy (Sheet 1)
+        self._headers: Optional[List[str]] = None
+        self._header_row: int = 1
+        self._used_cols: int  = 0
+        self._coinit: bool    = False
 
-            # ── 2. Read ALL columns from last data row ────────────────────────
-            ws        = wb.Sheets(1)
+    def _connect(self, abs_path: str) -> bool:
+        """Attach to the running Excel session. Returns True on success."""
+        try:
+            import win32com.client
+            import pythoncom
+            if not self._coinit:
+                try:
+                    pythoncom.CoInitialize()
+                    self._coinit = True
+                except Exception:
+                    pass
+            self._wb      = win32com.client.GetObject(abs_path)
+            self._ws      = self._wb.Sheets(1)
+            self._headers = None   # force header re-scan on fresh connect
+            logger.info("Pro-Server EX COM: connected to '%s'", abs_path)
+            return True
+        except Exception as exc:
+            logger.debug("COM connect failed: %s", exc)
+            self._wb = self._ws = None
+            return False
+
+    def _scan_headers(self) -> bool:
+        """Scan the worksheet for the header row and column count. Returns True on success."""
+        try:
+            ws        = self._ws
             XL_UP     = -4162
             last_row  = max(
                 ws.Cells(ws.Rows.Count, 2).End(XL_UP).Row,
@@ -281,7 +292,6 @@ def _com_save_and_read() -> Optional[Dict[str, object]]:
             )
             used_cols = ws.UsedRange.Columns.Count
 
-            # Find header row (first row that has string cells)
             header_row = 1
             for r in range(1, min(11, last_row + 1)):
                 if any(
@@ -292,23 +302,61 @@ def _com_save_and_read() -> Optional[Dict[str, object]]:
                     header_row = r
                     break
 
-            if last_row <= header_row:
-                return None
-
-            headers = [
+            self._header_row = header_row
+            self._used_cols  = used_cols
+            self._headers    = [
                 str(ws.Cells(header_row, c).Value or "").strip() or f"col_{c - 1}"
                 for c in range(1, used_cols + 1)
             ]
+            logger.info("Pro-Server EX COM: headers = %s", self._headers)
+            return True
+        except Exception as exc:
+            logger.debug("COM header scan failed: %s", exc)
+            self._headers = None
+            return False
 
-            # Single COM call to get the entire last row (all columns at once)
-            rng = ws.Range(ws.Cells(last_row, 1), ws.Cells(last_row, used_cols))
+    def read_last_row(self, abs_path: str) -> Optional[Dict[str, object]]:
+        """
+        Read the last data row from the live Excel session (no disk save needed).
+        Reconnects automatically if the session was closed or Excel restarted.
+        Returns a full column dict or None.
+        """
+        import datetime as _dt
+
+        # ── Reconnect if needed ───────────────────────────────────────────────
+        if self._wb is None or self._ws is None:
+            if not self._connect(abs_path):
+                return None
+
+        # ── Re-scan headers once per connection (or if not yet done) ─────────
+        if self._headers is None:
+            if not self._scan_headers():
+                self._wb = self._ws = None
+                return None
+
+        try:
+            ws        = self._ws
+            XL_UP     = -4162
+            last_row  = max(
+                ws.Cells(ws.Rows.Count, 2).End(XL_UP).Row,
+                ws.UsedRange.Row + ws.UsedRange.Rows.Count - 1,
+            )
+
+            if last_row <= self._header_row:
+                return None
+
+            # ── Single COM call: read entire last row at once ─────────────────
+            rng = ws.Range(
+                ws.Cells(last_row, 1),
+                ws.Cells(last_row, self._used_cols),
+            )
             raw = rng.Value
             if raw is None:
                 return None
             vals = raw if not isinstance(raw[0], (list, tuple)) else raw[0]
 
             row_dict: Dict[str, object] = {}
-            for i, header in enumerate(headers):
+            for i, header in enumerate(self._headers):
                 val = vals[i] if i < len(vals) else None
                 if hasattr(val, "year") and hasattr(val, "hour"):
                     try:
@@ -320,28 +368,48 @@ def _com_save_and_read() -> Optional[Dict[str, object]]:
                         pass
                 row_dict[header] = val
 
-            logger.debug(
-                "Pro-Server EX COM: row %d, cols=%s", last_row, list(row_dict.keys())
-            )
             return row_dict
 
-        finally:
+        except Exception as exc:
+            # COM session died (Excel closed, file closed, etc.) — reconnect next call
+            logger.debug("COM read failed (%s) — will reconnect next cycle", exc)
+            self._wb = self._ws = self._headers = None
+            return None
+
+    def close(self) -> None:
+        """Release COM references (called when poll thread stops)."""
+        self._wb = self._ws = self._headers = None
+        if self._coinit:
             try:
+                import pythoncom
                 pythoncom.CoUninitialize()
             except Exception:
                 pass
-    except Exception as exc:
-        logger.debug("COM save+read failed: %s", exc)
+            self._coinit = False
+
+
+# Module-level persistent COM reader (one per process, reused across poll cycles)
+_com_reader = _ComReader()
+
+
+def _com_save_and_read() -> Optional[Dict[str, object]]:
+    """
+    Read last row from the live Excel COM session.
+    No disk save needed — Pro-Server EX data is already in Excel's memory.
+    Uses the persistent _com_reader to avoid reconnect overhead every poll.
+    """
+    if not EXCEL_FILE_PATH or Path(EXCEL_FILE_PATH).suffix.lower() != ".xls":
         return None
+    return _com_reader.read_last_row(os.path.abspath(EXCEL_FILE_PATH))
 
 
 def _com_read_last_row() -> Optional[Dict[str, object]]:
-    """Read the last row from a running Excel COM session without saving."""
+    """Read the last row from the running Excel COM session."""
     return _com_save_and_read()
 
 
 def _com_force_save() -> bool:
-    """Force-save via COM — delegates to _com_save_and_read for a single round-trip."""
+    """Legacy: force-save via COM. Now we skip saving — read direct from memory."""
     return _com_save_and_read() is not None
 
 
@@ -1676,37 +1744,22 @@ def _poll_loop(stop_evt: threading.Event) -> None:
                 _last_mtime     = mtime
                 _last_file_size = file_size
 
-            # ── COM save + live read (every AUTO_SAVE_INTERVAL seconds for .xls) ─
-            # For .xls files, Pro-Server EX writes rows into Excel's in-memory
-            # session via DDE/OPC without saving.  We attach to the running Excel
-            # process, save the workbook (flush data to disk), and read ALL columns
-            # from the last row — all in one COM round-trip.
-            # This runs whenever: (a) the Settings toggle is on, OR
-            #                     (b) the file is .xls (always active by default).
-            import time as _time
-            _now = _time.monotonic()
+            # ── COM live read for .xls (every poll cycle — no save needed) ────
+            # Pro-Server EX writes rows into Excel's in-memory session via DDE/OPC.
+            # GetObject() attaches to that live session directly — the data is already
+            # there in memory, no disk save needed.  We keep the COM connection open
+            # across cycles (_com_reader) so each read costs only ~5-20 ms instead of
+            # the ~200 ms connect overhead on every cycle.
             _is_xls = file_path.suffix.lower() == ".xls"
-            if (_auto_save_enabled or _is_xls) and (_now - _last_save_ts) >= AUTO_SAVE_INTERVAL:
+            if _is_xls or _auto_save_enabled:
                 com_row = _com_save_and_read()
-                _last_save_ts = _now
                 if com_row is not None:
-                    # Apply immediately — all columns, live data
                     _apply_row(com_row)
+                    _in_loop_mode = False   # COM data = live data → alerts fire
                     logger.debug(
                         "ProFace | COM live: T=%.3f  extras=%s",
                         current_temperature or 0.0, extra_readings,
                     )
-                    # Re-stat so file-change detection picks up the save
-                    try:
-                        stat      = file_path.stat()
-                        mtime     = stat.st_mtime
-                        file_size = stat.st_size
-                        if mtime != _last_mtime or file_size != _last_file_size:
-                            file_changed    = True
-                            _last_mtime     = mtime
-                            _last_file_size = file_size
-                    except OSError:
-                        pass
 
             # ── First load ────────────────────────────────────────────────────
             if not _cached_rows:
@@ -1847,6 +1900,9 @@ def _poll_loop(stop_evt: threading.Event) -> None:
 
         stop_evt.wait(EXCEL_POLL_INTERVAL)
 
+    # Thread exiting — release persistent COM connection
+    _com_reader.close()
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Hot-reload — called by admin API after saving settings in the UI
@@ -1897,6 +1953,7 @@ def reload_settings(db_values: Dict[str, str]) -> None:
     _last_mtime         = 0.0
     _last_file_size     = 0
     _active             = False
+    _com_reader.close()  # drop stale COM connection; new thread will reconnect
 
     if EXCEL_FILE_PATH:
         _thread_ref = threading.Thread(
