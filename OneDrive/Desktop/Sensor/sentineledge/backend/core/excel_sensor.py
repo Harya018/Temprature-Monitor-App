@@ -253,11 +253,12 @@ class _ComReader:
     """
 
     def __init__(self) -> None:
-        self._wb   = None   # win32com workbook proxy
-        self._ws   = None   # worksheet proxy (Sheet 1)
+        self._wb        = None   # win32com workbook proxy
+        self._ws        = None   # worksheet proxy (Sheet 1)
         self._headers: Optional[List[str]] = None
         self._header_row: int = 1
-        self._used_cols: int  = 0
+        self._start_col: int  = 1   # first data column (1=A, 2=B …)
+        self._used_cols: int  = 0   # number of data columns
         self._coinit: bool    = False
 
     def _connect(self, abs_path: str) -> bool:
@@ -282,33 +283,48 @@ class _ComReader:
             return False
 
     def _scan_headers(self) -> bool:
-        """Scan the worksheet for the header row and column count. Returns True on success."""
-        try:
-            ws        = self._ws
-            XL_UP     = -4162
-            last_row  = max(
-                ws.Cells(ws.Rows.Count, 2).End(XL_UP).Row,
-                ws.UsedRange.Row + ws.UsedRange.Rows.Count - 1,
-            )
-            used_cols = ws.UsedRange.Columns.Count
+        """
+        Scan the worksheet for the header row, start column, and column count.
 
-            header_row = 1
-            for r in range(1, min(11, last_row + 1)):
+        Pro-Server EX leaves column A blank (row numbers or empty) and puts
+        DATE/TIME in column B.  ws.UsedRange.Column gives the first non-empty
+        column so we read exactly the right range without hardcoding B.
+        """
+        try:
+            ws         = self._ws
+            XL_UP      = -4162
+            ur         = ws.UsedRange
+            start_col  = ur.Column                          # e.g. 2 for column B
+            used_cols  = ur.Columns.Count                  # e.g. 4 for B:E
+            end_col    = start_col + used_cols - 1
+
+            last_row = max(
+                ws.Cells(ws.Rows.Count, start_col).End(XL_UP).Row,
+                ur.Row + ur.Rows.Count - 1,
+            )
+
+            # Find header row: first row (within first 10) that has a string cell
+            header_row = ur.Row   # start from first used row
+            for r in range(ur.Row, min(ur.Row + 10, last_row + 1)):
                 if any(
                     isinstance(ws.Cells(r, c).Value, str)
                     and str(ws.Cells(r, c).Value).strip()
-                    for c in range(1, used_cols + 1)
+                    for c in range(start_col, end_col + 1)
                 ):
                     header_row = r
                     break
 
             self._header_row = header_row
+            self._start_col  = start_col
             self._used_cols  = used_cols
             self._headers    = [
-                str(ws.Cells(header_row, c).Value or "").strip() or f"col_{c - 1}"
-                for c in range(1, used_cols + 1)
+                str(ws.Cells(header_row, c).Value or "").strip() or f"col_{c}"
+                for c in range(start_col, end_col + 1)
             ]
-            logger.info("Pro-Server EX COM: headers = %s", self._headers)
+            logger.info(
+                "Pro-Server EX COM: cols %s–%s (row %d), headers = %s",
+                start_col, end_col, header_row, self._headers,
+            )
             return True
         except Exception as exc:
             logger.debug("COM header scan failed: %s", exc)
@@ -337,22 +353,25 @@ class _ComReader:
         try:
             ws        = self._ws
             XL_UP     = -4162
+            end_col   = self._start_col + self._used_cols - 1
             last_row  = max(
-                ws.Cells(ws.Rows.Count, 2).End(XL_UP).Row,
+                ws.Cells(ws.Rows.Count, self._start_col).End(XL_UP).Row,
                 ws.UsedRange.Row + ws.UsedRange.Rows.Count - 1,
             )
 
             if last_row <= self._header_row:
                 return None
 
-            # ── Single COM call: read entire last row at once ─────────────────
+            # Single COM call: read the entire last row (start_col → end_col)
+            # Pro-Server EX data is in columns B:E (or wherever UsedRange starts)
             rng = ws.Range(
-                ws.Cells(last_row, 1),
-                ws.Cells(last_row, self._used_cols),
+                ws.Cells(last_row, self._start_col),
+                ws.Cells(last_row, end_col),
             )
             raw = rng.Value
             if raw is None:
                 return None
+            # Single-row Range.Value returns a tuple; multi-row returns tuple-of-tuples
             vals = raw if not isinstance(raw[0], (list, tuple)) else raw[0]
 
             row_dict: Dict[str, object] = {}
@@ -664,9 +683,12 @@ def _parse_proserver_datetime(date_raw, time_raw) -> str:
         return now_iso()
 
     _date_formats = [
+        # Pro-Server EX combined DATE/TIME in one cell: "17-08-2026 20:58"
+        "%d-%m-%Y %H:%M", "%d-%m-%Y %H:%M:%S",
+        # Separate date-only formats
         "%y/%m/%d", "%d/%m/%y", "%Y/%m/%d",
         "%m/%d/%y", "%y-%m-%d", "%Y-%m-%d",
-        "%d-%m-%Y", "%m/%d/%Y",
+        "%d-%m-%Y", "%m/%d/%Y", "%Y/%m/%d %H:%M:%S",
     ]
     parsed_date: Optional[_dt.date] = None
     for fmt in _date_formats:
@@ -1044,32 +1066,29 @@ def _load_all_xls_com(filepath: str) -> List[Dict[str, object]]:
             wb                  = excel.Workbooks.Open(abs_path, ReadOnly=True, UpdateLinks=False)
             opened_new          = True
 
-        ws = wb.Sheets(1)
+        ws        = wb.Sheets(1)
+        ur        = ws.UsedRange
+        start_col = ur.Column                   # first data column (e.g. 2 = B)
+        used_cols = ur.Columns.Count            # number of data columns
+        end_col   = start_col + used_cols - 1
+        used_rows = ur.Rows.Count
 
-        used_rows = ws.UsedRange.Rows.Count
-        used_cols = ws.UsedRange.Columns.Count
-
-        # Find header row (first row with string values)
-        header_row = 2
-        for r in range(1, min(11, used_rows + 1)):
-            vals = [ws.Cells(r, c).Value for c in range(1, used_cols + 1)]
+        # Find header row (first row with any string cell in the used range)
+        header_row = ur.Row
+        for r in range(ur.Row, min(ur.Row + 10, ur.Row + used_rows)):
+            vals = [ws.Cells(r, c).Value for c in range(start_col, end_col + 1)]
             if any(isinstance(v, str) and v.strip() for v in vals):
                 header_row = r
                 break
 
         headers = [
-            str(ws.Cells(header_row, c).Value or "").strip() or f"col_{c - 1}"
-            for c in range(1, used_cols + 1)
+            str(ws.Cells(header_row, c).Value or "").strip() or f"col_{c}"
+            for c in range(start_col, end_col + 1)
         ]
 
-        # Find the actual last non-blank row.
-        # End(XL_UP) is DIMENSIONS-limited in newer Excel — it stops at the row
-        # reported by the BIFF DIMENSIONS record, which Pro-Server EX sets to the
-        # current ring-buffer write position (not the physical row count).
-        # To catch all physical rows we also check ws.UsedRange.Rows.Count and
-        # take the maximum.
-        last_row_endup   = ws.Cells(ws.Rows.Count, 2).End(XL_UP).Row
-        last_row_usedrange = ws.UsedRange.Row + ws.UsedRange.Rows.Count - 1
+        # Find the actual last non-blank row using both End(XL_UP) and UsedRange
+        last_row_endup    = ws.Cells(ws.Rows.Count, start_col).End(XL_UP).Row
+        last_row_usedrange = ur.Row + ur.Rows.Count - 1
         last_row = max(last_row_endup, last_row_usedrange)
         if last_row <= header_row:
             return []
@@ -1077,15 +1096,15 @@ def _load_all_xls_com(filepath: str) -> List[Dict[str, object]]:
         data_count = last_row - header_row
         logger.info(
             "ProFace | XLS COM load: %d data rows (Excel rows %d–%d, "
-            "End(XL_UP)=%d UsedRange=%d), columns: %s",
+            "End(XL_UP)=%d UsedRange=%d, cols %d–%d), columns: %s",
             data_count, header_row + 1, last_row,
-            last_row_endup, last_row_usedrange, headers,
+            last_row_endup, last_row_usedrange, start_col, end_col, headers,
         )
 
-        # Bulk-read the entire data range at once (fast — one COM round-trip)
+        # Bulk-read entire data range at once (one COM round-trip)
         data_range = ws.Range(
-            ws.Cells(header_row + 1, 1),
-            ws.Cells(last_row, used_cols),
+            ws.Cells(header_row + 1, start_col),
+            ws.Cells(last_row, end_col),
         )
         # .Value returns a tuple-of-tuples; single-row files return a flat tuple
         raw = data_range.Value
@@ -1672,15 +1691,16 @@ def _com_live_row_count() -> int:
         except Exception:
             pass
         try:
-            abs_path = os.path.abspath(EXCEL_FILE_PATH)
-            wb = win32com.client.GetObject(abs_path)
-            ws = wb.Sheets(1)
-            XL_UP      = -4162
-            last_endup = ws.Cells(ws.Rows.Count, 2).End(XL_UP).Row
-            last_used  = ws.UsedRange.Row + ws.UsedRange.Rows.Count - 1
+            abs_path  = os.path.abspath(EXCEL_FILE_PATH)
+            wb        = win32com.client.GetObject(abs_path)
+            ws        = wb.Sheets(1)
+            ur        = ws.UsedRange
+            start_col = ur.Column          # first data column (e.g. 2 = B)
+            XL_UP     = -4162
+            last_endup = ws.Cells(ws.Rows.Count, start_col).End(XL_UP).Row
+            last_used  = ur.Row + ur.Rows.Count - 1
             last_row   = max(last_endup, last_used)
-            # Subtract header row — Pro-Server EX always has at least one header row
-            return max(0, last_row - 1)
+            return max(0, last_row - ur.Row)  # data rows = total - header row(s)
         finally:
             try:
                 pythoncom.CoUninitialize()
