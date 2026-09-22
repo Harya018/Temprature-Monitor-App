@@ -298,10 +298,9 @@ class _ComReader:
             used_cols  = ur.Columns.Count                  # e.g. 4 for B:E
             end_col    = start_col + used_cols - 1
 
-            last_row = max(
-                ws.Cells(ws.Rows.Count, start_col).End(XL_UP).Row,
-                ur.Row + ur.Rows.Count - 1,
-            )
+            # Use the LAST data column (end_col) for End(XL_UP) — start_col may be
+            # empty col A (Pro-Server EX layout), which would yield last_row=1.
+            last_row = ws.Cells(ws.Rows.Count, end_col).End(XL_UP).Row
 
             # Find header row: first row (within first 10) that has a string cell
             header_row = ur.Row   # start from first used row
@@ -354,10 +353,9 @@ class _ComReader:
             ws        = self._ws
             XL_UP     = -4162
             end_col   = self._start_col + self._used_cols - 1
-            last_row  = max(
-                ws.Cells(ws.Rows.Count, self._start_col).End(XL_UP).Row,
-                ws.UsedRange.Row + ws.UsedRange.Rows.Count - 1,
-            )
+            # Use the LAST data column (not start_col which may be empty col A)
+            # to find the last row — End(XL_UP) on an empty column returns row 1.
+            last_row  = ws.Cells(ws.Rows.Count, end_col).End(XL_UP).Row
 
             if last_row <= self._header_row:
                 return None
@@ -1696,10 +1694,10 @@ def _com_live_row_count() -> int:
             ws        = wb.Sheets(1)
             ur        = ws.UsedRange
             start_col = ur.Column          # first data column (e.g. 2 = B)
+            end_col   = start_col + ur.Columns.Count - 1
             XL_UP     = -4162
-            last_endup = ws.Cells(ws.Rows.Count, start_col).End(XL_UP).Row
-            last_used  = ur.Row + ur.Rows.Count - 1
-            last_row   = max(last_endup, last_used)
+            # Use end_col (last data column) for End(XL_UP) — start_col may be empty col A
+            last_row  = ws.Cells(ws.Rows.Count, end_col).End(XL_UP).Row
             return max(0, last_row - ur.Row)  # data rows = total - header row(s)
         finally:
             try:
