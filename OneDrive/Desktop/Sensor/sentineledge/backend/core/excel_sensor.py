@@ -1084,8 +1084,8 @@ def _load_all_xls_com(filepath: str) -> List[Dict[str, object]]:
             for c in range(start_col, end_col + 1)
         ]
 
-        # Find the actual last non-blank row using both End(XL_UP) and UsedRange
-        last_row_endup    = ws.Cells(ws.Rows.Count, start_col).End(XL_UP).Row
+        # Use end_col (last data column) for End(XL_UP) — start_col may be empty col A
+        last_row_endup    = ws.Cells(ws.Rows.Count, end_col).End(XL_UP).Row
         last_row_usedrange = ur.Row + ur.Rows.Count - 1
         last_row = max(last_row_endup, last_row_usedrange)
         if last_row <= header_row:
@@ -1681,31 +1681,19 @@ def _com_live_row_count() -> int:
     """
     if not EXCEL_FILE_PATH or Path(EXCEL_FILE_PATH).suffix.lower() != ".xls":
         return -1
-    try:
-        import win32com.client
-        import pythoncom
+    # Reuse the persistent _com_reader connection — avoids opening a second COM
+    # session and uses _header_row which is correct (2, not ur.Row=1).
+    reader = _com_reader
+    if reader._ws is not None and reader._header_row > 0 and reader._used_cols > 0:
         try:
-            pythoncom.CoInitialize()
+            ws      = reader._ws
+            end_col = reader._start_col + reader._used_cols - 1
+            XL_UP   = -4162
+            last_row = ws.Cells(ws.Rows.Count, end_col).End(XL_UP).Row
+            return max(0, last_row - reader._header_row)
         except Exception:
             pass
-        try:
-            abs_path  = os.path.abspath(EXCEL_FILE_PATH)
-            wb        = win32com.client.GetObject(abs_path)
-            ws        = wb.Sheets(1)
-            ur        = ws.UsedRange
-            start_col = ur.Column          # first data column (e.g. 2 = B)
-            end_col   = start_col + ur.Columns.Count - 1
-            XL_UP     = -4162
-            # Use end_col (last data column) for End(XL_UP) — start_col may be empty col A
-            last_row  = ws.Cells(ws.Rows.Count, end_col).End(XL_UP).Row
-            return max(0, last_row - ur.Row)  # data rows = total - header row(s)
-        finally:
-            try:
-                pythoncom.CoUninitialize()
-            except Exception:
-                pass
-    except Exception:
-        return -1
+    return -1
 
 
 def _poll_loop(stop_evt: threading.Event) -> None:
