@@ -1028,6 +1028,11 @@ def _load_all_xls_com(filepath: str) -> List[Dict[str, object]]:
     The physical file on disk may only have the initial rows; the running Excel
     instance has all accumulated data in memory.  GetObject() attaches to that
     running instance; Dispatch() + Open() opens a fresh session from disk only.
+
+    IMPORTANT: when called from the poll thread, reuse _com_reader's existing
+    workbook to avoid calling CoUninitialize() on the shared COM apartment —
+    which would invalidate _com_reader's proxies and cause "Object is not
+    connected to server" errors on the very next poll cycle.
     """
     try:
         import win32com.client
@@ -1042,27 +1047,38 @@ def _load_all_xls_com(filepath: str) -> List[Dict[str, object]]:
     wb         = None
     opened_new = False   # True when WE opened Excel; False when we attached to existing
     coinit     = False
+    # Reuse the persistent _com_reader workbook if it's already connected —
+    # avoids a competing GetObject() call and, crucially, skips CoUninitialize()
+    # which would tear down the poll thread's COM apartment.
+    reuse_wb   = (
+        _com_reader._wb is not None and _com_reader._ws is not None
+        and os.path.abspath(filepath) == os.path.abspath(EXCEL_FILE_PATH or "")
+    )
     try:
-        # COM must be initialised on each thread that uses it
-        try:
-            pythoncom.CoInitialize()
-            coinit = True
-        except Exception:
-            pass
+        if reuse_wb:
+            wb    = _com_reader._wb
+            excel = None   # don't quit the shared application
+        else:
+            # COM must be initialised on each thread that uses it
+            try:
+                pythoncom.CoInitialize()
+                coinit = True
+            except Exception:
+                pass
 
-        abs_path = os.path.abspath(filepath)
-        # ── Prefer attaching to the running Excel instance ────────────────────
-        # GetObject returns the already-open workbook with live Pro-Server EX data.
-        try:
-            wb    = win32com.client.GetObject(abs_path)
-            excel = wb.Application
-        except Exception:
-            # File not open in any running Excel — open it ourselves from disk.
-            excel               = win32com.client.Dispatch("Excel.Application")
-            excel.Visible       = False
-            excel.DisplayAlerts = False
-            wb                  = excel.Workbooks.Open(abs_path, ReadOnly=True, UpdateLinks=False)
-            opened_new          = True
+            abs_path = os.path.abspath(filepath)
+            # ── Prefer attaching to the running Excel instance ────────────────────
+            # GetObject returns the already-open workbook with live Pro-Server EX data.
+            try:
+                wb    = win32com.client.GetObject(abs_path)
+                excel = wb.Application
+            except Exception:
+                # File not open in any running Excel — open it ourselves from disk.
+                excel               = win32com.client.Dispatch("Excel.Application")
+                excel.Visible       = False
+                excel.DisplayAlerts = False
+                wb                  = excel.Workbooks.Open(abs_path, ReadOnly=True, UpdateLinks=False)
+                opened_new          = True
 
         ws        = wb.Sheets(1)
         ur        = ws.UsedRange
@@ -1137,23 +1153,26 @@ def _load_all_xls_com(filepath: str) -> List[Dict[str, object]]:
         logger.warning("ProFace | XLS COM load error: %s", exc)
         return []
     finally:
-        # Only close/quit what WE opened — never touch the user's running Excel session
-        if opened_new:
-            if wb is not None:
+        # Only close/quit what WE opened — never touch the user's running Excel session.
+        # Never call CoUninitialize when reusing _com_reader's workbook — that would
+        # tear down the poll thread's COM apartment and kill the persistent connection.
+        if not reuse_wb:
+            if opened_new:
+                if wb is not None:
+                    try:
+                        wb.Close(False)
+                    except Exception:
+                        pass
+                if excel is not None:
+                    try:
+                        excel.Quit()
+                    except Exception:
+                        pass
+            if coinit:
                 try:
-                    wb.Close(False)
+                    pythoncom.CoUninitialize()
                 except Exception:
                     pass
-        if opened_new and excel is not None:
-            try:
-                excel.Quit()
-            except Exception:
-                pass
-        if coinit:
-            try:
-                pythoncom.CoUninitialize()
-            except Exception:
-                pass
 
 
 def _load_all_xls_vbs(filepath: str) -> List[Dict[str, object]]:
