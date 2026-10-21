@@ -67,6 +67,7 @@ async def _check_and_notify_once() -> None:
               FROM alerts a
              WHERE a.company_id = %s
                AND a.acknowledged = 0
+               AND a.node_alert_id IS NULL
                AND a.timestamp::timestamptz < NOW() - (%s * INTERVAL '1 minute')
                AND a.timestamp::timestamptz > NOW() - INTERVAL '24 hours'
                AND NOT EXISTS (

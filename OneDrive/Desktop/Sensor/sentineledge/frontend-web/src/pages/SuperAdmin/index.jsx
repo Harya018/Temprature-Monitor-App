@@ -1,7 +1,7 @@
 /**
  * pages/SuperAdmin/index.jsx — Super Admin control panel (v2).
  *
- * Multi-page dashboard: Overview | Companies | Admins | Alerts | Live Feed |
+ * Multi-page dashboard: Overview | Companies | Admins | Alerts |
  * Broadcast | Sessions.  Admin Detail replaces the Admins view when a row is
  * clicked.  Auth: reads admin_token from sessionStorage; 401 → navigate to "/".
  */
@@ -12,7 +12,7 @@ import {
   LayoutDashboard, Building2, Users, AlertTriangle,
   Activity, Megaphone, KeyRound, LogOut, ShieldCheck,
   Radio, Wrench, CheckCircle, RefreshCw, ClipboardList,
-  Lock, Unlock, UserCheck, Copy, BarChart2, CreditCard,
+  Lock, Unlock, UserCheck, Copy, BarChart2,
   ShieldAlert, Download, BookOpen, ScrollText, Layers,
   Thermometer, Bell, Clock, Wifi, Gauge, Droplets,
   Server, Zap, Terminal,
@@ -86,6 +86,19 @@ async function api(method, path, body) {
 
 const SA  = '/api/super-admin'
 const AC  = '/api/super-admin/admin-control'
+
+// "HTTP 422: {...}" -> the server's own sentence (e.g. "Password must contain at least one number")
+function niceError(e) {
+  const m = String(e?.message || e || '')
+  const i = m.indexOf('{')
+  if (i < 0) return m
+  try {
+    const j = JSON.parse(m.slice(i))
+    const d = j.detail ?? j.error ?? j.message
+    if (Array.isArray(d)) return d.map(x => String(x.msg || x).replace(/^Value error, /, '')).join('; ')
+    return String(d || m)
+  } catch { return m }
+}
 const get  = (path)        => api('GET',    path)
 const post = (path, body)  => api('POST',   path, body)
 const patch= (path, body)  => api('PATCH',  path, body)
@@ -254,7 +267,7 @@ function EmergencyPanel({ companies }) {
         reason: mmReason.trim(),
       })
       setMmMsg(mmEnabled ? `Maintenance enabled for ${effectiveDuration} min` : 'Maintenance disabled')
-    } catch (e) { setMmErr(e.message) }
+    } catch (e) { setMmErr(niceError(e)) }
     finally { setMmLoading(false) }
   }
 
@@ -266,7 +279,7 @@ function EmergencyPanel({ companies }) {
       await post(`${CMD}/alerts/${alertId}/force-acknowledge`, { reason: ackReason.trim() })
       setAckMsg(`Alert #${alertId} acknowledged`)
       setAlertId(''); setAckReason(''); setShowAckModal(false)
-    } catch (e) { setAckErr(e.message) }
+    } catch (e) { setAckErr(niceError(e)) }
     finally { setAckLoading(false) }
   }
 
@@ -393,7 +406,7 @@ function CommandCenterTab() {
       setLastUpdated(d.generated_at)
       setError('')
     } catch (e) {
-      setError(e.message)
+      setError(niceError(e))
     } finally {
       setLoading(false)
     }
@@ -540,7 +553,7 @@ function CompanyHealthGrid({ onNavigate }) {
       setCompanies(await get(`${SA}/companies/health`))
       setError('')
     } catch (e) {
-      setError(e.message)
+      setError(niceError(e))
     } finally {
       setLoading(false)
     }
@@ -693,7 +706,7 @@ function OverviewTab({ onNavigate }) {
   const load = useCallback(async () => {
     setLoading(true); setError('')
     try { setData(await get(`${SA}/overview`)) }
-    catch (e) { setError(e.message) }
+    catch (e) { setError(niceError(e)) }
     finally { setLoading(false) }
   }, [])
 
@@ -880,7 +893,7 @@ function SubscriberCoverageWidget() {
 
 // ─── New Company Wizard ────────────────────────────────────────────────────────
 
-const WIZARD_STEPS = ['Company Details', 'First Admin', 'Add Subscriber', 'Review & Enable']
+const WIZARD_STEPS = ['Company Details', 'Admin & Password', 'Parameters', 'Subscriber', 'Review & Enable']
 
 function NewCompanyWizard({ onClose, onComplete }) {
   const [step,      setStep]      = useState(0)
@@ -900,7 +913,15 @@ function NewCompanyWizard({ onClose, onComplete }) {
   const [aEmail,    setAEmail]    = useState('')
   const [aPass,     setAPass]     = useState('')
 
-  // Step 2 — subscriber
+  // Step 2 — parameters the company starts with (none = empty dashboard; the
+  // company can request more later, approved by Super Admin)
+  const [wParams,      setWParams]      = useState([])
+  const [wParamsSaved, setWParamsSaved] = useState([])
+  const addWParam    = () => setWParams(p => [...p, { name: '', unit: '', min: '', max: '' }])
+  const setWParam    = (i, k, v) => setWParams(p => p.map((r, j) => (j === i ? { ...r, [k]: v } : r)))
+  const removeWParam = (i) => setWParams(p => p.filter((_, j) => j !== i))
+
+  // Step 3 — subscriber
   const [sPhone,    setSPhone]    = useState('')
   const [sEmail,    setSEmail]    = useState('')
   const [sName,     setSName]     = useState('')
@@ -925,11 +946,23 @@ function NewCompanyWizard({ onClose, onComplete }) {
         setAdminId(res.id)
         setStep(2)
       } else if (step === 2) {
+        const rows = wParams.filter(r => r.name.trim())
+        for (const p of rows) {
+          await post(`${SA}/config/companies/${companyId}/parameters/direct`, {
+            name: p.name.trim(), unit: p.unit.trim(),
+            min_value: p.min === '' ? null : parseFloat(p.min),
+            max_value: p.max === '' ? null : parseFloat(p.max),
+          })
+        }
+        setWParamsSaved(prev => [...prev, ...rows.map(r => r.name.trim())])
+        setWParams([])
+        setStep(3)
+      } else if (step === 3) {
         if (!skipSub) {
           await post(`${SA}/wizard/subscriber`, { company_id: companyId, phone: sPhone || null, email: sEmail || null, name: sName || null })
         }
-        setStep(3)
-      } else if (step === 3) {
+        setStep(4)
+      } else if (step === 4) {
         await post(`${SA}/wizard/enable/${companyId}`, {})
         onComplete?.()
         onClose()
@@ -943,12 +976,12 @@ function NewCompanyWizard({ onClose, onComplete }) {
 
   const canAdvance = () => {
     if (step === 0) return cName.trim().length >= 2 && cSlug.trim().length >= 2
-    if (step === 1) return aName.trim() && aEmail.trim() && aPass.trim().length >= 6
-    if (step === 2) return skipSub || sPhone.trim() || sEmail.trim()
+    if (step === 1) return aName.trim().length >= 2 && aPass.trim().length >= 10
+    if (step === 3) return skipSub || sPhone.trim() || sEmail.trim()
     return true
   }
 
-  const iLabel = ['Create Company', 'Create Admin', skipSub ? 'Skip & Continue' : 'Add Subscriber', 'Enable & Finish']
+  const iLabel = ['Create Company', 'Create Admin', wParams.some(r => r.name.trim()) ? 'Add Parameters' : 'Continue without parameters', skipSub ? 'Skip & Continue' : 'Add Subscriber', 'Enable & Finish']
 
   return (
     <Modal
@@ -1013,22 +1046,45 @@ function NewCompanyWizard({ onClose, onComplete }) {
             Creating first admin for <strong>{cName}</strong>
           </div>
           <div>
-            <label className="sa-label">Admin Name *</label>
-            <input className="sa-input" value={aName} onChange={e => setAName(e.target.value)} placeholder="John Smith" />
+            <label className="sa-label">Admin login name * <span style={{ fontWeight: 400, color: '#6B7280' }}>(used to sign in)</span></label>
+            <input className="sa-input" value={aName} onChange={e => setAName(e.target.value)} placeholder="srm_admin" />
           </div>
           <div>
-            <label className="sa-label">Email (login) *</label>
+            <label className="sa-label">Email (optional)</label>
             <input className="sa-input" type="email" value={aEmail} onChange={e => setAEmail(e.target.value)} placeholder="john@acmecorp.com" />
           </div>
           <div>
-            <label className="sa-label">Password * (min 6 chars)</label>
+            <label className="sa-label">Password * (min 10 chars, upper + lower case + number)</label>
             <input className="sa-input" type="password" value={aPass} onChange={e => setAPass(e.target.value)} placeholder="••••••••" />
           </div>
         </div>
       )}
 
-      {/* Step 2 — Subscriber */}
+      {/* Step 2 — Parameters */}
       {step === 2 && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+          <div style={{ background: '#EFF6FF', borderRadius: 8, padding: '8px 12px', fontSize: 13, color: '#1D4ED8' }}>
+            Add only what <strong>{cName}</strong> measures. Its dashboard, charts and settings show exactly these
+            parameters (e.g. only pH). You can add none now — the company can request parameters later and you approve them.
+          </div>
+          {wParamsSaved.length > 0 && (
+            <div style={{ fontSize: 12, color: '#15803D' }}>Added: {wParamsSaved.join(', ')}</div>
+          )}
+          {wParams.map((r, i) => (
+            <div key={i} style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 1fr 1fr auto', gap: 8, alignItems: 'end' }}>
+              <div><label className="sa-label">Name</label><input className="sa-input" value={r.name} onChange={e => setWParam(i, 'name', e.target.value)} placeholder="ph" /></div>
+              <div><label className="sa-label">Unit</label><input className="sa-input" value={r.unit} onChange={e => setWParam(i, 'unit', e.target.value)} placeholder="pH" /></div>
+              <div><label className="sa-label">Min</label><input className="sa-input" type="number" value={r.min} onChange={e => setWParam(i, 'min', e.target.value)} /></div>
+              <div><label className="sa-label">Max</label><input className="sa-input" type="number" value={r.max} onChange={e => setWParam(i, 'max', e.target.value)} /></div>
+              <button className="sa-btn sm secondary" onClick={() => removeWParam(i)} title="Remove">✕</button>
+            </div>
+          ))}
+          <button className="sa-btn secondary sm" style={{ alignSelf: 'flex-start' }} onClick={addWParam}>+ Add parameter</button>
+        </div>
+      )}
+
+      {/* Step 3 — Subscriber */}
+      {step === 3 && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
           <div style={{ background: '#FFF7ED', borderRadius: 8, padding: '8px 12px', fontSize: 13, color: '#92400E', marginBottom: 4 }}>
             Subscribers receive alerts (SMS/email). A company with 0 subscribers won't notify anyone.
@@ -1056,8 +1112,8 @@ function NewCompanyWizard({ onClose, onComplete }) {
         </div>
       )}
 
-      {/* Step 3 — Review & Enable */}
-      {step === 3 && (
+      {/* Step 4 — Review & Enable */}
+      {step === 4 && (
         <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
           <div style={{ background: '#F0FDF4', border: '1px solid #86EFAC', borderRadius: 10, padding: 16 }}>
             <div style={{ fontWeight: 700, color: '#15803D', marginBottom: 12, fontSize: 14 }}>✓ Setup Complete — Ready to enable</div>
@@ -1065,7 +1121,8 @@ function NewCompanyWizard({ onClose, onComplete }) {
               ['Company',    cName, '#1D4ED8'],
               ['Slug',       cSlug, '#6B7280'],
               ['Tier',       cTier, '#374151'],
-              ['Admin',      `${aName} (${aEmail})`, '#374151'],
+              ['Admin login', aName, '#374151'],
+              ['Parameters', wParamsSaved.length ? wParamsSaved.join(', ') : 'None — empty dashboard until approved', '#374151'],
               ['Subscriber', skipSub ? 'None (skipped)' : (sName || sPhone || sEmail || '—'), '#374151'],
             ].map(([label, val, color]) => (
               <div key={label} style={{ display: 'flex', justifyContent: 'space-between', padding: '6px 0', borderBottom: '1px solid #BBF7D0', fontSize: 13 }}>
@@ -1113,7 +1170,7 @@ function CompanyFormModal({ company, onClose, onSaved }) {
       }
       onSaved()
       onClose()
-    } catch (e) { setError(e.message) }
+    } catch (e) { setError(niceError(e)) }
     finally { setLoading(false) }
   }
 
@@ -1161,6 +1218,228 @@ function CompanyFormModal({ company, onClose, onSaved }) {
 
 // ─── Company Detail View ──────────────────────────────────────────────────────
 
+function Spark({ points }) {
+  const v = points.filter(x => x != null)
+  if (v.length < 2) return <span style={{ color: '#9CA3AF' }}>—</span>
+  const lo = Math.min(...v), hi = Math.max(...v), span = hi - lo || 1
+  const d = v.map((y, i) => `${(i / (v.length - 1)) * 100},${22 - ((y - lo) / span) * 20}`).join(' ')
+  return <svg width="100" height="24" viewBox="0 0 100 24" preserveAspectRatio="none"><polyline points={d} fill="none" stroke="#6D28D9" strokeWidth="1.5" /></svg>
+}
+
+function NodeSummary({ companyId }) {
+  const [hours, setHours] = useState(24)
+  const [data,  setData]  = useState(null)
+  const [err,   setErr]   = useState('')
+
+  useEffect(() => {
+    let live = true
+    const load = () => get(`${SA}/nodes/${companyId}/summary?hours=${hours}`)
+      .then(d => { if (live) { setData(d); setErr('') } }).catch(e => live && setErr(niceError(e)))
+    load(); const t = setInterval(load, 60000)
+    return () => { live = false; clearInterval(t) }
+  }, [companyId, hours])
+
+  if (err) return <Err msg={err} />
+  if (!data) return <Spinner />
+  const n = v => (v == null ? '—' : String(Math.round(Number(v) * 100) / 100))
+  const al = data.alerts
+  return (
+    <div style={{ marginTop: 14, paddingTop: 14, borderTop: '1px solid #F3F4F6' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', marginBottom: 10 }}>
+        <strong style={{ fontSize: 14 }}>Summary reported by this server</strong>
+        <select value={hours} onChange={e => setHours(Number(e.target.value))}>
+          <option value={24}>Last 24 hours</option><option value={168}>Last 7 days</option><option value={720}>Last 30 days</option>
+        </select>
+        <span style={{ fontSize: 12, color: '#6B7280' }}>
+          Alerts: <strong>{al.total}</strong> ({al.unacknowledged} unacknowledged)
+          {data.last_summary_hour ? ` · latest hour reported ${data.last_summary_hour.replace('T', ' ')}:00 UTC` : ''}
+        </span>
+        <div style={{ flex: 1 }} />
+        <button className="sa-btn secondary sm"
+                onClick={() => downloadCSV(`${SA}/nodes/${companyId}/summary.csv?hours=${hours}`, `company-${companyId}-summary.csv`)}>
+          Download CSV
+        </button>
+      </div>
+      {data.parameters.length === 0
+        ? <p style={{ fontSize: 13, color: '#6B7280', margin: 0 }}>No hourly summaries received yet. They arrive once each hour has finished.</p>
+        : (
+          <div style={{ overflowX: 'auto' }}>
+            <table className="sa-table" style={{ width: '100%', fontSize: 13 }}>
+              <thead><tr><th>Parameter</th><th>Latest hour avg</th><th>Min</th><th>Avg</th><th>Max</th><th>Samples</th><th>Alerts</th><th>Trend</th></tr></thead>
+              <tbody>
+                {data.parameters.map(p => (
+                  <tr key={p.parameter}>
+                    <td><strong>{p.parameter}</strong></td><td>{n(p.latest)}</td><td>{n(p.min)}</td><td>{n(p.avg)}</td><td>{n(p.max)}</td>
+                    <td>{p.samples}</td><td>{al.by_parameter[p.parameter] || 0}</td>
+                    <td><Spark points={p.series.map(x => x.avg)} /></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      {al.recent.length > 0 && (
+        <div style={{ marginTop: 12 }}>
+          <div style={{ fontSize: 12, fontWeight: 600, color: '#6B7280', marginBottom: 4 }}>Recent alerts</div>
+          {al.recent.slice(0, 8).map(a => (
+            <div key={a.id} style={{ display: 'flex', gap: 10, fontSize: 13, padding: '3px 0', alignItems: 'center' }}>
+              <Badge label={a.severity} type={String(a.severity).toUpperCase() === 'CRITICAL' ? 'inactive' : 'warning'} />
+              <span><strong>{a.parameter}</strong> {n(a.value)} ({a.direction} limit {n(a.threshold)})</span>
+              <span style={{ color: '#9CA3AF' }}>{new Date(a.timestamp).toLocaleString()}</span>
+              <span style={{ color: a.acknowledged ? '#059669' : '#D97706' }}>{a.acknowledged ? `acknowledged by ${a.acknowledged_by}` : 'not acknowledged'}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function NodeLog({ companyId }) {
+  const [rows, setRows] = useState(null)
+  useEffect(() => {
+    let live = true
+    const load = () => get(`${SA}/nodes/${companyId}/events?limit=40`).then(d => live && setRows(d)).catch(() => {})
+    load(); const t = setInterval(load, 30000)
+    return () => { live = false; clearInterval(t) }
+  }, [companyId])
+  if (!rows || rows.length === 0) return null
+  const colour = { online: '#059669', offline: '#DC2626', revoked: '#DC2626', paired: '#2563EB' }
+  return (
+    <details style={{ marginTop: 12, fontSize: 13 }}>
+      <summary style={{ cursor: 'pointer', fontWeight: 600, color: '#374151' }}>Connection log ({rows.length})</summary>
+      <div style={{ maxHeight: 220, overflowY: 'auto', marginTop: 6 }}>
+        {rows.map(r => (
+          <div key={r.id} style={{ display: 'flex', gap: 10, padding: '2px 0', color: '#6B7280' }}>
+            <span style={{ width: 150, flexShrink: 0 }}>{new Date(r.at).toLocaleString()}</span>
+            <strong style={{ width: 130, flexShrink: 0, color: colour[r.event] || '#374151' }}>{r.event.replace(/_/g, ' ')}</strong>
+            <span>{r.detail || ''}</span>
+          </div>
+        ))}
+      </div>
+    </details>
+  )
+}
+
+function LicenseRow({ lic, busy, onSave }) {
+  const [active,  setActive]  = useState(lic.active)
+  const [expires, setExpires] = useState(lic.expires_at || '')
+  const [grace,   setGrace]   = useState(lic.grace_days)
+  const dirty = active !== lic.active || expires !== (lic.expires_at || '') || Number(grace) !== lic.grace_days
+  return (
+    <div style={{ display: 'flex', gap: 16, alignItems: 'center', flexWrap: 'wrap', marginTop: 12, paddingTop: 12, borderTop: '1px solid #F3F4F6', fontSize: 13, color: '#374151' }}>
+      <strong>Licence</strong>
+      <label style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+        <input type="checkbox" checked={active} onChange={e => setActive(e.target.checked)} /> Allowed to run
+      </label>
+      <label style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+        Expires <input type="date" value={expires} onChange={e => setExpires(e.target.value)} />
+      </label>
+      <label style={{ display: 'flex', gap: 6, alignItems: 'center' }} title="Days the server may stay offline from the hub before it stops">
+        Offline grace (days) <input type="number" min="0" max="365" value={grace} onChange={e => setGrace(e.target.value)} style={{ width: 64 }} />
+      </label>
+      <button className="sa-btn primary sm" disabled={busy || !dirty}
+              onClick={() => onSave({ active, expires_at: expires || null, grace_days: Number(grace) })}>Save</button>
+    </div>
+  )
+}
+
+function NodeConnectionCard({ companyId }) {
+  const [node,  setNode]  = useState(null)
+  const [issue, setIssue] = useState(null)
+  const [busy,  setBusy]  = useState(false)
+  const [err,   setErr]   = useState('')
+
+  const load = useCallback(async () => {
+    try {
+      const list = await get(`${SA}/nodes`)
+      setNode(list.find(n => n.company_id === companyId) || null)
+    } catch (e) { setErr(niceError(e)) }
+  }, [companyId])
+
+  useEffect(() => { load(); const t = setInterval(load, 15000); return () => clearInterval(t) }, [load])
+
+  if (!node) return err ? <Err msg={err} /> : null
+  if (node.mode === 'local') {
+    return (
+      <div className="sa-card" style={{ marginBottom: 16, display: 'flex', alignItems: 'center', gap: 12 }}>
+        <Badge label="This server" type="active" />
+        <span style={{ fontSize: 13, color: '#6B7280' }}>Data for this company is collected and stored on this server. No pairing needed.</span>
+      </div>
+    )
+  }
+
+  const generate = async () => {
+    setBusy(true); setErr('')
+    try { setIssue(await post(`${SA}/nodes/${companyId}/pairing`)); await load() }
+    catch (e) { setErr(niceError(e)) } finally { setBusy(false) }
+  }
+  const revoke = async () => {
+    if (!window.confirm('Disconnect the company server? It will stop syncing until paired again.')) return
+    setBusy(true); setErr('')
+    try { await post(`${SA}/nodes/${companyId}/revoke`); setIssue(null); await load() }
+    catch (e) { setErr(niceError(e)) } finally { setBusy(false) }
+  }
+
+  const saveLicense = async (lic) => {
+    setBusy(true); setErr('')
+    try { await put(`${SA}/nodes/${companyId}/license`, lic); await load() }
+    catch (e) { setErr(niceError(e)) } finally { setBusy(false) }
+  }
+
+  const label = { online: 'Online', offline: 'Offline', pairing: 'Waiting for pairing', not_paired: 'Not connected' }[node.state] || node.state
+  const kind  = node.state === 'online' ? 'active' : node.state === 'offline' ? 'warning' : 'inactive'
+  const paired = node.state === 'online' || node.state === 'offline'
+  const seen = node.last_seen_at ? new Date(node.last_seen_at).toLocaleString() : '—'
+
+  return (
+    <div className="sa-card" style={{ marginBottom: 16 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+        <div style={{ fontWeight: 700, fontSize: 15, color: '#111827' }}>Company server</div>
+        <Badge label={label} type={kind} />
+        {paired && <span style={{ fontSize: 12, color: '#6B7280' }}>{node.node_name} · last seen {seen}{node.last_ip ? ` · ${node.last_ip}` : ''}</span>}
+        <div style={{ flex: 1 }} />
+        <button className="sa-btn primary sm" onClick={generate} disabled={busy}>{paired ? 'Pair a new server' : 'Generate pairing code'}</button>
+        {(paired || node.state === 'pairing') && <button className="sa-btn danger sm" onClick={revoke} disabled={busy}>Disconnect</button>}
+      </div>
+      {!paired && !issue && (
+        <p style={{ fontSize: 13, color: '#6B7280', margin: '10px 0 0' }}>
+          This company runs its own server and database. Generate a one-time code and enter it on that server
+          (<code>/node-setup</code>) together with this hub's address.
+        </p>
+      )}
+      {paired && node.status && (
+        <div style={{ display: 'flex', gap: 18, marginTop: 10, fontSize: 12, color: '#6B7280', flexWrap: 'wrap' }}>
+          <span>Waiting to send: <strong>{node.status.outbox_pending ?? 0}</strong></span>
+          <span>Last stored reading: <strong>{node.status.last_stored_reading_at || '—'}</strong></span>
+          <span>Parameters: <strong>{(node.status.parameters || []).join(', ') || '—'}</strong></span>
+        </div>
+      )}
+      {paired && <NodeSummary companyId={companyId} />}
+      {(paired || node.state === 'pairing') && <NodeLog companyId={companyId} />}
+      {(paired || node.state === 'pairing') && node.license && (
+        <LicenseRow lic={node.license} busy={busy} onSave={saveLicense} />
+      )}
+      {err && <Err msg={err} />}
+      {issue && (
+        <Modal title="Pairing code" onClose={() => setIssue(null)}
+               footer={<button className="sa-btn primary" onClick={() => setIssue(null)}>Done</button>}>
+          <p style={{ fontSize: 13, color: '#6B7280', marginTop: 0 }}>
+            Enter this on the company's server at <code>/node-setup</code>. It works once and expires in 24 hours.
+          </p>
+          <div style={{ fontSize: 28, fontWeight: 800, letterSpacing: '0.12em', fontFamily: 'monospace', padding: '14px 0', textAlign: 'center', background: '#F3F4F6', borderRadius: 10 }}>
+            {issue.code}
+          </div>
+          <div style={{ marginTop: 14, fontSize: 13, color: '#374151', fontWeight: 600 }}>Hub address (use one the company's server can reach)</div>
+          {(issue.hub_addresses || []).map(a => (
+            <div key={a.url} style={{ fontSize: 13, padding: '4px 0' }}>{a.label}: <code>{a.url}</code></div>
+          ))}
+        </Modal>
+      )}
+    </div>
+  )
+}
+
 function CompanyDetailView({ companyId, onBack }) {
   const [data,    setData]    = useState(null)
   const [loading, setLoading] = useState(true)
@@ -1170,7 +1449,7 @@ function CompanyDetailView({ companyId, onBack }) {
   const load = useCallback(async () => {
     setLoading(true); setError('')
     try { setData(await get(`${SA}/companies/${companyId}/detail`)) }
-    catch (e) { setError(e.message) }
+    catch (e) { setError(niceError(e)) }
     finally { setLoading(false) }
   }, [companyId])
 
@@ -1193,6 +1472,8 @@ function CompanyDetailView({ companyId, onBack }) {
   return (
     <>
       <button className="sa-back-btn" onClick={onBack}>← Back to Companies</button>
+
+      <NodeConnectionCard companyId={companyId} />
 
       {/* Hero header */}
       <div className="sa-card" style={{ marginBottom: 16 }}>
@@ -1371,12 +1652,13 @@ function CompanyDetailView({ companyId, onBack }) {
               { label: 'Critical Alerts', val: alert_stats.critical       ?? 0, col: alert_stats.critical       > 0 ? '#EF4444' : '#22C55E' },
               { label: 'Warning Alerts',  val: alert_stats.warning        ?? 0, col: alert_stats.warning        > 0 ? '#F59E0B' : '#22C55E' },
               { label: 'Acknowledged',    val: alert_stats.acknowledged   ?? 0, col: '#3B82F6' },
-              { label: 'Total Readings',  val: reading_stats.total_readings ?? 0, col: '#374151' },
-              { label: 'Readings Today',  val: reading_stats.readings_today ?? 0, col: '#3B82F6' },
+              { label: reading_stats.total_is_estimate ? 'Total Readings (approx.)' : 'Total Readings',
+                val: reading_stats.total_readings != null ? Number(reading_stats.total_readings).toLocaleString() : '—', col: '#374151' },
+              { label: 'Readings Today',  val: reading_stats.readings_today != null ? Number(reading_stats.readings_today).toLocaleString() : 0, col: '#3B82F6' },
               { label: 'Last Reading',    val: reading_stats.last_reading_at ? new Date(reading_stats.last_reading_at).toLocaleString() : 'Never', col: '#374151' },
-              { label: 'Min Temperature', val: reading_stats.min_temp != null ? `${reading_stats.min_temp}°C` : '—', col: '#3B82F6' },
-              { label: 'Max Temperature', val: reading_stats.max_temp != null ? `${reading_stats.max_temp}°C` : '—', col: '#EF4444' },
-              { label: 'Avg Temperature', val: reading_stats.avg_temp != null ? `${reading_stats.avg_temp}°C` : '—', col: '#374151' },
+              { label: 'Min Temp (today)', val: reading_stats.min_temp != null ? `${reading_stats.min_temp}°C` : '—', col: '#3B82F6' },
+              { label: 'Max Temp (today)', val: reading_stats.max_temp != null ? `${reading_stats.max_temp}°C` : '—', col: '#EF4444' },
+              { label: 'Avg Temp (today)', val: reading_stats.avg_temp != null ? `${reading_stats.avg_temp}°C` : '—', col: '#374151' },
             ].map(({ label, val, col }) => (
               <div key={label} className="sa-stat">
                 <div className="sa-stat-label">{label}</div>
@@ -1468,7 +1750,7 @@ function CompaniesTab({ onViewAdmins }) {
   const load = useCallback(async () => {
     setLoading(true); setError(''); setSelected(new Set())
     try { setCompanies(await get(`${SA}/companies`)) }
-    catch (e) { setError(e.message) }
+    catch (e) { setError(niceError(e)) }
     finally { setLoading(false) }
   }, [])
 
@@ -1478,13 +1760,13 @@ function CompaniesTab({ onViewAdmins }) {
 
   const handleToggle = async (c) => {
     try { await patch(`${SA}/companies/${c.id}/toggle`); load(); showToast(`${c.name} ${c.is_active ? 'disabled' : 'enabled'}`) }
-    catch (e) { setError(e.message) }
+    catch (e) { setError(niceError(e)) }
   }
 
   const handleDelete = async () => {
     setDelLoading(true); setDelErr('')
     try { await del(`${SA}/companies/${delTarget.id}`); setDelTarget(null); load(); showToast(`${delTarget.name} deleted`) }
-    catch (e) { setDelErr(e.message) }
+    catch (e) { setDelErr(niceError(e)) }
     finally { setDelLoading(false) }
   }
 
@@ -1506,7 +1788,7 @@ function CompaniesTab({ onViewAdmins }) {
       await post(`${SA}/companies/bulk`, { ids: [...selected], action })
       showToast(`Bulk ${action} applied to ${selected.size} companies`)
       load()
-    } catch (e) { setError(e.message) }
+    } catch (e) { setError(niceError(e)) }
     finally { setBulkLoading(false) }
   }
 
@@ -1654,7 +1936,7 @@ function AdminDetailView({ adminId, onBack }) {
   const load = useCallback(async () => {
     setLoading(true); setError('')
     try { setData(await get(`${SA}/admins/${adminId}`)) }
-    catch (e) { setError(e.message) }
+    catch (e) { setError(niceError(e)) }
     finally { setLoading(false) }
   }, [adminId])
 
@@ -1815,7 +2097,7 @@ function AdminDetailView({ adminId, onBack }) {
 function AdminFormModal({ companies, onClose, onSaved }) {
   const [name,      setName]      = useState('')
   const [password,  setPassword]  = useState('')
-  const [role,      setRole]      = useState('sub')
+  const [role,      setRole]      = useState('main')
   const [companyId, setCompanyId] = useState('')
   const [loading,   setLoading]   = useState(false)
   const [error,     setError]     = useState('')
@@ -1823,11 +2105,12 @@ function AdminFormModal({ companies, onClose, onSaved }) {
   const handleSubmit = async (e) => {
     e.preventDefault()
     if (!name.trim() || !password) { setError('Name and password are required'); return }
+    if (!companyId) { setError('Choose the company this admin belongs to'); return }
     setLoading(true); setError('')
     try {
       await post(`${SA}/admins`, { name: name.trim(), password, role, company_id: companyId ? +companyId : null })
       onSaved(); onClose()
-    } catch (e) { setError(e.message) }
+    } catch (e) { setError(niceError(e)) }
     finally { setLoading(false) }
   }
 
@@ -1852,14 +2135,14 @@ function AdminFormModal({ companies, onClose, onSaved }) {
         <div className="sa-form-group">
           <label>Role</label>
           <select className="sa-select" value={role} onChange={e => setRole(e.target.value)}>
-            <option value="sub">Sub Admin</option>
-            <option value="main">Main Admin</option>
+            <option value="main">Company Admin (can sign in)</option>
+            <option value="sub">Sub Admin (view + acknowledge only)</option>
           </select>
         </div>
         <div className="sa-form-group">
           <label>Company</label>
           <select className="sa-select" value={companyId} onChange={e => setCompanyId(e.target.value)}>
-            <option value="">— none —</option>
+            <option value="">— choose a company —</option>
             {companies.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
           </select>
         </div>
@@ -1877,10 +2160,10 @@ function ResetPwdModal({ admin, onClose }) {
 
   const handleSubmit = async (e) => {
     e.preventDefault()
-    if (!pwd || pwd.length < 6) { setError('Password must be at least 6 characters'); return }
+    if (!pwd || pwd.length < 10) { setError('Password must be at least 10 characters'); return }
     setLoading(true); setError('')
     try { await put(`${SA}/admins/${admin.id}/password`, { new_password: pwd }); setDone(true) }
-    catch (e) { setError(e.message) }
+    catch (e) { setError(niceError(e)) }
     finally { setLoading(false) }
   }
 
@@ -1898,11 +2181,11 @@ function ResetPwdModal({ admin, onClose }) {
         ? <p style={{ color: '#059669', margin: 0, fontWeight: 600 }}>Password updated successfully.</p>
         : <>
             <p style={{ fontSize: 13, color: '#6B7280', marginTop: 0, marginBottom: 14 }}>
-              Enter a new password for <strong>{admin.name}</strong>. Minimum 6 characters.
+              Enter a new password for <strong>{admin.name}</strong>: 10+ characters with a capital, a small letter, a number and a symbol. Their open sign-ins end.
             </p>
             <div className="sa-form-group">
               <label>New Password</label>
-              <input className="sa-input" type="password" value={pwd} onChange={e => setPwd(e.target.value)} placeholder="min. 6 characters" autoFocus />
+              <input className="sa-input" type="password" value={pwd} onChange={e => setPwd(e.target.value)} placeholder="e.g. Plant@Admin2026" autoFocus />
             </div>
             <Err msg={error} />
           </>
@@ -1919,8 +2202,9 @@ function AssignCompanyModal({ admin, companies, onClose, onSaved }) {
   const handleSubmit = async (e) => {
     e.preventDefault()
     setLoading(true); setError('')
-    try { await patch(`${SA}/admins/${admin.id}/company`, { company_id: companyId ? +companyId : null }); onSaved(); onClose() }
-    catch (e) { setError(e.message) }
+    if (!companyId) { setError('Choose a company'); setLoading(false); return }
+    try { await patch(`${SA}/admins/${admin.id}/company`, { company_id: +companyId }); onSaved(); onClose() }
+    catch (e) { setError(niceError(e)) }
     finally { setLoading(false) }
   }
 
@@ -1934,10 +2218,13 @@ function AssignCompanyModal({ admin, companies, onClose, onSaved }) {
       <div className="sa-form-group">
         <label>Company</label>
         <select className="sa-select" value={companyId} onChange={e => setCompanyId(e.target.value)}>
-          <option value="">— unassign —</option>
+          <option value="">— choose a company —</option>
           {companies.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
         </select>
       </div>
+      <p style={{ fontSize: 12, color: '#6B7280', margin: '4px 0 0' }}>
+        Moving signs {admin.name} out everywhere; they sign in again and then see only the new company.
+      </p>
       <Err msg={error} />
     </Modal>
   )
@@ -1957,7 +2244,7 @@ function LockAdminModal({ admin, onClose, onDone }) {
       await post(`${AC}/${admin.id}/lock`, { reason: reason.trim() })
       onDone()
       onClose()
-    } catch (e) { setError(e.message) }
+    } catch (e) { setError(niceError(e)) }
     finally { setLoading(false) }
   }
 
@@ -2057,7 +2344,7 @@ function AdminsTab({ onViewDetail }) {
     try {
       const [a, c] = await Promise.all([get(`${SA}/admins`), get(`${SA}/companies`)])
       setAdmins(a); setCompanies(c)
-    } catch (e) { setError(e.message) }
+    } catch (e) { setError(niceError(e)) }
     finally { setLoading(false) }
   }, [])
 
@@ -2065,14 +2352,14 @@ function AdminsTab({ onViewDetail }) {
 
   const handleToggle = async (a) => {
     try { await patch(`${SA}/admins/${a.id}/toggle`); load(); showToast(`${a.name} ${a.is_active === 0 ? 'activated' : 'deactivated'}`) }
-    catch (e) { setError(e.message) }
+    catch (e) { setError(niceError(e)) }
   }
 
   const handleUnlock = async (a) => {
     try {
       await post(`${AC}/${a.id}/unlock`)
       load(); showToast(`${a.name} unlocked`)
-    } catch (e) { setError(e.message) }
+    } catch (e) { setError(niceError(e)) }
   }
 
   const handleToggleApproval = async (a) => {
@@ -2080,14 +2367,14 @@ function AdminsTab({ onViewDetail }) {
     try {
       await post(`${AC}/${a.id}/require-approval`, { enabled: newVal })
       load(); showToast(`Approval ${newVal ? 'required' : 'removed'} for ${a.name}`)
-    } catch (e) { setError(e.message) }
+    } catch (e) { setError(niceError(e)) }
   }
 
   const handleImpersonate = async (a) => {
     try {
       const data = await post(`${AC}/${a.id}/impersonate`)
       setImpersonateResult({ admin: a, code: data.impersonation_code, expiresAt: data.expires_at })
-    } catch (e) { setError(e.message) }
+    } catch (e) { setError(niceError(e)) }
   }
 
   return (
@@ -2096,7 +2383,7 @@ function AdminsTab({ onViewDetail }) {
 
       <div className="sa-card">
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 }}>
-          <h2 className="sa-card-title" style={{ margin: 0 }}>Admins ({admins.length})</h2>
+          <h2 className="sa-card-title" style={{ margin: 0 }}>Admins ({admins.filter(a => a.role !== 'super_admin').length})</h2>
           <button className="sa-btn primary" onClick={() => setShowNew(true)}>+ New Admin</button>
         </div>
         {error && <Err msg={error} />}
@@ -2186,7 +2473,7 @@ function CompanyParametersTab() {
   const load = useCallback(async () => {
     setLoading(true); setError('')
     try { setData(await get(`${SA}/company-parameters`)) }
-    catch (e) { setError(e.message) }
+    catch (e) { setError(niceError(e)) }
     finally { setLoading(false) }
   }, [])
 
@@ -2326,7 +2613,7 @@ function AlertsTab() {
       ])
       setAlerts(Array.isArray(a) ? a : [])
       setCompanies(Array.isArray(c) ? c : [])
-    } catch (e) { setError(e.message) }
+    } catch (e) { setError(niceError(e)) }
     finally { setLoading(false) }
   }, [filter, company])
 
@@ -2341,10 +2628,12 @@ function AlertsTab() {
   const handleAck = async (alertId) => {
     setAcking(alertId)
     try {
-      await post(`${SA}/alerts/${alertId}/acknowledge`, {})
-      showToast(`Alert #${alertId} acknowledged`)
+      const r = await post(`${SA}/alerts/${alertId}/acknowledge`, {})
+      showToast(r?.status === 'already_acknowledged'
+        ? `Alert #${alertId} was already acknowledged by ${r.acknowledged_by || 'someone else'}`
+        : `Alert #${alertId} acknowledged`)
       load()
-    } catch (e) { setError(e.message) }
+    } catch (e) { setError(niceError(e)) }
     finally { setAcking(null) }
   }
 
@@ -2501,50 +2790,6 @@ function AlertsTab() {
   )
 }
 
-// ─── Live Feed tab ────────────────────────────────────────────────────────────
-
-function LiveFeedTab() {
-  const [feed,    setFeed]    = useState([])
-  const [loading, setLoading] = useState(true)
-  const [error,   setError]   = useState('')
-
-  const load = useCallback(async () => {
-    try { setFeed(await get(`${SA}/live-feed`)) }
-    catch (e) { setError(e.message) }
-    finally { setLoading(false) }
-  }, [])
-
-  useEffect(() => {
-    load()
-    const t = setInterval(load, 10000)
-    return () => clearInterval(t)
-  }, [load])
-
-  if (loading) return <Spinner />
-  if (error)   return <Err msg={error} />
-
-  return (
-    <div className="sa-live-grid">
-      {feed.length === 0
-        ? <p style={{ color: '#9CA3AF' }}>No live data available.</p>
-        : feed.map((f, i) => (
-            <div className="sa-live-card" key={i}>
-              <h3>{f.device}</h3>
-              <div className="co">{f.company_name}</div>
-              <div className={`val ${f.status}`}>
-                <span className={`sa-live-dot ${f.status}`} />
-                {typeof f.value === 'number' ? f.value.toFixed(1) : f.value}°C
-              </div>
-              <div style={{ fontSize: 12, color: '#9CA3AF', marginTop: 8 }}>
-                {f.timestamp ? new Date(f.timestamp).toLocaleTimeString() : '—'}
-              </div>
-            </div>
-          ))
-      }
-    </div>
-  )
-}
-
 // ─── Broadcast tab ────────────────────────────────────────────────────────────
 
 function BroadcastTab() {
@@ -2569,7 +2814,7 @@ function BroadcastTab() {
     if (!title.trim() || !message.trim()) { setError('Title and message are required'); return }
     setSending(true); setError('')
     try { await post(`${SA}/broadcast`, { title: title.trim(), message: message.trim() }); setTitle(''); setMessage(''); loadHistory() }
-    catch (e) { setError(e.message) }
+    catch (e) { setError(niceError(e)) }
     finally { setSending(false) }
   }
 
@@ -2625,7 +2870,7 @@ function SessionsTab() {
   const load = useCallback(async () => {
     setLoading(true); setError('')
     try { setSessions(await get(`${SA}/sessions`)) }
-    catch (e) { setError(e.message) }
+    catch (e) { setError(niceError(e)) }
     finally { setLoading(false) }
   }, [])
 
@@ -2683,7 +2928,7 @@ function ApprovalsTab({ onCountChange }) {
       const data = await get(`${AC}/approvals?status=${filter}`)
       setRows(data)
       if (filter === 'pending' && onCountChange) onCountChange(data.length)
-    } catch (e) { setError(e.message) }
+    } catch (e) { setError(niceError(e)) }
     finally { setLoading(false) }
   }, [filter, onCountChange])
 
@@ -2698,7 +2943,7 @@ function ApprovalsTab({ onCountChange }) {
       showToast(`Approval #${modal.row.id} ${modal.type}d`)
       setModal(null); setNote('')
       load()
-    } catch (e) { setError(e.message) }
+    } catch (e) { setError(niceError(e)) }
     finally { setSaving(false) }
   }
 
@@ -2808,13 +3053,160 @@ function ApprovalsTab({ onCountChange }) {
 
 const CFG = '/api/super-admin/config'
 
+function SensorOwnerCard() {
+  const [data, setData] = useState(null)
+  const [pick, setPick] = useState({})
+  const [busy, setBusy] = useState('')
+  const [msg,  setMsg]  = useState('')
+  const [err,  setErr]  = useState('')
+
+  const load = useCallback(async () => {
+    try {
+      const d = await get(`${SA}/sensor-company`); setData(d)
+      setPick({ collector: String(d.sources.collector.company_id ?? ''), excel: String(d.sources.excel.company_id ?? ''), plant: String(d.plant?.company_id ?? '') })
+    } catch (e) { setErr(niceError(e)) }
+  }, [])
+  useEffect(() => { load() }, [load])
+  if (!data) return null                               // not available on a company server
+
+  const save = async (source) => {
+    setBusy(source); setErr(''); setMsg('')
+    try {
+      const r = await put(`${SA}/sensor-company`, { source, company_id: Number(pick[source]) })
+      setMsg(`Saved — ${source === 'collector' ? 'Live collector' : 'Excel reader'} readings now go to ${r.company_name}.`); await load()
+    } catch (e) { setErr(niceError(e)) } finally { setBusy('') }
+  }
+  const savePlant = async () => {
+    if (!window.confirm('Change the main company of this PC?\n\nThe main company owns the temperature engine, the backup button, the imported CSV history and the server e-mail account. The current main company keeps its e-mail account (it is moved into its own settings).')) return
+    setBusy('plant'); setErr(''); setMsg('')
+    try {
+      const r = await put(`${SA}/sensor-company/plant`, { company_id: Number(pick.plant) })
+      setMsg(`Saved — ${r.company_name} is now the main company of this PC.`); await load()
+    } catch (e) { setErr(niceError(e)) } finally { setBusy('') }
+  }
+  const rows = [
+    ['collector', 'Live collector (Pro-Server EX)'],
+    ['excel',     'Excel reader / OPC'],
+  ]
+  return (
+    <div className="sa-card" style={{ marginBottom: 16 }}>
+      <div style={{ fontWeight: 700, fontSize: 15, color: '#111827', marginBottom: 4 }}>Live sources on this PC</div>
+      <p style={{ fontSize: 13, color: '#6B7280', margin: '0 0 12px' }}>
+        Each live source can belong to a different company at the same time (e.g. SRM on the live collector, Elroi on the Excel reader).
+        Readings go only to that company, and only its approved parameters are stored. A company admin also takes a source by switching it on in Settings.
+      </p>
+      <div style={{ display: 'grid', gap: 10 }}>
+        {rows.map(([src, label]) => {
+          const cur = data.sources[src]
+          return (
+            <div key={src} style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+              <span style={{ width: 230, fontSize: 13, fontWeight: 600, color: '#374151' }}>
+                {label} {cur.running ? <Badge label="Running" type="active" /> : <Badge label="Off" type="inactive" />}
+              </span>
+              <select value={pick[src] ?? ''} onChange={e => setPick(p => ({ ...p, [src]: e.target.value }))} style={{ minWidth: 220 }}>
+                {data.companies.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+              </select>
+              <button className="sa-btn primary sm" disabled={!!busy || pick[src] === String(cur.company_id ?? '')} onClick={() => save(src)}>Save</button>
+            </div>
+          )
+        })}
+      </div>
+      <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap', marginTop: 12, paddingTop: 12, borderTop: '1px solid #E5E7EB' }}>
+        <span style={{ width: 230, fontSize: 13, fontWeight: 600, color: '#374151' }}>
+          Main company of this PC {data.plant?.explicit ? null : <span style={{ fontWeight: 400, color: '#9CA3AF' }}>(oldest company)</span>}
+        </span>
+        <select value={pick.plant ?? ''} onChange={e => setPick(p => ({ ...p, plant: e.target.value }))} style={{ minWidth: 220 }}>
+          {data.companies.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+        </select>
+        <button className="sa-btn primary sm" disabled={!!busy || pick.plant === String(data.plant?.company_id ?? '')} onClick={savePlant}>Save</button>
+      </div>
+      {msg && <div style={{ fontSize: 13, color: '#059669', marginTop: 8 }}>{msg}</div>}
+      {err && <div style={{ fontSize: 13, color: '#DC2626', marginTop: 8 }}>{err}</div>}
+    </div>
+  )
+}
+
+function TailscaleCard() {
+  const [data, setData] = useState(null)
+  const [url,  setUrl]  = useState('')
+  const [msg,  setMsg]  = useState('')
+  const [err,  setErr]  = useState('')
+  const [busy, setBusy] = useState(false)
+
+  const load = useCallback(async () => {
+    try { const d = await get(`${SA}/tailscale`); setData(d); setUrl(d.invite_url || '') } catch (e) { setErr(niceError(e)) }
+  }, [])
+  useEffect(() => { load() }, [load])
+  if (!data) return null                                  // main server only
+
+  const save = async () => {
+    setBusy(true); setErr(''); setMsg('')
+    try { await put(`${SA}/tailscale`, { url: url.trim() }); setMsg(url.trim() ? 'Saved. Every company server now shows this link to its admins.' : 'Link removed.'); await load() }
+    catch (e) { setErr(niceError(e)) } finally { setBusy(false) }
+  }
+  const ts = data.tailscale || {}
+  const label = !ts.installed ? 'Not installed on this computer' : ts.running ? `Connected · ${ts.ip || ''}` : ts.state === 'needs_login' ? 'Installed — sign in needed' : 'Installed — turned off'
+  return (
+    <div className="sa-card" style={{ marginBottom: 16 }}>
+      <div style={{ fontWeight: 700, fontSize: 15, color: '#111827', marginBottom: 4 }}>Tailscale — how company servers and phones reach this server</div>
+      <p style={{ fontSize: 13, color: '#6B7280', margin: '0 0 10px' }}>
+        This computer: <strong>{label}</strong>{data.hub_address ? <> · company servers pair with <strong>{data.hub_address}</strong></> : null}
+      </p>
+      <p style={{ fontSize: 13, color: '#6B7280', margin: '0 0 6px' }}>
+        Paste a Tailscale <strong>share link</strong> for this computer. Every company server shows it to its admins (with the steps) as a notification, so they can join once.
+      </p>
+      <ol style={{ fontSize: 12, color: '#6B7280', margin: '0 0 10px', paddingLeft: 18, lineHeight: 1.6 }}>
+        <li>Open the Tailscale admin console → <strong>Machines</strong> → this computer → <strong>Share…</strong> → copy the link. Switch on <em>Reusable link</em> to let several companies use it (up to 1,000 times).</li>
+        <li>Still on Machines: open this computer&apos;s menu and choose <strong>Disable key expiry</strong>, so the main server never drops off.</li>
+        <li>A link not used within 30 days expires; create a new one when you onboard the next company. Once a company has accepted, it stays connected until you revoke it.</li>
+      </ol>
+      <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+        <input value={url} onChange={e => setUrl(e.target.value)} placeholder="https://login.tailscale.com/admin/invite/…" style={{ flex: 1, minWidth: 260 }} />
+        <button className="sa-btn primary sm" disabled={busy} onClick={save}>Save link</button>
+      </div>
+      {msg && <div style={{ fontSize: 13, color: '#059669', marginTop: 8 }}>{msg}</div>}
+      {err && <div style={{ fontSize: 13, color: '#DC2626', marginTop: 8 }}>{err}</div>}
+    </div>
+  )
+}
+
+function PasswordCard() {
+  const [cur, setCur] = useState('')
+  const [nw,  setNw]  = useState('')
+  const [nw2, setNw2] = useState('')
+  const [msg, setMsg] = useState('')
+  const [err, setErr] = useState('')
+  const [busy, setBusy] = useState(false)
+  const submit = async () => {
+    setErr(''); setMsg('')
+    if (nw !== nw2) { setErr('The two new passwords are different'); return }
+    setBusy(true)
+    try {
+      await post(`${SA}/change-password`, { current_password: cur, new_password: nw })
+      setMsg('Password changed. Your other sign-ins were signed out.'); setCur(''); setNw(''); setNw2('')
+    } catch (e) { setErr(niceError(e)) } finally { setBusy(false) }
+  }
+  return (
+    <div className="sa-card" style={{ marginBottom: 16 }}>
+      <div style={{ fontWeight: 700, fontSize: 15, color: '#111827', marginBottom: 4 }}>Super Admin password</div>
+      <p style={{ fontSize: 13, color: '#6B7280', margin: '0 0 10px' }}>
+        10 or more characters with a capital, a small letter, a number and a symbol. Keep it private and do not reuse it between laptops.
+      </p>
+      <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+        <input type="password" autoComplete="current-password" placeholder="Current password" value={cur} onChange={e => setCur(e.target.value)} style={{ minWidth: 200 }} />
+        <input type="password" autoComplete="new-password" placeholder="New password" value={nw} onChange={e => setNw(e.target.value)} style={{ minWidth: 200 }} />
+        <input type="password" autoComplete="new-password" placeholder="Repeat new password" value={nw2} onChange={e => setNw2(e.target.value)} style={{ minWidth: 200 }} />
+        <button className="sa-btn primary sm" disabled={busy || !cur || !nw || !nw2} onClick={submit}>Change password</button>
+      </div>
+      {msg && <div style={{ fontSize: 13, color: '#059669', marginTop: 8 }}>{msg}</div>}
+      {err && <div style={{ fontSize: 13, color: '#DC2626', marginTop: 8 }}>{err}</div>}
+    </div>
+  )
+}
+
 function ConfigTab() {
-  const [subTab,      setSubTab]      = useState('thresholds')
+  const [subTab,      setSubTab]      = useState('parameters')
   const [thresholds,  setThresholds]  = useState(null)
-  const [templates,   setTemplates]   = useState([])
-  const [companies,   setCompanies]   = useState([])
-  const [selCompany,  setSelCompany]  = useState('')
-  const [compCfg,     setCompCfg]     = useState([])
   const [loading,     setLoading]     = useState(false)
   const [error,       setError]       = useState('')
   const [toast,       setToast]       = useState('')
@@ -2822,28 +3214,6 @@ function ConfigTab() {
   // Threshold form
   const [tHigh, setTHigh] = useState('')
   const [tLow,  setTLow]  = useState('')
-
-  // Template form
-  const [tmName, setTmName] = useState('')
-  const [tmHigh, setTmHigh] = useState('')
-  const [tmLow,  setTmLow]  = useState('')
-  const [tmDesc, setTmDesc] = useState('')
-
-  // Company config form
-  const [ccField,  setCcField]  = useState('')
-  const [ccValue,  setCcValue]  = useState('')
-  const [ccLocked, setCcLocked] = useState(false)
-
-  // Alert routing
-  const [rtCompany, setRtCompany] = useState('')
-  const [rtData,    setRtData]    = useState({})
-  const [rtLoading, setRtLoading] = useState(false)
-
-  // Escalation policy
-  const [epCompany,  setEpCompany]  = useState('')
-  const [epPolicy,   setEpPolicy]   = useState(null)
-  const [epLoading,  setEpLoading]  = useState(false)
-  const [epSaving,   setEpSaving]   = useState(false)
 
   // Parameters sub-tab
   const [paramsData,    setParamsData]    = useState([])  // [{id, name, sampling_interval_seconds, parameters:[...]}]
@@ -2860,29 +3230,15 @@ function ConfigTab() {
     setParamsLoading(true)
     get(`${CFG}/companies-params`)
       .then(setParamsData)
-      .catch(e => setError(e.message))
+      .catch(e => setError(niceError(e)))
       .finally(() => setParamsLoading(false))
   }, [])
 
   const loadThresholds = useCallback(() =>
-    get(`${CFG}/thresholds`).then(d => { setThresholds(d); setTHigh(d.temp_high); setTLow(d.temp_low) }).catch(e => setError(e.message))
+    get(`${CFG}/thresholds`).then(d => { setThresholds(d); setTHigh(d.temp_high); setTLow(d.temp_low) }).catch(e => setError(niceError(e)))
   , [])
 
-  const loadTemplates = useCallback(() =>
-    get(`${CFG}/templates`).then(setTemplates).catch(e => setError(e.message))
-  , [])
-
-  const loadCompanies = useCallback(() =>
-    get(`${SA}/companies`).then(setCompanies).catch(() => {})
-  , [])
-
-  const loadCompCfg = useCallback((cid) => {
-    if (!cid) { setCompCfg([]); return }
-    get(`${CFG}/companies/${cid}/config`).then(setCompCfg).catch(e => setError(e.message))
-  }, [])
-
-  useEffect(() => { loadThresholds(); loadTemplates(); loadCompanies(); loadParams() }, [loadThresholds, loadTemplates, loadCompanies, loadParams])
-  useEffect(() => { loadCompCfg(selCompany) }, [selCompany, loadCompCfg])
+  useEffect(() => { loadThresholds(); loadParams() }, [loadThresholds, loadParams])
 
   const handleSetThresholds = async (e) => {
     e.preventDefault(); setError('')
@@ -2894,132 +3250,22 @@ function ConfigTab() {
       await post(`${CFG}/thresholds`, { temp_high: h, temp_low: l })
       await loadThresholds()
       showToast('Global thresholds updated')
-    } catch (e) { setError(e.message) }
+    } catch (e) { setError(niceError(e)) }
     finally { setLoading(false) }
-  }
-
-  const handleCreateTemplate = async (e) => {
-    e.preventDefault(); setError('')
-    const h = parseFloat(tmHigh), l = parseFloat(tmLow)
-    if (!tmName.trim()) { setError('Name is required'); return }
-    if (isNaN(h) || isNaN(l)) { setError('Enter valid numbers'); return }
-    if (l >= h) { setError('Low must be less than High'); return }
-    try {
-      setLoading(true)
-      await post(`${CFG}/templates`, { name: tmName.trim(), temp_high: h, temp_low: l, description: tmDesc.trim() || null })
-      setTmName(''); setTmHigh(''); setTmLow(''); setTmDesc('')
-      await loadTemplates()
-      showToast('Template created')
-    } catch (e) { setError(e.message) }
-    finally { setLoading(false) }
-  }
-
-  const handleApplyTemplate = async (id, name) => {
-    if (!window.confirm(`Apply template "${name}" as global thresholds?`)) return
-    setError('')
-    try {
-      await post(`${CFG}/templates/${id}/apply`)
-      await loadThresholds()
-      showToast(`Template "${name}" applied globally`)
-    } catch (e) { setError(e.message) }
-  }
-
-  const handleDeleteTemplate = async (id, name) => {
-    if (!window.confirm(`Delete template "${name}"?`)) return
-    setError('')
-    try {
-      await del(`${CFG}/templates/${id}`)
-      await loadTemplates()
-      showToast('Template deleted')
-    } catch (e) { setError(e.message) }
-  }
-
-  const handleSetCompCfg = async (e) => {
-    e.preventDefault(); setError('')
-    if (!selCompany) { setError('Select a company'); return }
-    if (!ccField.trim()) { setError('Field name is required'); return }
-    try {
-      setLoading(true)
-      await post(`${CFG}/companies/${selCompany}/config`, { field: ccField.trim(), value: ccValue, locked: ccLocked })
-      setCcField(''); setCcValue(''); setCcLocked(false)
-      loadCompCfg(selCompany)
-      showToast('Config saved')
-    } catch (e) { setError(e.message) }
-    finally { setLoading(false) }
-  }
-
-  const handleRemoveCompCfg = async (field) => {
-    if (!window.confirm(`Remove "${field}" override?`)) return
-    try {
-      await del(`${CFG}/companies/${selCompany}/config/${encodeURIComponent(field)}`)
-      loadCompCfg(selCompany)
-      showToast('Override removed')
-    } catch (e) { setError(e.message) }
-  }
-
-  const loadRouting = useCallback((cid) => {
-    if (!cid) { setRtData({}); return }
-    setRtLoading(true)
-    get(`${SA}/config/routing/${cid}`)
-      .then(rows => {
-        const map = {}
-        rows.forEach(r => { map[r.severity] = r })
-        setRtData(map)
-      })
-      .catch(() => {})
-      .finally(() => setRtLoading(false))
-  }, [])
-
-  const saveRouting = async (severity, row) => {
-    if (!rtCompany) return
-    try {
-      await patch(`${SA}/config/routing/${rtCompany}/${severity}`, {
-        use_email:      row.use_email,
-        use_sms:        row.use_sms,
-        use_push:       row.use_push,
-        use_escalation: row.use_escalation ?? 0,
-      })
-      showToast(`${severity} routing saved`)
-    } catch (e) { setError(e.message) }
-  }
-
-  const loadPolicy = useCallback((cid) => {
-    if (!cid) { setEpPolicy(null); return }
-    setEpLoading(true)
-    get(`${SA}/escalation/policy/${cid}`)
-      .then(d => setEpPolicy({
-        enabled:                 d.enabled                 ?? 1,
-        initial_wait_minutes:    d.initial_wait_minutes    ?? 5,
-        repeat_interval_minutes: d.repeat_interval_minutes ?? 10,
-        max_escalations:         d.max_escalations         ?? 3,
-        notify_super_admin:      d.notify_super_admin      ?? 0,
-      }))
-      .catch(e => setError(e.message))
-      .finally(() => setEpLoading(false))
-  }, [])
-
-  const savePolicy = async () => {
-    if (!epCompany || !epPolicy) return
-    setEpSaving(true)
-    try {
-      await patch(`${SA}/escalation/policy/${epCompany}`, epPolicy)
-      showToast('Escalation policy saved')
-    } catch (e) { setError(e.message) }
-    finally { setEpSaving(false) }
   }
 
   const SUB_TABS = [
-    { id: 'parameters', label: 'Parameters'          },
-    { id: 'thresholds', label: 'Global Thresholds'   },
-    { id: 'templates',  label: 'Templates'            },
-    { id: 'company',    label: 'Company Config'       },
-    { id: 'routing',    label: 'Alert Routing'        },
-    { id: 'escalation', label: 'Escalation Policy'   },
+    { id: 'parameters', label: 'Parameters'        },
+    { id: 'thresholds', label: 'Global Thresholds' },
   ]
 
   return (
     <>
       {toast && <div style={{ position:'fixed', top:20, right:20, background:'#D1FAE5', color:'#065F46', padding:'10px 18px', borderRadius:8, fontWeight:600, fontSize:13, zIndex:2000 }}>{toast}</div>}
+
+      <SensorOwnerCard />
+      <TailscaleCard />
+      <PasswordCard />
 
       {/* Sub-tab strip */}
       <div style={{ display:'flex', gap:8, marginBottom:20 }}>
@@ -3083,306 +3329,6 @@ function ConfigTab() {
         </div>
       )}
 
-      {/* ── Templates ──────────────────────────────────────────────── */}
-      {subTab === 'templates' && (
-        <div className="sa-cfg-grid">
-          <div className="sa-card">
-            <h2 className="sa-card-title">Create Template</h2>
-            <form onSubmit={handleCreateTemplate}>
-              <div className="sa-form-group">
-                <label>Name</label>
-                <input className="sa-input" value={tmName} onChange={e => setTmName(e.target.value)} placeholder="e.g. Industrial Cold Chain" />
-              </div>
-              <div className="sa-cfg-row">
-                <div className="sa-form-group">
-                  <label>Temp High (°C)</label>
-                  <input className="sa-input" type="number" step="0.1" value={tmHigh} onChange={e => setTmHigh(e.target.value)} />
-                </div>
-                <div className="sa-form-group">
-                  <label>Temp Low (°C)</label>
-                  <input className="sa-input" type="number" step="0.1" value={tmLow} onChange={e => setTmLow(e.target.value)} />
-                </div>
-              </div>
-              <div className="sa-form-group">
-                <label>Description (optional)</label>
-                <input className="sa-input" value={tmDesc} onChange={e => setTmDesc(e.target.value)} placeholder="Brief description…" />
-              </div>
-              <button className="sa-btn primary" type="submit" disabled={loading} style={{ marginTop:4 }}>
-                {loading ? 'Creating…' : '+ Create Template'}
-              </button>
-            </form>
-          </div>
-
-          <div className="sa-card">
-            <h2 className="sa-card-title">Saved Templates ({templates.length})</h2>
-            {templates.length === 0
-              ? <p style={{ color:'#6B7280', fontSize:13 }}>No templates yet.</p>
-              : <div className="sa-table-wrap">
-                  <table className="sa-table">
-                    <thead><tr><th>Name</th><th>High</th><th>Low</th><th>Created</th><th>Actions</th></tr></thead>
-                    <tbody>
-                      {templates.map(t => (
-                        <tr key={t.id}>
-                          <td>
-                            <span style={{ fontWeight:600 }}>{t.name}</span>
-                            {t.description && <div style={{ fontSize:11, color:'#6B7280' }}>{t.description}</div>}
-                          </td>
-                          <td style={{ color:'#EF4444', fontWeight:600 }}>{t.temp_high} °C</td>
-                          <td style={{ color:'#3B82F6', fontWeight:600 }}>{t.temp_low} °C</td>
-                          <td style={{ fontSize:11, color:'#6B7280' }}>{new Date(t.created_at).toLocaleDateString()}</td>
-                          <td>
-                            <div style={{ display:'flex', gap:6 }}>
-                              <button className="sa-btn sm primary" onClick={() => handleApplyTemplate(t.id, t.name)}>Apply</button>
-                              <button className="sa-btn sm danger"  onClick={() => handleDeleteTemplate(t.id, t.name)}>Delete</button>
-                            </div>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-            }
-          </div>
-        </div>
-      )}
-
-      {/* ── Escalation Policy ──────────────────────────────────────── */}
-      {subTab === 'escalation' && (
-        <div className="sa-cfg-grid">
-          <div className="sa-card">
-            <h2 className="sa-card-title">Escalation Policy</h2>
-            <p style={{ fontSize: 13, color: '#6B7280', marginBottom: 16 }}>
-              If an alert is not acknowledged within the initial wait time,
-              subscribers will be re-notified at the configured interval.
-            </p>
-            <div className="sa-form-group">
-              <label>Company</label>
-              <select className="sa-input" value={epCompany}
-                onChange={e => { setEpCompany(e.target.value); loadPolicy(e.target.value) }}>
-                <option value="">— select company —</option>
-                {companies.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
-              </select>
-            </div>
-
-            {!epCompany ? (
-              <p style={{ color: '#9CA3AF', fontSize: 13 }}>Select a company to configure its escalation policy.</p>
-            ) : epLoading ? (
-              <p style={{ color: '#9CA3AF', fontSize: 13 }}>Loading…</p>
-            ) : epPolicy && (
-              <>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 14, marginBottom: 20 }}>
-
-                  <label style={{ display: 'flex', alignItems: 'center', gap: 10, fontSize: 13, color: '#374151' }}>
-                    <input type="checkbox" checked={!!epPolicy.enabled}
-                      onChange={e => setEpPolicy(p => ({ ...p, enabled: e.target.checked ? 1 : 0 }))} />
-                    <span><strong>Enabled</strong> — re-notify unacknowledged alerts</span>
-                  </label>
-
-                  <div className="sa-cfg-row" style={{ gap: 12 }}>
-                    <div className="sa-form-group" style={{ flex: 1 }}>
-                      <label>Initial wait (minutes)</label>
-                      <input type="number" className="sa-input" min={1} max={1440}
-                        value={epPolicy.initial_wait_minutes}
-                        onChange={e => setEpPolicy(p => ({ ...p, initial_wait_minutes: Number(e.target.value) }))} />
-                      <span style={{ fontSize: 11, color: '#9CA3AF' }}>
-                        How long to wait before first re-notification
-                      </span>
-                    </div>
-                    <div className="sa-form-group" style={{ flex: 1 }}>
-                      <label>Repeat every (minutes)</label>
-                      <input type="number" className="sa-input" min={1} max={1440}
-                        value={epPolicy.repeat_interval_minutes}
-                        onChange={e => setEpPolicy(p => ({ ...p, repeat_interval_minutes: Number(e.target.value) }))} />
-                      <span style={{ fontSize: 11, color: '#9CA3AF' }}>
-                        Interval between subsequent re-notifications
-                      </span>
-                    </div>
-                    <div className="sa-form-group" style={{ flex: 1 }}>
-                      <label>Max escalations</label>
-                      <input type="number" className="sa-input" min={1} max={10}
-                        value={epPolicy.max_escalations}
-                        onChange={e => setEpPolicy(p => ({ ...p, max_escalations: Number(e.target.value) }))} />
-                      <span style={{ fontSize: 11, color: '#9CA3AF' }}>
-                        Stop re-notifying after this many attempts
-                      </span>
-                    </div>
-                  </div>
-
-                  <label style={{ display: 'flex', alignItems: 'center', gap: 10, fontSize: 13, color: '#374151' }}>
-                    <input type="checkbox" checked={!!epPolicy.notify_super_admin}
-                      onChange={e => setEpPolicy(p => ({ ...p, notify_super_admin: e.target.checked ? 1 : 0 }))} />
-                    <span><strong>Notify super admin</strong> on final escalation (requires super admin email configured)</span>
-                  </label>
-                </div>
-
-                <div style={{ padding: '10px 14px', background: '#F3F4F6', borderRadius: 6, fontSize: 12, color: '#6B7280', marginBottom: 16 }}>
-                  With these settings: re-notify after <strong>{epPolicy.initial_wait_minutes} min</strong>,
-                  then every <strong>{epPolicy.repeat_interval_minutes} min</strong>,
-                  up to <strong>{epPolicy.max_escalations}</strong> time(s).
-                </div>
-
-                <button className="sa-btn primary" onClick={savePolicy} disabled={epSaving}>
-                  {epSaving ? 'Saving…' : 'Save Policy'}
-                </button>
-              </>
-            )}
-          </div>
-        </div>
-      )}
-
-      {/* ── Alert Routing ──────────────────────────────────────────── */}
-      {subTab === 'routing' && (
-        <div className="sa-cfg-grid">
-          <div className="sa-card">
-            <h2 className="sa-card-title">Alert Channel Routing</h2>
-            <p style={{ fontSize: 13, color: '#6B7280', marginBottom: 16 }}>
-              Control which channels fire for each severity level. Changes take effect on the next alert.
-            </p>
-            <div className="sa-form-group">
-              <label>Company</label>
-              <select className="sa-input" value={rtCompany}
-                onChange={e => { setRtCompany(e.target.value); loadRouting(e.target.value) }}>
-                <option value="">— select company —</option>
-                {companies.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
-              </select>
-            </div>
-
-            {!rtCompany ? (
-              <p style={{ color: '#9CA3AF', fontSize: 13 }}>Select a company to view its routing rules.</p>
-            ) : rtLoading ? (
-              <p style={{ color: '#9CA3AF', fontSize: 13 }}>Loading…</p>
-            ) : (
-              <div className="sa-table-wrap">
-                <table className="sa-table">
-                  <thead>
-                    <tr>
-                      <th>Severity</th>
-                      <th style={{ textAlign: 'center' }}>Email</th>
-                      <th style={{ textAlign: 'center' }}>SMS</th>
-                      <th style={{ textAlign: 'center' }}>Push</th>
-                      <th></th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {['WARNING', 'CRITICAL', 'EMERGENCY'].map(sev => {
-                      const defaults = { use_email: 1, use_sms: sev !== 'WARNING' ? 1 : 0, use_push: 1, use_escalation: 0 }
-                      const row = rtData[sev] ?? defaults
-                      const sevColor = sev === 'EMERGENCY' ? '#EF4444' : sev === 'CRITICAL' ? '#F59E0B' : '#6366F1'
-                      return (
-                        <tr key={sev}>
-                          <td>
-                            <span style={{ fontWeight: 600, fontSize: 12, color: sevColor }}>
-                              {sev}
-                            </span>
-                          </td>
-                          <td style={{ textAlign: 'center' }}>
-                            <input type="checkbox" checked={!!row.use_email}
-                              onChange={e => setRtData(prev => ({
-                                ...prev,
-                                [sev]: { ...(prev[sev] ?? defaults), use_email: e.target.checked ? 1 : 0 },
-                              }))} />
-                          </td>
-                          <td style={{ textAlign: 'center' }}>
-                            <input type="checkbox" checked={!!row.use_sms}
-                              onChange={e => setRtData(prev => ({
-                                ...prev,
-                                [sev]: { ...(prev[sev] ?? defaults), use_sms: e.target.checked ? 1 : 0 },
-                              }))} />
-                          </td>
-                          <td style={{ textAlign: 'center' }}>
-                            <input type="checkbox" checked={!!row.use_push}
-                              onChange={e => setRtData(prev => ({
-                                ...prev,
-                                [sev]: { ...(prev[sev] ?? defaults), use_push: e.target.checked ? 1 : 0 },
-                              }))} />
-                          </td>
-                          <td>
-                            <button className="sa-btn sm primary"
-                              onClick={() => saveRouting(sev, row)}>
-                              Save
-                            </button>
-                          </td>
-                        </tr>
-                      )
-                    })}
-                  </tbody>
-                </table>
-              </div>
-            )}
-          </div>
-        </div>
-      )}
-
-      {/* ── Company Config ─────────────────────────────────────────── */}
-      {subTab === 'company' && (
-        <div className="sa-cfg-grid">
-          <div className="sa-card">
-            <h2 className="sa-card-title">Set Company Config Override</h2>
-            <div className="sa-form-group">
-              <label>Company</label>
-              <select className="sa-input" value={selCompany} onChange={e => setSelCompany(e.target.value)}>
-                <option value="">— select company —</option>
-                {companies.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
-              </select>
-            </div>
-            {selCompany && (
-              <form onSubmit={handleSetCompCfg}>
-                <div className="sa-cfg-row">
-                  <div className="sa-form-group">
-                    <label>Field</label>
-                    <input className="sa-input" value={ccField} onChange={e => setCcField(e.target.value)}
-                      placeholder="e.g. temp_high, sms_enabled" />
-                  </div>
-                  <div className="sa-form-group">
-                    <label>Value</label>
-                    <input className="sa-input" value={ccValue} onChange={e => setCcValue(e.target.value)}
-                      placeholder="e.g. 85, true, false" />
-                  </div>
-                </div>
-                <label style={{ display:'flex', alignItems:'center', gap:8, fontSize:13, color:'#374151', marginBottom:10 }}>
-                  <input type="checkbox" checked={ccLocked} onChange={e => setCcLocked(e.target.checked)} />
-                  Lock (advisory — marks field as super-admin controlled)
-                </label>
-                <button className="sa-btn primary" type="submit" disabled={loading}>
-                  {loading ? 'Saving…' : 'Save Override'}
-                </button>
-              </form>
-            )}
-          </div>
-
-          <div className="sa-card">
-            <h2 className="sa-card-title">
-              {selCompany
-                ? `Overrides for ${companies.find(c => String(c.id) === String(selCompany))?.name ?? 'Company'}`
-                : 'Select a company'}
-            </h2>
-            {!selCompany
-              ? <p style={{ color:'#6B7280', fontSize:13 }}>Pick a company on the left to see its overrides.</p>
-              : compCfg.length === 0
-                ? <p style={{ color:'#6B7280', fontSize:13 }}>No overrides set.</p>
-                : <div className="sa-table-wrap">
-                    <table className="sa-table">
-                      <thead><tr><th>Field</th><th>Value</th><th>Locked</th><th>Set by</th><th></th></tr></thead>
-                      <tbody>
-                        {compCfg.map(r => (
-                          <tr key={r.id}>
-                            <td style={{ fontFamily:'monospace', fontSize:12 }}>{r.field}</td>
-                            <td style={{ fontFamily:'monospace', fontSize:12 }}>{r.value}</td>
-                            <td>{r.locked ? <span className="sa-approval-tag">Locked</span> : <span style={{ color:'#9CA3AF', fontSize:12 }}>—</span>}</td>
-                            <td style={{ fontSize:12, color:'#6B7280' }}>{r.set_by_name || '—'}</td>
-                            <td>
-                              <button className="sa-btn sm danger" onClick={() => handleRemoveCompCfg(r.field)}>Remove</button>
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-            }
-          </div>
-        </div>
-      )}
-
       {/* ── Parameters ────────────────────────────────────────────────── */}
       {subTab === 'parameters' && (
         <div>
@@ -3412,7 +3358,7 @@ function ConfigTab() {
                         await put(`${CFG}/companies/${co.id}/sampling`, { sampling_interval_seconds: v })
                         showToast(`Sampling interval for ${co.name} saved`)
                         loadParams()
-                      } catch (e) { setError(e.message) }
+                      } catch (e) { setError(niceError(e)) }
                     }}>Save</button>
                 </div>
               </div>
@@ -3468,7 +3414,7 @@ function ConfigTab() {
                                       showToast('Thresholds saved')
                                       setParamEdit(null)
                                       loadParams()
-                                    } catch (e) { setError(e.message) }
+                                    } catch (e) { setError(niceError(e)) }
                                     finally { setParamSaving(false) }
                                   }}>
                                   {paramSaving ? '…' : 'Save'}
@@ -3494,7 +3440,7 @@ function ConfigTab() {
                                         await del(`${CFG}/parameters/${p.id}`)
                                         showToast(`"${p.name}" deleted`)
                                         loadParams()
-                                      } catch (e) { setError(e.message) }
+                                      } catch (e) { setError(niceError(e)) }
                                     }}>Del</button>
                                 )}
                               </td>
@@ -3544,7 +3490,7 @@ function ConfigTab() {
                         setAddParamCo(null)
                         showToast('Parameter added')
                         loadParams()
-                      } catch (e) { setError(e.message) }
+                      } catch (e) { setError(niceError(e)) }
                       finally { setParamSaving(false) }
                     }}>
                     {paramSaving ? 'Adding…' : 'Add'}
@@ -3696,7 +3642,7 @@ function AnalyticsTab() {
       setAnomalies(anm); setTrends(tnd)
       setAnomalyLog(Array.isArray(alog) ? alog : [])
       setCompanies(h.map(c => ({ id: c.company_id, name: c.company_name })))
-    } catch (e) { setError(e.message) }
+    } catch (e) { setError(niceError(e)) }
     finally { setLoading(false) }
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -3719,7 +3665,7 @@ function AnalyticsTab() {
         get(withDates(`${base}/charts/ack-time`, from, to)),
       ])
       setCoCharts({ breach, heatmap, subResp, delivery, summary, sevDist, daily, hourly, weekly, ackTime })
-    } catch (e) { setCoError(e.message) }
+    } catch (e) { setCoError(niceError(e)) }
     finally { setCoLoading(false) }
   }, [])
 
@@ -3735,7 +3681,7 @@ function AnalyticsTab() {
         get(`${ANL}/health-scores`),
       ])
       setFleetData({ param, dailyTrend, breachCounts, benchmarks, healthScores })
-    } catch (e) { setFleetError(e.message) }
+    } catch (e) { setFleetError(niceError(e)) }
     finally { setFleetLoading(false) }
   }, [])
 
@@ -4131,8 +4077,8 @@ function AnalyticsTab() {
                             <td>{r.total_alerts}</td>
                             <td>{r.acked}</td>
                             <td>
-                              <span style={{ fontWeight: 700, color: r.ack_rate_pct >= 80 ? '#22C55E' : r.ack_rate_pct >= 50 ? '#F59E0B' : '#EF4444' }}>
-                                {r.ack_rate_pct ?? '—'}%
+                              <span style={{ fontWeight: 700, color: r.ack_rate_pct == null ? '#9CA3AF' : r.ack_rate_pct >= 80 ? '#22C55E' : r.ack_rate_pct >= 50 ? '#F59E0B' : '#EF4444' }}>
+                                {r.ack_rate_pct != null ? `${r.ack_rate_pct}%` : '—'}
                               </span>
                             </td>
                             <td style={{ color: '#6B7280' }}>{r.avg_ack_minutes ?? '—'}</td>
@@ -4209,20 +4155,20 @@ function CommsTab() {
 
   const loadMessages = useCallback(() => {
     if (!selCompany) return
-    get(`${COMMS}/messages/${selCompany}`).then(setMessages).catch(e => setError(e.message))
+    get(`${COMMS}/messages/${selCompany}`).then(setMessages).catch(e => setError(niceError(e)))
   }, [selCompany])
 
   const loadScheduled = useCallback(() =>
-    get(`${COMMS}/broadcast/scheduled`).then(setScheduled).catch(e => setError(e.message)), [])
+    get(`${COMMS}/broadcast/scheduled`).then(setScheduled).catch(e => setError(niceError(e))), [])
 
   const loadNotes = useCallback(() => {
     if (!selCompany) return
-    get(`${COMMS}/notes/${selCompany}`).then(setNotes).catch(e => setError(e.message))
+    get(`${COMMS}/notes/${selCompany}`).then(setNotes).catch(e => setError(niceError(e)))
   }, [selCompany])
 
   const loadChecklist = useCallback(() => {
     if (!selCompany) return
-    get(`${COMMS}/onboarding/${selCompany}`).then(setChecklist).catch(e => setError(e.message))
+    get(`${COMMS}/onboarding/${selCompany}`).then(setChecklist).catch(e => setError(niceError(e)))
   }, [selCompany])
 
   useEffect(() => { loadCompanies() }, [loadCompanies])
@@ -4257,7 +4203,7 @@ function CommsTab() {
       setMsgSubj(''); setMsgBody('')
       loadMessages()
       showToast('Message sent')
-    } catch (e) { setError(e.message) }
+    } catch (e) { setError(niceError(e)) }
     finally { setLoading(false) }
   }
 
@@ -4276,7 +4222,7 @@ function CommsTab() {
       setSchTitle(''); setSchMessage(''); setSchDateTime('')
       loadScheduled()
       showToast('Broadcast scheduled')
-    } catch (e) { setError(e.message) }
+    } catch (e) { setError(niceError(e)) }
     finally { setLoading(false) }
   }
 
@@ -4285,7 +4231,7 @@ function CommsTab() {
     try {
       await del(`${COMMS}/broadcast/scheduled/${id}`)
       loadScheduled(); showToast('Broadcast cancelled')
-    } catch (e) { setError(e.message) }
+    } catch (e) { setError(niceError(e)) }
   }
 
   // ── Notes ─────────────────────────────────────────────────────
@@ -4297,7 +4243,7 @@ function CommsTab() {
     try {
       await post(`${COMMS}/notes/${selCompany}`, { content: noteText.trim() })
       setNoteText(''); loadNotes(); showToast('Note saved')
-    } catch (e) { setError(e.message) }
+    } catch (e) { setError(niceError(e)) }
     finally { setLoading(false) }
   }
 
@@ -4306,7 +4252,7 @@ function CommsTab() {
     try {
       await put(`${COMMS}/notes/${editNote.id}`, { content: editNote.content.trim() })
       setEditNote(null); loadNotes(); showToast('Note updated')
-    } catch (e) { setError(e.message) }
+    } catch (e) { setError(niceError(e)) }
   }
 
   const handleDeleteNote = async (id) => {
@@ -4314,7 +4260,7 @@ function CommsTab() {
     try {
       await del(`${COMMS}/notes/${id}`)
       loadNotes(); showToast('Note deleted')
-    } catch (e) { setError(e.message) }
+    } catch (e) { setError(niceError(e)) }
   }
 
   // ── Onboarding ────────────────────────────────────────────────
@@ -4326,7 +4272,7 @@ function CommsTab() {
     try {
       await post(`${COMMS}/onboarding/${selCompany}`, { item: newItem.trim() })
       setNewItem(''); loadChecklist(); showToast('Item added')
-    } catch (e) { setError(e.message) }
+    } catch (e) { setError(niceError(e)) }
     finally { setLoading(false) }
   }
 
@@ -4334,7 +4280,7 @@ function CommsTab() {
     try {
       await patch(`${COMMS}/onboarding/${id}`, { done: !done })
       loadChecklist()
-    } catch (e) { setError(e.message) }
+    } catch (e) { setError(niceError(e)) }
   }
 
   const handleRemoveItem = async (id) => {
@@ -4342,7 +4288,7 @@ function CommsTab() {
     try {
       await del(`${COMMS}/onboarding/${id}`)
       loadChecklist(); showToast('Item removed')
-    } catch (e) { setError(e.message) }
+    } catch (e) { setError(niceError(e)) }
   }
 
   const SUB_TABS = [
@@ -4584,657 +4530,6 @@ function CommsTab() {
   )
 }
 
-// ─── Phase 6: Billing Tab ────────────────────────────────────────────────────
-
-const BIL = '/api/super-admin/billing'
-
-function UsageBar({ used, max, label }) {
-  const pct   = max > 0 ? Math.min(100, Math.round(used / max * 100)) : 0
-  const color  = pct >= 90 ? '#EF4444' : pct >= 70 ? '#F59E0B' : '#22C55E'
-  return (
-    <div style={{ marginBottom: 10 }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, marginBottom: 3 }}>
-        <span style={{ color: '#6B7280' }}>{label}</span>
-        <span style={{ fontWeight: 600, color }}>{used} / {max} ({pct}%)</span>
-      </div>
-      <div style={{ height: 6, background: '#E5E7EB', borderRadius: 3, overflow: 'hidden' }}>
-        <div style={{ width: `${pct}%`, height: '100%', background: color, borderRadius: 3, transition: 'width .3s' }} />
-      </div>
-    </div>
-  )
-}
-
-function TierBadge({ name }) {
-  const colors = {
-    Free:         { bg: '#F3F4F6', color: '#6B7280' },
-    Basic:        { bg: '#DBEAFE', color: '#1D4ED8' },
-    Professional: { bg: '#EDE9FE', color: '#6D28D9' },
-    Enterprise:   { bg: '#FEF3C7', color: '#92400E' },
-  }
-  const style = colors[name] || { bg: '#F3F4F6', color: '#374151' }
-  return (
-    <span style={{ display: 'inline-block', padding: '2px 10px', borderRadius: 12,
-      background: style.bg, color: style.color, fontSize: 12, fontWeight: 700 }}>
-      {name || 'No tier'}
-    </span>
-  )
-}
-
-function BillingTab() {
-  const [subTab,    setSubTab]    = useState('overview')
-  const [overview,  setOverview]  = useState([])
-  const [tiers,     setTiers]     = useState([])
-  const [companies, setCompanies] = useState([])
-  const [selCo,     setSelCo]     = useState('')
-  const [subData,   setSubData]   = useState(null)
-  const [report,    setReport]    = useState(null)
-  const [loading,   setLoading]   = useState(false)
-  const [error,     setError]     = useState('')
-  const [toast,     setToast]     = useState('')
-
-  // Tier form
-  const [tmName, setTmName] = useState('')
-  const [tmMaxS, setTmMaxS] = useState('')
-  const [tmMaxD, setTmMaxD] = useState('')
-  const [tmChan, setTmChan] = useState('sms,email,push')
-  const [tmPrice,setTmPrice]= useState('')
-  const [tmDesc, setTmDesc] = useState('')
-
-  // Quota override form
-  const [qMaxS, setQMaxS] = useState('')
-  const [qMaxD, setQMaxD] = useState('')
-  const [qChan, setQChan] = useState('')
-
-  // Usage dashboard
-  const [usageData,    setUsageData]    = useState([])
-  const [grantModal,   setGrantModal]   = useState(null)  // { company_id, company_name }
-  const [grantChannel, setGrantChannel] = useState('sms')
-  const [grantAmount,  setGrantAmount]  = useState('')
-
-  // Task 3: month/year-parameterized monthly report
-  const now = new Date()
-  const [reportMonth,   setReportMonth]   = useState(String(now.getMonth() + 1))
-  const [reportYear,    setReportYear]    = useState(String(now.getFullYear()))
-  const [monthlyReport, setMonthlyReport] = useState(null)
-  const [reportLoading, setReportLoading] = useState(false)
-
-  const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(''), 3000) }
-
-  const loadOverview = useCallback(() =>
-    get(`${BIL}/overview`).then(setOverview).catch(e => setError(e.message)), [])
-  const loadTiers = useCallback(() =>
-    get(`${BIL}/tiers`).then(setTiers).catch(e => setError(e.message)), [])
-  const loadCompanies = useCallback(() =>
-    get(`${SA}/companies`).then(setCompanies).catch(() => {}), [])
-
-  const loadSubData = useCallback(() => {
-    if (!selCo) return
-    setLoading(true)
-    Promise.all([
-      get(`${BIL}/companies/${selCo}/subscription`),
-      get(`${BIL}/companies/${selCo}/usage`),
-    ]).then(([sub, usage]) => setSubData({ sub, usage }))
-      .catch(e => setError(e.message))
-      .finally(() => setLoading(false))
-  }, [selCo])
-
-  const loadReport = useCallback(() => {
-    if (!selCo) return
-    setLoading(true)
-    get(`${BIL}/report/${selCo}`)
-      .then(setReport)
-      .catch(e => setError(e.message))
-      .finally(() => setLoading(false))
-  }, [selCo])
-
-  const loadUsage = useCallback(() => {
-    get(`${BIL}/usage`)
-      .then(d => setUsageData(Array.isArray(d) ? d : []))
-      .catch(e => setError(e.message))
-  }, [])
-
-  const loadMonthlyReport = useCallback(() => {
-    if (!selCo) return
-    setReportLoading(true)
-    setMonthlyReport(null)
-    get(`${BIL}/companies/${selCo}/report?month=${reportMonth}&year=${reportYear}`)
-      .then(setMonthlyReport)
-      .catch(e => setError(e.message))
-      .finally(() => setReportLoading(false))
-  }, [selCo, reportMonth, reportYear])
-
-  useEffect(() => { loadCompanies(); loadTiers() }, [loadCompanies, loadTiers])
-  useEffect(() => {
-    setError('')
-    if (subTab === 'overview')      loadOverview()
-    if (subTab === 'subscription')  loadSubData()
-    if (subTab === 'report')        loadReport()
-    if (subTab === 'usage')         loadUsage()
-  }, [subTab, selCo, loadOverview, loadSubData, loadReport, loadUsage])
-
-  // Auto-refresh usage dashboard every 5 minutes
-  useEffect(() => {
-    if (subTab !== 'usage') return
-    const t = setInterval(loadUsage, 300_000)
-    return () => clearInterval(t)
-  }, [subTab, loadUsage])
-
-  const handleCreateTier = async (e) => {
-    e.preventDefault(); setError('')
-    if (!tmName.trim() || !tmMaxS || !tmMaxD) { setError('Name, max subscribers and max devices are required'); return }
-    setLoading(true)
-    try {
-      await post(`${BIL}/tiers`, {
-        name: tmName.trim(), max_subscribers: parseInt(tmMaxS), max_devices: parseInt(tmMaxD),
-        allowed_channels: tmChan.trim(), price_monthly: tmPrice.trim() || '0',
-        description: tmDesc.trim() || null,
-      })
-      setTmName(''); setTmMaxS(''); setTmMaxD(''); setTmChan('sms,email,push'); setTmPrice(''); setTmDesc('')
-      loadTiers(); showToast('Tier created')
-    } catch (e) { setError(e.message) }
-    finally { setLoading(false) }
-  }
-
-  const handleDeleteTier = async (id, name) => {
-    if (!window.confirm(`Delete tier "${name}"? This cannot be undone.`)) return
-    try {
-      await del(`${BIL}/tiers/${id}`)
-      loadTiers(); showToast('Tier deleted')
-    } catch (e) { setError(e.message) }
-  }
-
-  const handleAssignTier = async (tierId) => {
-    if (!selCo) { setError('Select a company first'); return }
-    const tier = tiers.find(t => t.id === tierId)
-    if (!window.confirm(`Assign "${tier?.name}" to this company? This will update their quotas.`)) return
-    setError('')
-    try {
-      await post(`${BIL}/companies/${selCo}/subscribe`, { tier_id: tierId })
-      loadSubData(); loadOverview(); showToast(`Tier "${tier?.name}" assigned`)
-    } catch (e) { setError(e.message) }
-  }
-
-  const handleSetQuota = async (e) => {
-    e.preventDefault(); setError('')
-    if (!selCo) { setError('Select a company'); return }
-    const body = {}
-    if (qMaxS.trim()) body.max_subscribers  = parseInt(qMaxS)
-    if (qMaxD.trim()) body.max_devices       = parseInt(qMaxD)
-    if (qChan.trim()) body.allowed_channels  = qChan.trim()
-    if (!Object.keys(body).length) { setError('Enter at least one quota field'); return }
-    setLoading(true)
-    try {
-      await post(`${BIL}/companies/${selCo}/quota`, body)
-      setQMaxS(''); setQMaxD(''); setQChan('')
-      loadSubData(); showToast('Quota updated')
-    } catch (e) { setError(e.message) }
-    finally { setLoading(false) }
-  }
-
-  const handleSnapshot = async () => {
-    if (!selCo) return
-    try {
-      await post(`${BIL}/companies/${selCo}/usage/snapshot`)
-      loadSubData(); showToast('Snapshot captured')
-    } catch (e) { setError(e.message) }
-  }
-
-  const CompanyPicker = ({ label = 'Company' }) => (
-    <div className="sa-form-group" style={{ marginBottom: 16 }}>
-      <label>{label}</label>
-      <select className="sa-input" value={selCo} onChange={e => { setSelCo(e.target.value); setError('') }}>
-        <option value="">— select company —</option>
-        {companies.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
-      </select>
-    </div>
-  )
-
-  const SUB_TABS = [
-    { id: 'overview',      label: 'Overview'        },
-    { id: 'tiers',         label: 'Tiers'           },
-    { id: 'subscription',  label: 'Subscription'    },
-    { id: 'report',        label: 'Monthly Report'  },
-    { id: 'usage',         label: 'Usage Dashboard' },
-  ]
-
-  return (
-    <>
-      {toast && <div style={{ position:'fixed', top:20, right:20, background:'#D1FAE5', color:'#065F46', padding:'10px 18px', borderRadius:8, fontWeight:600, fontSize:13, zIndex:2000 }}>{toast}</div>}
-
-      <div style={{ display:'flex', gap:8, marginBottom:20, flexWrap:'wrap' }}>
-        {SUB_TABS.map(s => (
-          <button key={s.id} className={`sa-btn ${subTab === s.id ? 'primary' : 'secondary'}`}
-            onClick={() => { setSubTab(s.id); setError('') }}>{s.label}</button>
-        ))}
-      </div>
-
-      {error && <Err msg={error} />}
-
-      {/* ── Overview ────────────────────────────────────────────── */}
-      {subTab === 'overview' && (
-        <div className="sa-card">
-          <h2 className="sa-card-title">All Companies — Billing Overview</h2>
-          <div className="sa-table-wrap">
-            <table className="sa-table">
-              <thead><tr>
-                <th>Company</th><th>Tier</th><th>Subscribers</th>
-                <th>Alerts (30d)</th><th>Open Alerts</th><th>Channels</th>
-              </tr></thead>
-              <tbody>
-                {overview.length === 0
-                  ? <tr><td colSpan={6} className="sa-empty"><Spinner /></td></tr>
-                  : overview.map(r => (
-                      <tr key={r.company_id}>
-                        <td style={{ fontWeight: 600 }}>{r.company_name}</td>
-                        <td><TierBadge name={r.tier_name} /></td>
-                        <td>
-                          <div style={{ minWidth: 140 }}>
-                            <UsageBar used={r.subscribers} max={r.max_subscribers} label="" />
-                          </div>
-                        </td>
-                        <td>{r.alerts_30d}</td>
-                        <td style={{ color: r.open_alerts > 0 ? '#EF4444' : '#22C55E', fontWeight: 600 }}>{r.open_alerts}</td>
-                        <td style={{ fontSize: 11, fontFamily: 'monospace' }}>{r.allowed_channels}</td>
-                      </tr>
-                    ))
-                }
-              </tbody>
-            </table>
-          </div>
-        </div>
-      )}
-
-      {/* ── Tiers ───────────────────────────────────────────────── */}
-      {subTab === 'tiers' && (
-        <div className="sa-cfg-grid">
-          <div className="sa-card">
-            <h2 className="sa-card-title">Create Tier</h2>
-            <form onSubmit={handleCreateTier}>
-              <div className="sa-form-group">
-                <label>Name</label>
-                <input className="sa-input" value={tmName} onChange={e => setTmName(e.target.value)} placeholder="e.g. Starter" />
-              </div>
-              <div className="sa-cfg-row">
-                <div className="sa-form-group">
-                  <label>Max Subscribers</label>
-                  <input className="sa-input" type="number" value={tmMaxS} onChange={e => setTmMaxS(e.target.value)} placeholder="100" />
-                </div>
-                <div className="sa-form-group">
-                  <label>Max Devices</label>
-                  <input className="sa-input" type="number" value={tmMaxD} onChange={e => setTmMaxD(e.target.value)} placeholder="10" />
-                </div>
-              </div>
-              <div className="sa-form-group">
-                <label>Allowed Channels</label>
-                <input className="sa-input" value={tmChan} onChange={e => setTmChan(e.target.value)} placeholder="sms,email,push" />
-              </div>
-              <div className="sa-cfg-row">
-                <div className="sa-form-group">
-                  <label>Price / month ($)</label>
-                  <input className="sa-input" value={tmPrice} onChange={e => setTmPrice(e.target.value)} placeholder="49" />
-                </div>
-                <div className="sa-form-group">
-                  <label>Description</label>
-                  <input className="sa-input" value={tmDesc} onChange={e => setTmDesc(e.target.value)} placeholder="Brief description" />
-                </div>
-              </div>
-              <button className="sa-btn primary" type="submit" disabled={loading} style={{ marginTop: 4 }}>
-                {loading ? 'Creating…' : '+ Create Tier'}
-              </button>
-            </form>
-          </div>
-
-          <div className="sa-card">
-            <h2 className="sa-card-title">Subscription Tiers ({tiers.length})</h2>
-            {tiers.map(t => (
-              <div key={t.id} className="sa-bil-tier-card">
-                <div style={{ display:'flex', justifyContent:'space-between', alignItems:'flex-start', marginBottom:6 }}>
-                  <div>
-                    <TierBadge name={t.name} />
-                    {t.price_monthly && t.price_monthly !== '0' && (
-                      <span style={{ marginLeft:8, fontSize:13, fontWeight:700, color:'#1E1B4B' }}>${t.price_monthly}/mo</span>
-                    )}
-                  </div>
-                  <button className="sa-btn sm danger" onClick={() => handleDeleteTier(t.id, t.name)}>Delete</button>
-                </div>
-                {t.description && <p style={{ fontSize:12, color:'#6B7280', margin:'0 0 8px' }}>{t.description}</p>}
-                <div style={{ display:'flex', gap:16, fontSize:12, color:'#374151' }}>
-                  <span>👤 {t.max_subscribers} subscribers</span>
-                  <span>📡 {t.max_devices} devices</span>
-                  <span style={{ fontFamily:'monospace' }}>{t.allowed_channels}</span>
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
-
-      {/* ── Subscription & Quota ─────────────────────────────────── */}
-      {subTab === 'subscription' && (
-        <div className="sa-cfg-grid">
-          <div className="sa-card">
-            <h2 className="sa-card-title">Assign Tier</h2>
-            <CompanyPicker />
-            {selCo && (
-              <>
-                <p style={{ fontSize:13, color:'#6B7280', marginBottom:12 }}>Click a tier to assign it to this company. This immediately updates the company's subscriber, device, and channel limits.</p>
-                <div style={{ display:'flex', flexDirection:'column', gap:8 }}>
-                  {tiers.map(t => (
-                    <button key={t.id} className="sa-btn secondary"
-                      style={{ textAlign:'left', display:'flex', justifyContent:'space-between', alignItems:'center' }}
-                      onClick={() => handleAssignTier(t.id)}>
-                      <span><TierBadge name={t.name} /> <span style={{ marginLeft:8, fontSize:12, color:'#6B7280' }}>{t.max_subscribers} subs · {t.allowed_channels}</span></span>
-                      {t.price_monthly !== '0' && <span style={{ fontSize:13, fontWeight:700 }}>${t.price_monthly}/mo</span>}
-                    </button>
-                  ))}
-                </div>
-
-                <hr style={{ border:'none', borderTop:'1px solid #E5E7EB', margin:'16px 0' }} />
-                <h3 style={{ fontSize:14, fontWeight:700, color:'#374151', marginBottom:12 }}>Manual Quota Override</h3>
-                <form onSubmit={handleSetQuota}>
-                  <div className="sa-cfg-row">
-                    <div className="sa-form-group">
-                      <label>Max Subscribers</label>
-                      <input className="sa-input" type="number" value={qMaxS} onChange={e => setQMaxS(e.target.value)} placeholder="leave blank to keep" />
-                    </div>
-                    <div className="sa-form-group">
-                      <label>Max Devices</label>
-                      <input className="sa-input" type="number" value={qMaxD} onChange={e => setQMaxD(e.target.value)} placeholder="leave blank to keep" />
-                    </div>
-                  </div>
-                  <div className="sa-form-group">
-                    <label>Allowed Channels</label>
-                    <input className="sa-input" value={qChan} onChange={e => setQChan(e.target.value)} placeholder="sms,email,push" />
-                  </div>
-                  <button className="sa-btn primary" type="submit" disabled={loading}>Apply Override</button>
-                </form>
-              </>
-            )}
-          </div>
-
-          <div className="sa-card">
-            <h2 className="sa-card-title">
-              {selCo && subData ? `${subData.sub?.company_name} — Current Status` : 'Select a company'}
-            </h2>
-            {!selCo
-              ? <p style={{ color:'#6B7280', fontSize:13 }}>Pick a company on the left.</p>
-              : loading
-                ? <Spinner />
-                : subData && <>
-                    <div style={{ marginBottom:16 }}>
-                      <span style={{ fontSize:13, color:'#6B7280', marginRight:8 }}>Current tier:</span>
-                      <TierBadge name={subData.sub?.current_tier?.tier_name ?? 'None'} />
-                    </div>
-                    <UsageBar
-                      used={subData.sub?.usage?.subscribers ?? 0}
-                      max={subData.sub?.quota?.max_subscribers ?? 100}
-                      label="Subscribers" />
-                    <div style={{ fontSize:12, color:'#6B7280', marginBottom:16 }}>
-                      Devices limit: {subData.sub?.quota?.max_devices} ·
-                      Channels: {subData.sub?.quota?.allowed_channels}
-                    </div>
-                    <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:8 }}>
-                      <span style={{ fontSize:14, fontWeight:700, color:'#374151' }}>Usage History</span>
-                      <button className="sa-btn sm secondary" onClick={handleSnapshot}>Capture now</button>
-                    </div>
-                    {subData.usage.length === 0
-                      ? <p style={{ color:'#6B7280', fontSize:12 }}>No snapshots yet.</p>
-                      : <div className="sa-table-wrap">
-                          <table className="sa-table">
-                            <thead><tr><th>Month</th><th>Subscribers</th><th>Admins</th><th>Total Alerts</th></tr></thead>
-                            <tbody>
-                              {subData.usage.map(u => (
-                                <tr key={u.month}>
-                                  <td style={{ fontWeight:600 }}>{u.month}</td>
-                                  <td>{u.subscriber_count}</td>
-                                  <td>{u.admin_count}</td>
-                                  <td>{u.alert_count}</td>
-                                </tr>
-                              ))}
-                            </tbody>
-                          </table>
-                        </div>
-                    }
-                  </>
-            }
-          </div>
-        </div>
-      )}
-
-      {/* ── Monthly Report ──────────────────────────────────────── */}
-      {subTab === 'report' && (
-        <div className="sa-cfg-grid">
-          <div className="sa-card" style={{ gridColumn: '1 / -1' }}>
-            <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:16 }}>
-              <h2 className="sa-card-title" style={{ margin:0 }}>Monthly Report</h2>
-              <div style={{ width:260 }}>
-                <CompanyPicker label="" />
-              </div>
-            </div>
-
-            {!selCo
-              ? <p style={{ color:'#6B7280', fontSize:13 }}>Select a company to generate a report.</p>
-              : loading
-                ? <div style={{ textAlign:'center', padding:40 }}><Spinner /></div>
-                : report && (
-                    <>
-                      <div className="sa-anl-kpi-strip" style={{ gridTemplateColumns:'repeat(5,1fr)', marginBottom:20 }}>
-                        {[
-                          { label:'Tier',         val: report.current_tier?.tier_name ?? 'None', color:'#6366F1' },
-                          { label:'Subscribers',  val: report.live_usage?.subscribers ?? 0,       color:'#3B82F6' },
-                          { label:'Sub Usage',    val: `${report.subscriber_usage_pct}%`,          color: report.subscriber_usage_pct >= 90 ? '#EF4444' : '#22C55E' },
-                          { label:'Open Alerts',  val: report.live_usage?.open_alerts ?? 0,        color: (report.live_usage?.open_alerts ?? 0) > 0 ? '#EF4444' : '#22C55E' },
-                          { label:'30d Alerts',   val: report.live_usage?.alerts_30d ?? 0,          color:'#F59E0B' },
-                        ].map(k => (
-                          <div key={k.label} className="sa-anl-kpi">
-                            <span className="sa-anl-kpi-val" style={{ color:k.color, fontSize:22 }}>{k.val}</span>
-                            <span className="sa-anl-kpi-label">{k.label}</span>
-                          </div>
-                        ))}
-                      </div>
-
-                      <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:20 }}>
-                        <div>
-                          <h3 style={{ fontSize:14, fontWeight:700, color:'#374151', marginBottom:10 }}>Alerts by Severity</h3>
-                          {report.alerts_by_severity.length === 0
-                            ? <p style={{ color:'#6B7280', fontSize:13 }}>No alerts.</p>
-                            : report.alerts_by_severity.map(r => (
-                                <div key={r.severity} style={{ display:'flex', justifyContent:'space-between', padding:'6px 0', borderBottom:'1px solid #F3F4F6', fontSize:13 }}>
-                                  <span style={{ color: r.severity==='EMERGENCY'?'#7F1D1D': r.severity==='CRITICAL'?'#EF4444':'#F59E0B', fontWeight:700 }}>{r.severity}</span>
-                                  <span>{r.cnt}</span>
-                                </div>
-                              ))
-                          }
-                        </div>
-                        <div>
-                          <h3 style={{ fontSize:14, fontWeight:700, color:'#374151', marginBottom:10 }}>Alerts by Month (12m)</h3>
-                          {report.alerts_by_month.length === 0
-                            ? <p style={{ color:'#6B7280', fontSize:13 }}>No data.</p>
-                            : report.alerts_by_month.map(r => (
-                                <div key={r.month} style={{ display:'flex', justifyContent:'space-between', padding:'6px 0', borderBottom:'1px solid #F3F4F6', fontSize:13 }}>
-                                  <span style={{ fontFamily:'monospace' }}>{r.month}</span>
-                                  <span style={{ fontWeight:600 }}>{r.cnt}</span>
-                                </div>
-                              ))
-                          }
-                        </div>
-                      </div>
-
-                      <p style={{ fontSize:11, color:'#9CA3AF', marginTop:16, textAlign:'right' }}>
-                        Generated {new Date(report.generated_at).toLocaleString()}
-                      </p>
-                    </>
-                  )
-            }
-          </div>
-        </div>
-      )}
-      {/* ── Parameterized Monthly Usage (Task 3) ───────────────── */}
-      {subTab === 'report' && selCo && (
-        <div className="sa-card" style={{ marginTop: 16 }}>
-          <div style={{ display:'flex', alignItems:'center', gap:12, marginBottom:16, flexWrap:'wrap' }}>
-            <h2 className="sa-card-title" style={{ margin:0 }}>Usage for Specific Month</h2>
-            <div style={{ display:'flex', gap:8, alignItems:'center' }}>
-              <select value={reportMonth} onChange={e => setReportMonth(e.target.value)}
-                style={{ padding:'4px 8px', borderRadius:6, border:'1px solid #D1D5DB', fontSize:13 }}>
-                {['1','2','3','4','5','6','7','8','9','10','11','12'].map(m => (
-                  <option key={m} value={m}>{new Date(2000, parseInt(m)-1).toLocaleString('default',{month:'long'})}</option>
-                ))}
-              </select>
-              <select value={reportYear} onChange={e => setReportYear(e.target.value)}
-                style={{ padding:'4px 8px', borderRadius:6, border:'1px solid #D1D5DB', fontSize:13 }}>
-                {[...Array(5)].map((_,i) => {
-                  const yr = new Date().getFullYear() - i
-                  return <option key={yr} value={String(yr)}>{yr}</option>
-                })}
-              </select>
-              <button className="sa-btn primary" onClick={loadMonthlyReport} disabled={reportLoading}>
-                {reportLoading ? 'Loading…' : 'Generate'}
-              </button>
-            </div>
-          </div>
-
-          {monthlyReport && (
-            <div>
-              <div className="sa-anl-kpi-strip" style={{ gridTemplateColumns:'repeat(4,1fr)', marginBottom:16 }}>
-                {[
-                  { label:'Total Alerts',        val: monthlyReport.alerts?.total ?? 0,          color:'#6366F1' },
-                  { label:'Critical',             val: monthlyReport.alerts?.critical ?? 0,        color:'#EF4444' },
-                  { label:'Acknowledged',         val: monthlyReport.alerts?.acknowledged ?? 0,    color:'#22C55E' },
-                  { label:'Notifications Sent',   val: monthlyReport.notifications_sent ?? 0,      color:'#F59E0B' },
-                ].map(k => (
-                  <div key={k.label} className="sa-anl-kpi">
-                    <span className="sa-anl-kpi-val" style={{ color:k.color, fontSize:22 }}>{k.val}</span>
-                    <span className="sa-anl-kpi-label">{k.label}</span>
-                  </div>
-                ))}
-              </div>
-
-              <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:16, fontSize:13 }}>
-                <div>
-                  <h3 style={{ fontWeight:700, color:'#374151', marginBottom:8 }}>Quota Usage</h3>
-                  {[
-                    { label:'SMS',   used: monthlyReport.quota?.sms_used,   limit: monthlyReport.quota?.sms_limit   },
-                    { label:'Email', used: monthlyReport.quota?.email_used, limit: monthlyReport.quota?.email_limit },
-                  ].map(q => {
-                    const pct = q.limit > 0 ? Math.round(q.used / q.limit * 100) : 0
-                    const bar = pct >= 95 ? '#EF4444' : pct >= 80 ? '#F59E0B' : '#22C55E'
-                    return (
-                      <div key={q.label} style={{ marginBottom:10 }}>
-                        <div style={{ display:'flex', justifyContent:'space-between', marginBottom:3 }}>
-                          <span>{q.label}</span>
-                          <span style={{ color: bar, fontWeight:600 }}>{q.used}/{q.limit} ({pct}%)</span>
-                        </div>
-                        <div style={{ background:'#F3F4F6', borderRadius:4, height:6 }}>
-                          <div style={{ width:`${Math.min(pct,100)}%`, background: bar, borderRadius:4, height:6 }} />
-                        </div>
-                      </div>
-                    )
-                  })}
-                </div>
-                <div>
-                  <h3 style={{ fontWeight:700, color:'#374151', marginBottom:8 }}>Company Info</h3>
-                  <div style={{ color:'#6B7280', lineHeight:'2em' }}>
-                    <div><b>Tier:</b> {monthlyReport.tier}</div>
-                    <div><b>Active Subscribers:</b> {monthlyReport.subscribers?.active}</div>
-                    <div><b>Period:</b> {new Date(monthlyReport.period?.start).toLocaleDateString()} – {new Date(monthlyReport.period?.end).toLocaleDateString()}</div>
-                  </div>
-                </div>
-              </div>
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* ── Usage Dashboard ─────────────────────────────────────── */}
-      {subTab === 'usage' && (
-        <div className="sa-card">
-          <div style={{ display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:16 }}>
-            <h2 className="sa-card-title" style={{ margin:0 }}>Monthly Quota Usage</h2>
-            <button className="sa-btn secondary" onClick={loadUsage}>↻ Refresh</button>
-          </div>
-          {usageData.length === 0
-            ? <p style={{ color:'#6B7280', fontSize:13 }}><Spinner /></p>
-            : (
-              <div className="sa-table-wrap">
-                <table className="sa-table">
-                  <thead><tr>
-                    <th>Company</th><th>Tier</th>
-                    <th>Subscribers</th><th>SMS</th><th>Email</th>
-                    <th></th>
-                  </tr></thead>
-                  <tbody>
-                    {usageData.map(r => {
-                      const uColor = (pct) =>
-                        pct >= 95 ? '#EF4444' : pct >= 80 ? '#F59E0B' : '#22C55E'
-                      return (
-                        <tr key={r.company_id}>
-                          <td style={{ fontWeight:600 }}>{r.company_name}</td>
-                          <td><TierBadge name={r.tier_name} /></td>
-                          <td style={{ color: uColor(r.subscribers?.percent ?? 0), fontWeight:600 }}>
-                            {r.subscribers?.used ?? '—'} / {r.subscribers?.limit ?? '—'}
-                            {r.subscribers?.limit > 0 && <span style={{ color:'#9CA3AF', fontWeight:400 }}> ({r.subscribers.percent}%)</span>}
-                          </td>
-                          <td style={{ color: uColor(r.sms?.percent ?? 0), fontWeight:600 }}>
-                            {r.sms?.used ?? '—'} / {r.sms?.limit ?? '—'}
-                            {r.sms?.limit > 0 && <span style={{ color:'#9CA3AF', fontWeight:400 }}> ({r.sms.percent}%)</span>}
-                          </td>
-                          <td style={{ color: uColor(r.email?.percent ?? 0), fontWeight:600 }}>
-                            {r.email?.used ?? '—'} / {r.email?.limit ?? '—'}
-                            {r.email?.limit > 0 && <span style={{ color:'#9CA3AF', fontWeight:400 }}> ({r.email.percent}%)</span>}
-                          </td>
-                          <td>
-                            <button className="sa-btn secondary" style={{ fontSize:11, padding:'3px 10px' }}
-                              onClick={() => { setGrantModal({ company_id: r.company_id, company_name: r.company_name }); setGrantChannel('sms'); setGrantAmount('') }}>
-                              Grant Quota
-                            </button>
-                          </td>
-                        </tr>
-                      )
-                    })}
-                  </tbody>
-                </table>
-              </div>
-            )
-          }
-        </div>
-      )}
-
-      {/* ── Grant Quota modal ──────────────────────────────────── */}
-      {grantModal && (
-        <Modal title={`Grant Quota — ${grantModal.company_name}`} onClose={() => setGrantModal(null)}
-          footer={
-            <button className="sa-btn primary" onClick={async () => {
-              if (!grantAmount || isNaN(parseInt(grantAmount))) { setError('Enter a valid amount'); return }
-              try {
-                await post(`${BIL}/companies/${grantModal.company_id}/grant-quota`,
-                  { channel: grantChannel, extra_amount: parseInt(grantAmount) })
-                setGrantModal(null)
-                loadUsage()
-                showToast(`Granted ${grantAmount} ${grantChannel} quota`)
-              } catch (e) { setError(e.message) }
-            }}>Confirm Grant</button>
-          }
-        >
-          <div className="sa-form-group">
-            <label>Channel</label>
-            <select className="sa-input" value={grantChannel} onChange={e => setGrantChannel(e.target.value)}>
-              <option value="sms">SMS</option>
-              <option value="email">Email</option>
-              <option value="push">Push</option>
-            </select>
-          </div>
-          <div className="sa-form-group">
-            <label>Amount to grant (decrements current usage by this number)</label>
-            <input className="sa-input" type="number" min="1" value={grantAmount}
-              onChange={e => setGrantAmount(e.target.value)} placeholder="e.g. 50" />
-          </div>
-        </Modal>
-      )}
-    </>
-  )
-}
-
 // ─── Phase 7: Security Tab ───────────────────────────────────────────────────
 
 const SEC = '/api/super-admin/security'
@@ -5262,7 +4557,7 @@ function SecurityTab() {
     }
     get(map[subTab])
       .then(d => setData(Array.isArray(d) ? d : []))
-      .catch(e => setErr(e.message))
+      .catch(e => setErr(niceError(e)))
       .finally(() => setBusy(false))
   }, [])
 
@@ -5272,46 +4567,46 @@ function SecurityTab() {
     if (!form.ip) return
     post(`${SEC}/ip-whitelist`, { ip: form.ip, note: form.note || undefined })
       .then(() => { setMsg('IP added'); setForm({}); load(sub) })
-      .catch(e => setErr(e.message))
+      .catch(e => setErr(niceError(e)))
   }
 
   const handleDelWhitelist = (id) => {
     del(`${SEC}/ip-whitelist/${id}`)
       .then(() => { setMsg('IP removed'); load(sub) })
-      .catch(e => setErr(e.message))
+      .catch(e => setErr(niceError(e)))
   }
 
   const handleUpsertRetention = () => {
     if (!form.entity || !form.max_days) return
     post(`${SEC}/retention`, { entity: form.entity, max_days: parseInt(form.max_days), enabled: 1 })
       .then(() => { setMsg('Policy saved'); setForm({}); load(sub) })
-      .catch(e => setErr(e.message))
+      .catch(e => setErr(niceError(e)))
   }
 
   const handleCreateIncident = () => {
     if (!form.title) return
     post(`${SEC}/incidents`, { title: form.title, description: form.description, severity: form.severity || 'medium' })
       .then(() => { setMsg('Incident created'); setForm({}); load(sub) })
-      .catch(e => setErr(e.message))
+      .catch(e => setErr(niceError(e)))
   }
 
   const handleResolveIncident = (id) => {
     put(`${SEC}/incidents/${id}`, { status: 'resolved' })
       .then(() => { setMsg('Marked resolved'); load(sub) })
-      .catch(e => setErr(e.message))
+      .catch(e => setErr(niceError(e)))
   }
 
   const handleEnforce2FA = (adminId, currentEnforced) => {
     post('/api/auth/admin/2fa/enforce', { admin_id: adminId, enforced: !currentEnforced })
       .then(() => { setMsg(currentEnforced ? '2FA enforcement removed' : '2FA enforced'); load('2FA Mgmt') })
-      .catch(e => setErr(e.message))
+      .catch(e => setErr(niceError(e)))
   }
 
   const handleDisable2FA = (adminId) => {
     if (!window.confirm(`Disable 2FA for admin #${adminId}?`)) return
     post('/api/auth/admin/2fa/disable', { admin_id: adminId, enforced: false })
       .then(() => { setMsg('2FA disabled'); load('2FA Mgmt') })
-      .catch(e => setErr(e.message))
+      .catch(e => setErr(niceError(e)))
   }
 
   const handleExportAudit = () => {
@@ -5600,7 +4895,7 @@ function OnboardingTab() {
     setError('')
     get(`${OB}/${selCo}`)
       .then(setProgress)
-      .catch(e => setError(e.message))
+      .catch(e => setError(niceError(e)))
       .finally(() => setLoading(false))
   }, [selCo])
 
@@ -5612,7 +4907,7 @@ function OnboardingTab() {
       await post(`${OB}/${selCo}/init`, {})
       showToast('Onboarding initialised')
       loadProgress()
-    } catch (e) { setError(e.message) }
+    } catch (e) { setError(niceError(e)) }
     finally { setLoading(false) }
   }
 
@@ -5621,7 +4916,7 @@ function OnboardingTab() {
     try {
       await patch(`${OB}/${selCo}/step/${stepIndex}?status=${newStatus}`, {})
       loadProgress()
-    } catch (e) { setError(e.message) }
+    } catch (e) { setError(niceError(e)) }
   }
 
   const handleTestBreach = async () => {
@@ -5786,7 +5081,7 @@ function AuditTab() {
     })
     get(`${AUDIT_SA}/audit-log?${params}`)
       .then(d => { setRows(d.rows || []); setTotal(d.total || 0) })
-      .catch(e => setError(e.message))
+      .catch(e => setError(niceError(e)))
       .finally(() => setLoading(false))
   }, [days, category, severity, pageOffset])
 
@@ -6024,7 +5319,7 @@ function AdvancedAuditExplorer() {
       setPages(d.pages || 1)
       setPage(p)
       setCats(d.categories || [])
-    } catch (e) { setError(e.message) }
+    } catch (e) { setError(niceError(e)) }
     finally { setLoading(false) }
   }, [search, company, category, severity, dateFrom, dateTo])
 
@@ -6214,7 +5509,7 @@ function MaintenanceTab() {
       await del(`${SA}/maintenance-windows/${w.id}`)
       showToast('Window cancelled')
       load()
-    } catch (e) { alert(e.message) }
+    } catch (e) { window.alert(niceError(e)) }
   }
 
   const handleApply = async () => {
@@ -6224,7 +5519,7 @@ function MaintenanceTab() {
       setApplyResult(res)
       showToast(`Applied: ${res.entered_maintenance.length} entered, ${res.exited_maintenance.length} exited`)
       load()
-    } catch (e) { alert(e.message) }
+    } catch (e) { window.alert(niceError(e)) }
     finally { setApplying(false) }
   }
 
@@ -6392,7 +5687,7 @@ function ScheduleWindowModal({ companies, onClose, onSaved }) {
       })
       onSaved?.()
       onClose()
-    } catch (e) { setError(e.message) }
+    } catch (e) { setError(niceError(e)) }
     finally { setLoading(false) }
   }
 
@@ -6479,7 +5774,7 @@ function IncidentsTab() {
       await patch(`${SA}/incidents/${inc.id}`, { status: newStatus })
       showToast(`#${inc.id} marked ${newStatus}`)
       load()
-    } catch (e) { alert(e.message) }
+    } catch (e) { window.alert(niceError(e)) }
   }
 
   const handleDelete = async (inc) => {
@@ -6488,7 +5783,7 @@ function IncidentsTab() {
       await del(`${SA}/incidents/${inc.id}`)
       showToast('Incident deleted')
       load()
-    } catch (e) { alert(e.message) }
+    } catch (e) { window.alert(niceError(e)) }
   }
 
   if (detailId !== null) {
@@ -6628,7 +5923,7 @@ function IncidentDetailView({ incidentId, onBack, onRefresh, admins }) {
       setNote('')
       load()
       onRefresh?.()
-    } catch (e) { alert(e.message) }
+    } catch (e) { window.alert(niceError(e)) }
     finally { setAddingNote(false) }
   }
 
@@ -6636,7 +5931,7 @@ function IncidentDetailView({ incidentId, onBack, onRefresh, admins }) {
     try {
       await patch(`${SA}/incidents/${incidentId}`, fields)
       load(); onRefresh?.()
-    } catch (e) { alert(e.message) }
+    } catch (e) { window.alert(niceError(e)) }
   }
 
   if (loading) return <><button className="sa-back-btn" onClick={onBack}>← Back to Incidents</button><Spinner /></>
@@ -6814,7 +6109,7 @@ function NewIncidentModal({ companies, admins, onClose, onSaved }) {
       })
       onSaved?.()
       onClose()
-    } catch (e) { setError(e.message) }
+    } catch (e) { setError(niceError(e)) }
     finally { setLoading(false) }
   }
 
@@ -6902,7 +6197,7 @@ function SLALeaderboard() {
   const load = useCallback(async () => {
     setLoading(true); setError('')
     try { setData(await get(`${SA}/sla/leaderboard?days=${days}`)) }
-    catch (e) { setError(e.message) }
+    catch (e) { setError(niceError(e)) }
     finally { setLoading(false) }
   }, [days])
 
@@ -7029,7 +6324,7 @@ function AnomalyDetectionPanel() {
     setLoading(true); setError('')
     try {
       setData(await get(`${SA}/anomaly-detection?window=${window_d}&baseline=${baseline}&threshold=${threshold}`))
-    } catch (e) { setError(e.message) }
+    } catch (e) { setError(niceError(e)) }
     finally { setLoading(false) }
   }, [window_d, baseline, threshold])
 
@@ -7168,7 +6463,7 @@ function PlatformHealthTab() {
   const load = useCallback(async () => {
     setLoading(true); setError('')
     try { setData(await get(`${SA}/platform/health`)) }
-    catch (e) { setError(e.message) }
+    catch (e) { setError(niceError(e)) }
     finally { setLoading(false) }
   }, [])
 
@@ -7294,7 +6589,7 @@ function CrossCompanyAnalyticsPanel() {
       ])
       setTopRows(top.rows || [])
       setPlatform(plat)
-    } catch (e) { setError(e.message) }
+    } catch (e) { setError(niceError(e)) }
     finally { setLoading(false) }
   }, [activeMetric, days])
 
@@ -7306,7 +6601,7 @@ function CrossCompanyAnalyticsPanel() {
     try {
       const d = await get(`${SA}/analytics/compare?ids=${encodeURIComponent(compareIds)}&days=${days}`)
       setCompareData(Array.isArray(d) ? d : [])
-    } catch (e) { setError(e.message) }
+    } catch (e) { setError(niceError(e)) }
     finally { setLoading(false) }
   }
 
@@ -7511,7 +6806,7 @@ function ParameterTemplatesPanel() {
       await del(`${SA}/parameter-templates/${tpl.id}`)
       showToast(`Template "${tpl.name}" deleted`)
       load()
-    } catch (e) { alert(e.message) }
+    } catch (e) { window.alert(niceError(e)) }
   }
 
   const handleApply = async (tpl) => {
@@ -7630,7 +6925,7 @@ function NewTemplateModal({ onClose, onSaved }) {
       })
       onSaved?.()
       onClose()
-    } catch (e) { setError(e.message) }
+    } catch (e) { setError(niceError(e)) }
     finally { setLoading(false) }
   }
 
@@ -7718,7 +7013,7 @@ function EscalationRulesPanel() {
       const res = await post(`${SA}/escalation-rules/evaluate`, {})
       setEvalResult(res)
       showToast(`Evaluated ${res.evaluated} rules — ${res.triggered.length} triggered`)
-    } catch (e) { alert(e.message) }
+    } catch (e) { window.alert(niceError(e)) }
     finally { setEvalLoading(false) }
   }
 
@@ -7837,7 +7132,7 @@ function EscalationRuleModal({ rule, companies, onClose, onSaved }) {
       else         await post(`${SA}/escalation-rules`, body)
       onSaved?.()
       onClose()
-    } catch (e) { setError(e.message) }
+    } catch (e) { setError(niceError(e)) }
     finally { setLoading(false) }
   }
 
@@ -7927,7 +7222,7 @@ function SystemLogsTab() {
       if (!data.exists) { setError('Log file not found on server.'); return }
       setLogLines(data.lines || [])
       setError('')
-    } catch (e) { setError(e.message) }
+    } catch (e) { setError(niceError(e)) }
     finally { setLoading(false) }
   }, [paused, levelFilter, search, lineCount])
 
@@ -8026,11 +7321,9 @@ const TABS = [
   { id: 'config',     label: 'Config',         Icon: Wrench          },
   { id: 'analytics',  label: 'Analytics',      Icon: BarChart2       },
   { id: 'comms',      label: 'Communications', Icon: Megaphone       },
-  { id: 'billing',    label: 'Billing',        Icon: CreditCard      },
   { id: 'security',   label: 'Security',       Icon: ShieldAlert     },
   { id: 'parameters', label: 'Parameters',     Icon: Layers          },
   { id: 'alerts',     label: 'Alerts',         Icon: AlertTriangle   },
-  { id: 'live',       label: 'Live Feed',      Icon: Activity        },
   { id: 'broadcast',  label: 'Broadcast',      Icon: Megaphone       },
   { id: 'sessions',   label: 'Sessions',       Icon: KeyRound        },
   { id: 'onboarding', label: 'Onboarding',     Icon: BookOpen        },
@@ -8099,6 +7392,8 @@ export default function SuperAdmin() {
   }
 
   const handleLogout = () => {
+    const tok = sessionStorage.getItem('admin_token')     // end the sign-in on the server too
+    if (tok) fetch('/api/admin/logout', { method: 'POST', headers: { Authorization: `Bearer ${tok}` } }).catch(() => {})
     sessionStorage.removeItem('admin_token')
     sessionStorage.removeItem('adminVerified')
     sessionStorage.removeItem('admin_username')
@@ -8118,12 +7413,10 @@ export default function SuperAdmin() {
       case 'config':     return <ConfigTab />
       case 'analytics':  return <AnalyticsTab />
       case 'comms':      return <CommsTab />
-      case 'billing':    return <BillingTab />
       case 'security':   return <SecurityTab />
       case 'admins':     return <AdminsTab onViewDetail={(id) => setAdminDetail(id)} />
       case 'parameters': return <CompanyParametersTab />
       case 'alerts':    return <AlertsTab />
-      case 'live':      return <LiveFeedTab />
       case 'broadcast': return <BroadcastTab />
       case 'sessions':  return <SessionsTab />
       case 'onboarding': return <OnboardingTab />

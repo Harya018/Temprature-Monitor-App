@@ -1,0 +1,219 @@
+=====================================================================
+  SENTINELEDGE  -  USER MANUAL
+  Live monitoring, alerts and reports for your plant
+=====================================================================
+
+THIS FOLDER
+-----------
+  FIRST_TIME_SETUP.bat  Run ONCE on a new PC - one click: installs
+                   everything, creates the database and the Super Admin,
+                   opens port 5000, starts SentinelEdge and saves the
+                   database passwords in "SentinelEdge PASSWORDS - KEEP
+                   PRIVATE.txt" (the Super Admin password is never saved).
+  START.bat        Starts SentinelEdge and opens the dashboard.
+  STOP.bat         Stops SentinelEdge.
+  USER MANUAL.txt  This file.
+  Manuals\         Installing on a new laptop, Super Admin guide,
+                   Excel live reader guide. Manuals\Handover has the
+                   Company Admin Manual to give to each company.
+  sentineledge\    The program itself. You do not need to open it.
+
+
+1. STARTING AND STOPPING
+------------------------
+  * Double-click START.bat. A black window shows the steps; after
+    about 10-20 seconds your browser opens the dashboard at
+        http://localhost:5000
+    Keep the black windows open while you work (you can minimise them).
+  * To stop, double-click STOP.bat.
+  * If the page does not open, type  http://localhost:5000  in the
+    browser yourself.
+
+
+2. SIGNING IN
+-------------
+  * Company admin:   http://localhost:5000
+      Use the name and password Super Admin created for you.
+  * Super Admin:     http://localhost:5000/super-admin/login
+      Only for the person who manages companies (see Manuals).
+  * Wrong password 5 times locks the sign-in for 15 minutes.
+
+
+3. WHAT YOU SEE
+---------------
+  Your company sees ONLY its own data: its own parameters, readings,
+  alerts, people (subscribers), logs and reports. Nothing from any
+  other company is shown, and yours is never shown to them.
+
+  Dashboard      One tile per parameter your company has (for example
+                 only pH, or temperature and pH). Values update live.
+  Alerts         Every alert, newest first. Acknowledge an alert here
+                 (or from SMS / the mobile app) to stop reminders.
+  Analytics      Charts of your parameters over time.
+  Live Logs      Your company's activity as it happens: readings,
+                 alerts, acknowledgements, sign-ins, settings changes.
+  Reports        Daily summary, and EXPORT of all readings between any
+                 two dates (CSV or JSON). Nothing is ever deleted
+                 automatically, so old dates can always be exported.
+  History        Past readings and alerts.
+  Subscribers    The people who get alerts (SMS / e-mail / app) and in
+                 which order: 1st contact, 2nd contact, ...
+  Health         Whether SentinelEdge is working. The Sensor card shows what
+                 feeds your dashboard: "Live" (the live collector is sending),
+                 "Excel Live" (new rows are arriving in your Excel file),
+                 "No Data" (a source is on but nothing new is arriving; the
+                 card says why) or "No Live Source" (none switched on in
+                 Settings). Nothing is ever shown from old or demo data.
+  Settings       See section 4.
+
+
+4. SETTINGS
+-----------
+  Parameter limits & alerts
+      One row for each parameter your company has. Set the Minimum
+      and Maximum. A reading below the minimum or above the maximum
+      raises an alert and notifies your subscribers.
+      "Alerts" off = readings are still recorded, but no alerts are
+      sent for that parameter. Press Save on the row you changed.
+
+  Alert messages (SMS and e-mail)
+      Each parameter has its own SMS and its own e-mail. Write what your
+      people should read when that parameter goes out of range:
+        * SMS   one text box (an SMS is cut at 160 characters).
+        * E-mail   a subject and a text.
+      Click a placeholder such as {value} to put it in the text; it is
+      replaced by the real figure when the alert is sent:
+        {name} person   {company}   {parameter}   {unit}   {value} reading
+        {limit} limit crossed   {direction} above / below   {severity}
+        {time} when (IST)   {min} {max} allowed range
+      Example SMS:  {company}: {parameter} is {value}{unit}, {direction}
+                    the limit {limit}{unit}. {time}
+      Buttons: Preview (shows it with example figures), Use example,
+      Save, and Standard message (go back to the built-in wording; an
+      empty box always means the standard message). Press "Send test
+      alert" above to receive the real message on your own phone.
+      Each company's wording is its own: nobody else sees or uses it.
+
+  Tailscale (connecting this computer to the main server)
+      Company servers send their data to the main (Super Admin) server, and
+      phones reach company servers, over Tailscale (a free private network).
+      When you sign in, a notification in the bell (top right) tells you if
+      Tailscale is missing, signed out or turned off, or if the main server
+      cannot be reached. Settings > Tailscale shows the status and these steps:
+        1. Download Tailscale for Windows from tailscale.com/download and
+           install it.
+        2. Click its icon near the clock > Log in (Google or Microsoft
+           account).
+        3. Open the invitation link from Super Admin (Settings > Tailscale
+           shows it) and press Accept.
+        4. In the Tailscale menu turn on "Run unattended" and "Start on
+           login", so it stays on after a restart.
+        5. Settings > Tailscale > Check again: it turns green.
+      An invitation or share link works once per person and expires if not
+      used within 30 days; ask Super Admin for a new one.
+
+  Phone app (the same app for every company)
+      Everyone installs the same SentinelEdge app. It builds its screens
+      from YOUR company: one card per parameter you added, with your own
+      limits and units, your live values and your alerts. A company with
+      only pH sees only pH; another with temperature and pressure sees
+      those. Nothing is built into the app.
+        1. Settings > Phone app shows the server address to type
+           (this computer's address and port, e.g. 192.168.1.20:5000;
+           a Tailscale address works from anywhere).
+        2. In the app type that address, then the person's name and PIN
+           (set the PIN under Subscribers). A company admin can sign in
+           with the admin name and password.
+        3. The phone must reach this computer: same Wi-Fi, or Tailscale /
+           VPN when away. The address is remembered; to switch to another
+           company's server, sign out in the app and enter the new address.
+      The app shows the alert, lets the person press Acknowledge, and
+      receives alerts as notifications.
+
+  SMS (text messages) - needs a GSM modem
+      SMS alerts are sent by a GSM modem plugged into this computer:
+      the SIM7600 (SIM7600 EI 4G modem, connected by USB), the module
+      SentinelEdge is built and tested with. You need:
+        1. the SIM7600 USB modem with its antenna;
+        2. a SIM card in it that can send SMS (plan or balance, signal,
+           PIN lock off);
+        3. the modem's USB driver installed (Device Manager > Ports
+           (COM & LPT) shows its COM ports, one of them an "AT" port).
+      Plug the modem in, then restart (STOP.bat, START.bat). Settings >
+      SMS Configuration shows "Connected" when the modem answers; press
+      Send Test (to someone on your Subscribers list) to check. One modem
+      serves the whole computer; each company's SMS goes only to its own
+      subscribers. SMS is charged by the SIM's plan, 160 characters each.
+      Without the modem only e-mail and app alerts are sent.
+
+  E-mail account for alerts
+      Alert e-mails and the daily report are sent from YOUR company's
+      e-mail account. Nothing is set by default: until you add one, no
+      e-mail is sent for your company, and a company never sends from
+      another company's mailbox. The main company of the computer has its
+      account written into the server's settings file (.env) automatically
+      when you press Save (no restart, no editing the file); every other
+      company's account is stored encrypted.
+      Choose the provider, type the e-mail address and the APP PASSWORD
+      (not your normal password), press Save, then "Send test e-mail".
+      The password is stored encrypted and is never shown again.
+      How to get an app password:
+        Gmail:      myaccount.google.com > Security > turn on 2-Step
+                    Verification > myaccount.google.com/apppasswords >
+                    name it SentinelEdge > Create > copy the 16 letters.
+        Outlook.com / Hotmail:  account.microsoft.com > Security >
+                    Advanced security options > turn on two-step
+                    verification > App passwords > Create.
+        Yahoo:      Account Info > Account security > turn on two-step
+                    verification > Generate app password.
+        Microsoft 365 (work): ask your IT administrator to allow
+                    "Authenticated SMTP" for the mailbox (and an app
+                    password if two-step verification is on).
+        Other:      ask your IT department for the outgoing (SMTP) server,
+                    port (587 STARTTLS or 465 SSL) and password.
+      If a test fails, the page says why (usually: use the app password,
+      not the normal one). SentinelEdge only sends from the account; it
+      never reads it.
+
+  Add Parameter / Manage Parameters
+      To add a new parameter (for example Flow) press Request
+      Parameter. It appears on your dashboard after Super Admin
+      approves it. Removing a parameter also needs approval.
+      Only APPROVED parameters are ever recorded.
+
+  Excel Live Reader  (how live data comes in)
+      Point it at the Excel file your instrument / logger writes, then
+      switch the Excel reader ON. Each new row that is added to the
+      file is recorded once, checked against your limits and shown
+      live. Rows that were already in the file are not imported.
+      Full details: Manuals\3 - Excel live reader.txt
+
+  E-mail / SMS configuration
+      Send a test e-mail or SMS to check that alerts can reach people
+      (only to people already on your Subscribers list).
+
+  Signed in as / Company
+      Shows who is signed in and for which company.
+
+
+5. EVERYDAY TIPS
+----------------
+  * The dashboard shows "No data" until the first new reading arrives.
+  * The clock, server uptime and "x seconds ago" times count live.
+  * Alerts for each parameter repeat at most once every 5 minutes
+    while the value stays outside the limits.
+  * Admin accounts and passwords are created and changed only by
+    Super Admin. Ask Super Admin if you forget your password.
+
+
+6. PROBLEMS
+-----------
+  Page will not open        Run STOP.bat, then START.bat again.
+  Old screens after update  Press Ctrl + F5 in the browser.
+  No live readings          Settings > Excel Live Reader: check the
+                            file path, press Test File, make sure the
+                            Excel reader is ON, and that the column
+                            names match your parameter names.
+  Not receiving SMS/e-mail  Settings > SMS / E-mail: send a test.
+                            Check Subscribers has the right numbers.
+=====================================================================

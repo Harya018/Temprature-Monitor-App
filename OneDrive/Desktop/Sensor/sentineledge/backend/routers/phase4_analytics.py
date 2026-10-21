@@ -1,5 +1,5 @@
-"""
-routers/phase4_analytics.py — Phase 4: Intelligence & Analytics.
+﻿"""
+routers/phase4_analytics.py â€” Phase 4: Intelligence & Analytics.
 
 All routes protected by require_super_admin.
 
@@ -46,7 +46,7 @@ from fastapi.responses import JSONResponse
 
 
 from database.connection import execute_read
-from routers.super_admin import require_super_admin
+from routers.super_admin_v2 import require_super_admin
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -54,7 +54,7 @@ logger = get_logger(__name__)
 router = APIRouter(prefix="/api/super-admin/analytics", tags=["Super Admin Analytics"])
 
 
-# ─── Health score helper ─────────────────────────────────────────────────────
+# â”€â”€â”€ Health score helper â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def _compute_health(company_id: int) -> dict:
     """
@@ -119,10 +119,10 @@ def _compute_health(company_id: int) -> dict:
     }
 
 
-# ─── Simple linear regression (pure Python, no numpy) ────────────────────────
+# â”€â”€â”€ Simple linear regression (pure Python, no numpy) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def _linear_regression(values: list[float]) -> tuple[float, float]:
-    """Return (slope, intercept) for evenly-spaced x = 0, 1, 2, …"""
+    """Return (slope, intercept) for evenly-spaced x = 0, 1, 2, â€¦"""
     n = len(values)
     if n < 2:
         return 0.0, values[0] if values else 0.0
@@ -136,7 +136,7 @@ def _linear_regression(values: list[float]) -> tuple[float, float]:
     return slope, intercept
 
 
-# ─── Routes ──────────────────────────────────────────────────────────────────
+# â”€â”€â”€ Routes â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @router.get("/summary", summary="Global platform summary")
 async def get_summary(_: dict = Depends(require_super_admin)):
@@ -146,7 +146,11 @@ async def get_summary(_: dict = Depends(require_super_admin)):
     emerg_alerts  = execute_read(
         "SELECT COUNT(*) AS cnt FROM alerts WHERE severity='EMERGENCY' AND acknowledged=0"
     )
-    total_readings = execute_read("SELECT COUNT(*) AS cnt FROM readings")
+    # readings has millions of rows — an exact COUNT(*) is a full scan (~8 s);
+    # the planner's estimate is accurate enough for a dashboard figure.
+    total_readings = execute_read(
+        "SELECT GREATEST(reltuples, 0)::BIGINT AS cnt FROM pg_class WHERE relname = 'readings' AND relnamespace = current_schema()::regnamespace"
+    )
     active_admins  = execute_read(
         "SELECT COUNT(*) AS cnt FROM admins WHERE is_active = 1 AND role != 'super_admin'"
     )
@@ -293,7 +297,7 @@ async def get_anomalies(_: dict = Depends(require_super_admin)):
         """
     )
     if len(rows) < 5:
-        return {"anomalies": [], "note": "Not enough readings for anomaly detection (need ≥ 5)"}
+        return {"anomalies": [], "note": "Not enough readings for anomaly detection (need â‰¥ 5)"}
 
     values = [r["temperature"] for r in rows]
     mean   = sum(values) / len(values)
@@ -336,7 +340,7 @@ async def get_trends(_: dict = Depends(require_super_admin)):
         """
     )
     if len(rows) < 3:
-        return {"error": "Not enough readings for trend analysis (need ≥ 3)"}
+        return {"error": "Not enough readings for trend analysis (need â‰¥ 3)"}
 
     # Most recent last for chronological regression
     rows_asc = list(reversed(rows))
@@ -384,9 +388,9 @@ async def get_trends(_: dict = Depends(require_super_admin)):
     }
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# Section A — Per-company chart endpoints
-# ═══════════════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# Section A â€” Per-company chart endpoints
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 def _dt_clause(col: str, from_date: Optional[str], to_date: Optional[str]) -> tuple[str, list]:
     """Return a WHERE fragment and param list for a date range filter on a timestamptz column."""
@@ -474,27 +478,43 @@ async def company_subscriber_response(
     if err:
         return err
     dt_clause, dt_params = _dt_clause("a.timestamp::timestamptz", from_date, to_date)
+    # REAL figures per person: only people who are switched on today; "alerts" = the alerts that person
+    # was actually notified about (a successful SMS / e-mail / push receipt); "acked" = the alerts THEY
+    # acknowledged (their name is on the acknowledgement) - not every alert of the company.
     rows = execute_read(
         f"""
         SELECT
+            s.id AS subscriber_id,
             s.name,
-            s.channel,
-            COUNT(a.id)                                           AS total_alerts,
-            COUNT(a.id) FILTER (WHERE a.acknowledged = 1)        AS acked,
-            ROUND(
-              100.0 * COUNT(a.id) FILTER (WHERE a.acknowledged = 1)
-                    / NULLIF(COUNT(a.id), 0), 1
-            )                                                     AS ack_rate_pct,
-            ROUND(AVG(
-              EXTRACT(EPOCH FROM (a.acknowledged_at::timestamptz - a.timestamp::timestamptz)) / 60.0
-            ) FILTER (WHERE a.acknowledged = 1 AND a.acknowledged_at IS NOT NULL), 1) AS avg_ack_minutes
+            CONCAT_WS(', ',
+                CASE WHEN COALESCE(s.phone, '') <> '' THEN 'SMS' END,
+                CASE WHEN COALESCE(s.email, '') <> '' THEN 'Email' END,
+                CASE WHEN COALESCE(s.fcm_token, s.expo_push_token, s.push_subscription, '') <> ''
+                     THEN 'Push' END
+            )                                                     AS channel,
+            GREATEST(COALESCE(n.total, 0), COALESCE(k.acked, 0))  AS total_alerts,
+            COALESCE(k.acked, 0)                                  AS acked,
+            CASE WHEN GREATEST(COALESCE(n.total, 0), COALESCE(k.acked, 0)) > 0
+                 THEN ROUND(100.0 * COALESCE(k.acked, 0) / GREATEST(n.total, k.acked, 1), 1) END AS ack_rate_pct,
+            k.avg_min                                             AS avg_ack_minutes
           FROM subscribers s
-          JOIN alerts a ON a.company_id = s.company_id
-         WHERE s.company_id = %s {dt_clause}
-         GROUP BY s.id, s.name, s.channel
-         ORDER BY ack_rate_pct DESC NULLS LAST
+          LEFT JOIN LATERAL (
+                SELECT COUNT(DISTINCT dr.alert_id) AS total
+                  FROM delivery_receipts dr
+                  JOIN alerts a ON a.id = dr.alert_id AND a.company_id = s.company_id
+                 WHERE dr.subscriber_id = s.id AND dr.success = 1 {dt_clause}
+          ) n ON TRUE
+          LEFT JOIN LATERAL (
+                SELECT COUNT(*) AS acked,
+                       ROUND(AVG(EXTRACT(EPOCH FROM (a.acknowledged_at::timestamptz - a.timestamp::timestamptz)) / 60.0)::numeric, 1) AS avg_min
+                  FROM alerts a
+                 WHERE a.company_id = s.company_id AND a.acknowledged = 1 AND a.acknowledged_at IS NOT NULL
+                   AND (LOWER(a.acknowledged_by) = LOWER(s.name) OR LOWER(a.acknowledged_by) LIKE LOWER(s.name) || ' (%%') {dt_clause}
+          ) k ON TRUE
+         WHERE s.company_id = %s AND COALESCE(s.is_active, 1) = 1 AND COALESCE(s.active, 1) = 1
+         ORDER BY s.escalation_order, s.name
         """,
-        [company_id, *dt_params],
+        [*dt_params, *dt_params, company_id],
     )
     return rows
 
@@ -721,7 +741,7 @@ async def company_live_trend(
     limit: int = Query(60, ge=1, le=500),
     _: dict = Depends(require_super_admin),
 ):
-    """Last N sensor readings (global — readings table has no company_id)."""
+    """Last N sensor readings (global â€” readings table has no company_id)."""
     err = _check_company(company_id)
     if err:
         return err
@@ -731,11 +751,11 @@ async def company_live_trend(
         f"""
         SELECT timestamp::timestamptz AS ts, {col}::float AS value
           FROM readings
-         WHERE is_valid = 1 AND {col} IS NOT NULL
-         ORDER BY timestamp::timestamptz DESC
+         WHERE company_id = %s AND is_valid = 1 AND {col} IS NOT NULL
+         ORDER BY timestamp DESC
          LIMIT %s
         """,
-        (limit,),
+        (company_id, limit),
     )
     return [
         {"timestamp": r["ts"].isoformat(), "value": round(r["value"], 2), "unit": unit}
@@ -743,9 +763,9 @@ async def company_live_trend(
     ]
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# Section B — Cross-company comparison endpoints
-# ═══════════════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# Section B â€” Cross-company comparison endpoints
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 @router.get("/compare/parameter")
 async def compare_by_parameter(
@@ -823,9 +843,9 @@ async def compare_breach_counts(
     return rows
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# Section C — Benchmarks
-# ═══════════════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# Section C â€” Benchmarks
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 @router.get("/benchmarks")
 async def get_benchmarks(_: dict = Depends(require_super_admin)):
@@ -879,9 +899,9 @@ async def get_benchmarks(_: dict = Depends(require_super_admin)):
     }
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
-# Section D — Health scores v2 (grade A-F)
-# ═══════════════════════════════════════════════════════════════════════════════
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+# Section D â€” Health scores v2 (grade A-F)
+# â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 def _grade(score: float) -> str:
     if score >= 90: return "A"
@@ -946,7 +966,7 @@ async def get_health_scores(_: dict = Depends(require_super_admin)):
             round(100.0 * drr["delivered"] / drr["total"], 1) if drr["total"] else 100.0
         )
 
-        # Uptime score: no alerts in last 1 hour → 100, deduct 10 per alert
+        # Uptime score: no alerts in last 1 hour â†’ 100, deduct 10 per alert
         uptime_rows = execute_read(
             """
             SELECT COUNT(*) AS cnt FROM alerts
@@ -981,3 +1001,4 @@ async def get_health_scores(_: dict = Depends(require_super_admin)):
 
     results.sort(key=lambda r: r["composite"])
     return results
+

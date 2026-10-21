@@ -58,7 +58,6 @@ echo ==========================================
 echo     SENTINELEDGE IS RUNNING
 echo.
 echo     Dashboard  : http://localhost:5000
-echo     API Docs   : http://localhost:5000/docs
 echo.
 echo     To STOP, close the "SentinelEdge Backend" terminal window.
 echo ==========================================

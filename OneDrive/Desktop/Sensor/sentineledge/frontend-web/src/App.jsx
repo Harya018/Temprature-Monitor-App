@@ -90,19 +90,30 @@ export default function App() {
 
   const { toasts, addToast, dismiss } = useToast()
   const alarm = useAudioAlarm()
-  const { playAlarm } = alarm
+  const { playAlarm, unlock } = alarm
+
+  // Browsers keep sound blocked until the page has been clicked once: unlock it on the first click
+  useEffect(() => {
+    const u = () => { try { unlock && unlock() } catch { /* ignore */ } }
+    window.addEventListener('pointerdown', u, { once: true })
+    window.addEventListener('keydown', u, { once: true })
+    return () => { window.removeEventListener('pointerdown', u); window.removeEventListener('keydown', u) }
+  }, [unlock])
 
   const handleBreach = useCallback((breach) => {
     try {
       playAlarm(breach?.severity)
     } catch { /* AudioContext blocked */ }
-    const isPh = breach?.parameter === 'ph'
+    const name = String(breach?.parameter ?? 'value')
+    const label = name.toLowerCase() === 'ph' ? 'pH' : name.charAt(0).toUpperCase() + name.slice(1)
+    const unit = name.toLowerCase() === 'temperature' ? '°C' : ''
+    const num = Number(breach?.value)
+    const val = Number.isFinite(num) ? (Math.abs(num) >= 100 ? num.toFixed(1) : num.toFixed(2)) : '—'
+    const rel = breach?.direction === 'low' ? 'below' : 'above'
     addToast({
       type: 'error',
-      message: isPh
-        ? `🔴 pH ALERT: ${breach?.value?.toFixed(2) ?? '—'} pH ≥ ${breach?.threshold ?? '—'} — ${breach?.severity ?? ''}`
-        : `⚠️ BREACH: ${breach?.value?.toFixed(1) ?? '—'}°C — ${breach?.severity ?? ''}`,
-      duration: 8000,
+      message: `🔴 ${label} ALERT: ${val}${unit} is ${rel} the limit ${breach?.threshold ?? '—'}${unit} — ${breach?.severity ?? ''}`,
+      duration: 12000,
     })
   }, [playAlarm, addToast])
 
@@ -118,6 +129,11 @@ export default function App() {
     prevConnected.current = connected
   }, [wsData.isConnected, addToast])
 
+  useEffect(() => {
+    if (wsData.connectionStatus === 'SESSION EXPIRED')
+      addToast({ type: 'warning', message: 'Your login session has expired. Log out and log in again to resume live data.', duration: 15000 })
+  }, [wsData.connectionStatus, addToast])
+
   const loadHealth = useCallback(async () => {
     try {
       const h = await fetchHealth()
@@ -130,7 +146,10 @@ export default function App() {
   useEffect(() => {
     loadHealth()
     const t = setInterval(loadHealth, 30000)
-    return () => clearInterval(t)
+    // Refresh straight away when the user comes back to the tab
+    const onVisible = () => { if (document.visibilityState === 'visible') loadHealth() }
+    document.addEventListener('visibilitychange', onVisible)
+    return () => { clearInterval(t); document.removeEventListener('visibilitychange', onVisible) }
   }, [loadHealth])
 
   // Shorthand to wrap any page in the Shell + ProtectedRoute

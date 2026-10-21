@@ -12,8 +12,10 @@ Production upgrades in this version:
 """
 
 import asyncio
+import time
 import json
 import os
+import re
 import socket
 import sys
 from pathlib import Path
@@ -28,7 +30,7 @@ if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 # ──────────────────────────────────────────────────────────────────────────────
 
-from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, APIRouter
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect, APIRouter, Depends
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -64,6 +66,7 @@ from fastapi.responses import JSONResponse as _JSONResponse
 from middleware.cors import configure_cors
 from middleware.logger import log_requests
 from middleware.rate_limit import limiter
+from middleware.auth import require_admin
 
 from modules.inapp.manager import (
     add_connection, remove_connection, broadcast, active_connections,
@@ -76,6 +79,8 @@ from routers.simulate import router as simulate_router
 from routers.health import router as health_router, start_sms_probe
 from routers.admin import router as admin_router
 from routers.auth import router as auth_router
+from routers.mobile_app import router as mobile_app_router
+from routers.tailscale import router as tailscale_router, sa_router_factory
 from routers.history import router as history_router
 from routers.reports import router as reports_router
 from routers.receipts import router as receipts_router
@@ -89,6 +94,9 @@ from routers.phase4_analytics import router as phase4_analytics_router
 from routers.phase5_comms import router as phase5_comms_router
 from routers.phase6_billing import router as phase6_billing_router
 from routers.phase7_security import router as phase7_security_router
+from routers.collector import router as collector_router
+from config import SERVER_ROLE
+from routers.admin_inbox import router as admin_inbox_router
 
 from database.backup import schedule_daily_backup
 from database.retention import schedule_retention_cleanup
@@ -264,14 +272,16 @@ async def _notification_retry_task() -> None:
                     if channel == "email":
                         from modules.email.smtp import send_email_async
                         sub_rows = execute_read(
-                            "SELECT email FROM subscribers WHERE id = %s LIMIT 1",
+                            "SELECT email, company_id FROM subscribers WHERE id = %s LIMIT 1",
                             (item["subscriber_id"],),
                         )
                         if sub_rows and sub_rows[0].get("email"):
+                            from services.company_email import get_company_smtp
                             await send_email_async(
                                 sub_rows[0]["email"],
                                 payload.get("subject", "Alert Retry"),
                                 payload.get("body", ""),
+                                get_company_smtp(sub_rows[0].get("company_id")),
                             )
                             success = True
                     elif channel == "sms":
@@ -325,8 +335,8 @@ async def _retention_policy_task() -> None:
                 max_days = p["max_days"]
                 if entity == "readings":
                     execute_write(
-                        "DELETE FROM readings WHERE timestamp < NOW() - INTERVAL '%s days'",
-                        (max_days,),
+                        "DELETE FROM readings WHERE timestamp::TIMESTAMPTZ < NOW() - (%s || ' days')::INTERVAL",
+                        (str(max_days),),
                     )
                 elif entity == "login_attempts":
                     execute_write(
@@ -364,6 +374,18 @@ async def lifespan(app: FastAPI):
     from utils.security import migrate_env_admin_password
     migrate_env_admin_password()
 
+    # Hub <-> node synchronisation tables (hub: node registry + inbox, node: outbox)
+    from database.sync_schema import ensure_tables as _ensure_sync_tables
+    _ensure_sync_tables(SERVER_ROLE)
+    if SERVER_ROLE == "node":
+        from services.node_agent import agent as _node_agent
+        from services import node_commands as _node_commands
+        _node_commands.LOOP = asyncio.get_running_loop()
+        _node_agent.start()
+        logger.info("Running as a company NODE — syncing with the hub when paired")
+    else:
+        logger.info("Running as the HUB")
+
     # 1a. Load Pro-Server EX settings from DB (overrides env-var defaults if a
     #     file path was previously saved via Admin → Settings → Pro-Server EX).
     try:
@@ -372,19 +394,23 @@ async def lifespan(app: FastAPI):
             ("proserver_%",),
         ) or []
         _ps_vals = {r["key"].replace("proserver_", "", 1): r["value"] for r in _ps_rows}
+        import core.excel_sensor as _excel_sensor
+        from services import data_sources as _data_sources
+        # Restore the two source switches (collector / Excel reader) FIRST, so
+        # the Excel reader below starts in its saved state.
+        _excel_sensor.load_persistent_settings()
         if _ps_vals.get("file_path", "").strip():
-            import core.excel_sensor as _excel_sensor
             _excel_sensor.reload_settings(_ps_vals)
             logger.info(
-                "Startup: Pro-Server EX path loaded from DB: %s",
+                "Startup: Excel file path loaded from DB: %s (Excel reader %s, collector %s)",
                 _ps_vals["file_path"],
+                "ON" if _excel_sensor.EXCEL_LIVE_ENABLED else "off",
+                "ON" if _data_sources.collector_enabled() else "off",
             )
-        # Restore persisted enable/disable (live-only) state across restarts
-        import core.excel_sensor as _excel_sensor
-        _excel_sensor.load_persistent_settings()
     except Exception as _exc:
         import traceback as _tb
         logger.warning("Startup: could not load proserver settings from DB: %s\n%s", _exc, _tb.format_exc())
+
 
     # 1b. Load OPC DA settings from DB (secondary sensor)
     try:
@@ -458,6 +484,13 @@ async def lifespan(app: FastAPI):
     except Exception as _exc:
         logger.warning("Startup: could not load temperature thresholds from DB: %s", _exc)
 
+    # One-time: temperature becomes a per-company parameter (existing companies
+    # keep it with the limits loaded above; new companies start with none).
+    from database.connection import migrate_temperature_parameter_once
+    migrate_temperature_parameter_once()
+    from database.connection import migrate_ph_limits_once
+    migrate_ph_limits_once()
+
     # 2. Clean up any stale sessions from previous server runs
     try:
         from database.queries.sessions import cleanup_expired_sessions
@@ -486,6 +519,9 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(_scheduled_broadcast_task(),   name="scheduled-broadcast")
     asyncio.create_task(_monthly_snapshot_task(),      name="monthly-snapshot")
     asyncio.create_task(_retention_policy_task(),      name="retention-policy")
+    if SERVER_ROLE == "hub":
+        from services.node_events import watch_nodes as _watch_nodes
+        asyncio.create_task(_watch_nodes(), name="node-offline-watch")
     asyncio.create_task(run_escalation_check(),        name="escalation-policy")
     asyncio.create_task(run_anomaly_detection(),       name="anomaly-detector")
     asyncio.create_task(_monthly_quota_reset_task(),   name="monthly-quota-reset")
@@ -516,12 +552,29 @@ async def lifespan(app: FastAPI):
         _WARN("SECURITY: DATABASE_URL uses default credentials — set a strong password in .env")
     if APP_ENV != "production":
         logger.info("Running in %s mode — set APP_ENV=production for production checks", APP_ENV)
+    else:
+        # Production must never run on secrets that are published in the source code
+        _fatal = []
+        if ADMIN_PASSWORD in ("admin123", "sentineledge-admin", "password", ""):
+            _fatal.append("ADMIN_PASSWORD is a known default")
+        if _os.getenv("DATABASE_URL", "").startswith(_default_db) or not _os.getenv("DATABASE_URL"):
+            _fatal.append("DATABASE_URL uses default credentials")
+        if _os.getenv("COLLECTOR_API_KEY", "proserver-live-2024") == "proserver-live-2024":
+            _fatal.append("COLLECTOR_API_KEY is the published default")
+        if _fatal:
+            for _msg in _fatal:
+                logger.critical("PRODUCTION BLOCKED: %s — set it in .env", _msg)
+            raise RuntimeError("Refusing to start in production with default secrets: " + "; ".join(_fatal))
 
     # 5. Start GSM SMS queue worker + background SMS modem probe thread
     from modules.sms.sender import start_gsm_worker
     start_gsm_worker()
     asyncio.create_task(run_sms_receiver(), name="sms-receiver")
     start_sms_probe()
+
+    # 6. Process live readings from the moment the server starts. This used to begin only when a dashboard
+    #    connected, so a company server nobody had open would not store the Excel reader's rows or raise alerts.
+    _ensure_reading_loop()
 
     yield
 
@@ -542,8 +595,11 @@ async def lifespan(app: FastAPI):
             dead.add(ws)
     active_connections.difference_update(dead)
     active_connections.clear()
+    if _reading_loop_task is not None:
+        _reading_loop_task.cancel()
 
     await escalation.shutdown_escalations()
+
     from modules.sms.sender import stop_gsm_worker
     stop_gsm_worker()
 
@@ -576,9 +632,11 @@ Admin endpoints require header:
 - **EMERGENCY** — 25% over threshold
     """,
     version="1.0.0",
-    docs_url="/docs",
-    redoc_url="/redoc",
-    openapi_url="/openapi.json",
+    # Interactive API docs expose a full map of every endpoint — dev only
+    # (off unless ENABLE_DOCS=1 is set, whatever APP_ENV is: a normal install must not publish its API map)
+    docs_url="/docs" if os.getenv("ENABLE_DOCS") == "1" and APP_ENV != "production" else None,
+    redoc_url="/redoc" if os.getenv("ENABLE_DOCS") == "1" and APP_ENV != "production" else None,
+    openapi_url="/openapi.json" if os.getenv("ENABLE_DOCS") == "1" and APP_ENV != "production" else None,
     lifespan=lifespan,
 )
 
@@ -609,9 +667,51 @@ class _SecurityHeadersMiddleware(BaseHTTPMiddleware):
 
 app.add_middleware(_SecurityHeadersMiddleware)
 
+# ── Sub-admins are read-only ────────────────────────────────────────────────────────────────
+# A sub-admin can look at everything of their company and acknowledge alerts, but cannot change
+# anything (settings, subscribers, limits, e-mail account ...). One rule here covers every route.
+_SUB_ADMIN_MAY = (
+    re.compile(r"^/api/alerts/\d+/acknowledge$"),
+    re.compile(r"^/api/(admin|auth)/(logout|admin-logout)$"),
+    re.compile(r"^/api/notifications/"),
+    re.compile(r"^/api/admin/(change-password|profile|verify-password)$"),   # their OWN password only
+)
+
+
+@app.middleware("http")
+async def _sub_admin_read_only(request, call_next):
+    if request.method in ("POST", "PUT", "PATCH", "DELETE") and request.url.path.startswith("/api/"):
+        auth = request.headers.get("authorization", "")
+        if auth.startswith("Bearer ") and not any(p.match(request.url.path) for p in _SUB_ADMIN_MAY):
+            try:
+                from database.connection import execute_read as _er
+                rows = _er("SELECT a.role FROM admin_sessions s JOIN admins a ON a.id = s.admin_id "
+                           "WHERE s.token = %s AND s.expires_at > NOW() LIMIT 1", (auth[7:].strip(),))
+                if rows and rows[0]["role"] == "sub":
+                    return JSONResponse(status_code=403, content={
+                        "error": "ReadOnly",
+                        "message": "Sub-admin accounts can view everything and acknowledge alerts, but cannot change settings."})
+            except Exception as exc:
+                logger.warning("sub-admin check failed (request allowed to continue): %s", exc)
+    return await call_next(request)
+
+
 # ── Rate limiting (slowapi) ───────────────────────────────────────────────────────
 app.state.limiter = limiter
 app.add_middleware(SlowAPIMiddleware)  # required for @limiter.limit() to work
+
+if SERVER_ROLE == "node":
+    @app.middleware("http")
+    async def _licence_gate(request, call_next):
+        """A node works only while the hub allows it (switched on, not expired, hub reachable
+        within the grace period). Health, pairing and static pages stay reachable."""
+        path = request.url.path
+        if path.startswith("/api/") and not path.startswith(("/api/health", "/api/node/")):
+            from services import license as _lic
+            ok, why = _lic.check()
+            if not ok:
+                return JSONResponse(status_code=403, content={"error": "LicenseInactive", "message": why})
+        return await call_next(request)
 
 
 async def _rate_limit_handler(request: Request, exc: RateLimitExceeded):
@@ -692,6 +792,15 @@ async def internal_error_handler(request: Request, exc):
 
 # ─── WebSocket ───────────────────────────────────────────────────────────────
 
+async def _ws_still_allowed(token: str, first: dict) -> bool:
+    """Is the sign-in that opened a live connection still valid, for the SAME company?"""
+    try:
+        now = await asyncio.to_thread(_ws_authenticate, token)
+    except Exception:
+        return True          # database briefly unreachable: keep the connection, check again later
+    return now is not None and now.get("company_id") == first.get("company_id")         and now.get("admin_id") == first.get("admin_id")
+
+
 def _ws_authenticate(token: str) -> dict | None:
     """Validate a WebSocket token. Accepts both admin sessions and subscriber sessions."""
     if not token:
@@ -706,10 +815,16 @@ def _ws_authenticate(token: str) -> dict | None:
             admin_id = session.get("admin_id")
             if admin_id is not None:
                 rows = execute_read(
-                    "SELECT is_active, company_id FROM admins WHERE id = %s LIMIT 1", (admin_id,)
+                    "SELECT a.is_active, a.company_id, a.role, c.is_active AS company_active "
+                    "FROM admins a LEFT JOIN companies c ON c.id = a.company_id WHERE a.id = %s LIMIT 1", (admin_id,)
                 )
                 if rows and rows[0].get("is_active") != 0:
-                    return {"admin_id": admin_id, "company_id": rows[0].get("company_id")}
+                    r0 = rows[0]
+                    # a company admin without a (switched-on) company must never be treated as
+                    # platform-level: that connection would receive every company's data
+                    if r0.get("role") != "super_admin" and (r0.get("company_id") is None or r0.get("company_active") == 0):
+                        return None
+                    return {"admin_id": admin_id, "company_id": r0.get("company_id")}
 
         # 2. Try subscriber session (mobile app)
         from database.queries.subscriber_sessions import get_sub_session
@@ -717,12 +832,86 @@ def _ws_authenticate(token: str) -> dict | None:
         if sub_session is not None:
             sub = database.get_subscriber_by_id(sub_session["subscriber_id"])
             company_id = sub.get("company_id") if sub else None
+            if company_id is None:       # no company = would be "platform-level" (everything)
+                return None
             return {"admin_id": None, "company_id": company_id}
 
         return None
     except Exception as exc:
         logger.warning("WS auth error: %s", exc)
         return None
+
+
+# ─── Shared reading loop ─────────────────────────────────────────────────────
+# ONE loop for the whole server — not one per dashboard connection. It starts
+# when the first dashboard connects and keeps running until shutdown, so each
+# sensor tick is stored, threshold-checked and broadcast exactly once, however
+# many tabs are open or however often they reconnect. (Previously every /ws
+# connection ran its own loop, and loops kept running after their client left,
+# duplicating DB rows and advancing CSV playback once per loop.)
+
+_reading_loop_task = None       # asyncio.Task running _reading_loop()
+
+
+def _sensor_company_id():
+    """Company that owns this server's sensor feed (fixed — never 'whoever
+    logged in first', so a new company never receives another's readings)."""
+    from services.sensor_company import get_sensor_company_id
+    return get_sensor_company_id()
+
+
+async def _process_reading(reading: dict, company_id) -> None:
+    """One tick of the shared loop. ONLY real, live readings are stored:
+
+      • Excel reader  — a row that has just been appended to the file (the row that was
+                        already there when the reader started, and replays of the last row,
+                        are never stored or shown);
+      • OPC DA / a USB sensor — the value just measured;
+      • the manual breach test from Settings (an explicit admin test action).
+
+    The built-in demo/CSV playback and the synthetic curve are never stored, alerted on or
+    broadcast. (The Pro-Server EX live collector posts to /api/collector/reading and uses the
+    same services.live_ingest path.)
+    """
+    from services.live_ingest import ingest
+
+    if (excel_sensor.EXCEL_LIVE_ENABLED and excel_sensor.is_active()
+            and (excel_sensor.current_temperature is not None or excel_sensor.extra_readings)):
+        if not excel_sensor.consume_new_row():
+            return                                  # no new row yet — nothing to stream
+        from services.sensor_company import get_source_company_id
+        await ingest({"temperature": excel_sensor.current_temperature,      # None for a pH-only plant
+                      "timestamp":   excel_sensor.current_timestamp or reading["timestamp"]},
+                     dict(excel_sensor.extra_readings), get_source_company_id("excel"))
+    elif opc_sensor.is_active() and opc_sensor.current_temperature is not None:
+        from services.sensor_company import get_source_company_id
+        await ingest({"temperature": opc_sensor.current_temperature,
+                      "timestamp":   opc_sensor.current_timestamp or reading["timestamp"]},
+                     dict(opc_sensor.extra_readings), get_source_company_id("excel"))
+    elif reading.get("is_live") is False:
+        return                                      # CSV playback / synthetic curve: not real data
+    else:
+        # USB sensor (is_live True) or the manual breach test (no flag) — no random extras
+        await ingest({"temperature": reading["temperature"], "timestamp": reading["timestamp"]}, {}, company_id)
+
+
+async def _reading_loop() -> None:
+    logger.info("Shared reading loop started.")
+    async for reading in sensor.stream_readings():
+        try:
+            await _process_reading(reading, _sensor_company_id())
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            # One bad tick must not stop monitoring — log it and carry on.
+            logger.exception("Reading loop error (continuing): %s", exc)
+            MODULE_STATUS["websocket"] = f"error: {exc}"
+
+
+def _ensure_reading_loop() -> None:
+    global _reading_loop_task
+    if _reading_loop_task is None or _reading_loop_task.done():
+        _reading_loop_task = asyncio.create_task(_reading_loop(), name="reading-loop")
 
 
 @app.websocket("/ws")
@@ -736,146 +925,82 @@ async def websocket_endpoint(ws: WebSocket, token: str = ""):
     company_id = admin_ctx.get("company_id")
 
     await ws.accept()
-    add_connection(ws)
+    add_connection(ws, company_id)
     MODULE_STATUS["websocket"] = "ok"
+    _ensure_reading_loop()
 
+    # Send an immediate "connected" handshake so the dashboard can show a
+    # "sensor connecting…" state instead of appearing blank during COM warm-up.
     try:
-        async for reading in sensor.stream_readings():
+        _sensor_ready = (
+            excel_sensor.is_active()
+            and (excel_sensor.current_temperature is not None or bool(excel_sensor.extra_readings))
+        ) or (
+            opc_sensor.is_active() and opc_sensor.current_temperature is not None
+        )
+        await ws.send_json({
+            "type":         "connected",
+            "sensor_ready": _sensor_ready,
+            "timestamp":    now_iso(),
+        })
+    except Exception:
+        pass
 
-            # ── Excel mode: substitute live file values for serial-sensor values ─
-            # When EXCEL_FILE_PATH is set, the excel_sensor background thread
-            # keeps current_temperature / current_timestamp / extra_readings
-            # up to date from the pro-server Excel file.  We use those values
-            # instead of the CSV/serial fallback so each column maps exactly to
-            # the correct parameter (temperature → temp, pH → pH, no interchange).
-            if excel_sensor.is_active() and excel_sensor.current_temperature is not None:
-                # Primary: Excel/CSV file from Pro-Server EX
-                # is_live = False when replaying historical loop rows → no alerts fire
-                reading = {
-                    "temperature": excel_sensor.current_temperature,
-                    "timestamp":   excel_sensor.current_timestamp or reading["timestamp"],
-                    "is_live":     excel_sensor.is_live_data(),
-                }
-            elif opc_sensor.is_active() and opc_sensor.current_temperature is not None:
-                # Secondary: OPC DA direct connection (used when file reader is not active)
-                reading = {
-                    "temperature": opc_sensor.current_temperature,
-                    "timestamp":   opc_sensor.current_timestamp or reading["timestamp"],
-                    "is_live":     True,
-                }
-            # Live-only idle: Excel sensor enabled but no recent live data →
-            # broadcast NULL so dashboard shows "—", skip DB insert entirely.
-            if (excel_sensor.is_active()
-                    and not excel_sensor._excel_enabled
-                    and excel_sensor.current_temperature is None):
-                await broadcast({
-                    "temperature":    None,
-                    "timestamp":      reading.get("timestamp", ""),
-                    "breaches":       [],
-                    "is_valid":       False,
-                    "extra_params":   {},
-                    "live_only_idle": True,
-                })
-                continue
+    # Keep-alive: a small message every 15 s so the dashboard can tell a live
+    # connection from a dead one (after sleep / tab freeze / network change the
+    # socket can look open while nothing arrives). Clients ignore this type.
+    async def _heartbeat() -> None:
+        try:
+            while True:
+                await asyncio.sleep(15)
+                # The sign-in is checked again: an admin who was switched off, signed out, had the
+                # password reset or was moved to another company must stop receiving this company's data.
+                if not await _ws_still_allowed(token, admin_ctx):
+                    await ws.close(code=4001, reason="Session ended")
+                    return
+                await ws.send_json({"type": "heartbeat", "timestamp": now_iso()})
+        except Exception:
+            pass   # connection gone — the receive loop below cleans up
 
-            if excel_sensor.is_active():
-                # Start with fallback values (humidity, vibration, etc.) then
-                # overlay real Excel readings so ph/pressure overwrite the fallback.
-                ep = dict(extra_sensor.extra_readings)
-                ep.update(excel_sensor.extra_readings)
-            elif opc_sensor.is_active():
-                ep = dict(opc_sensor.extra_readings)
-            else:
-                ep = dict(extra_sensor.extra_readings)
-            # Normalize keys to lowercase so DB queries (analytics) match regardless
-            # of how Pro-Server EX capitalizes column headers (pH vs ph vs PH)
-            ep = {k.lower(): v for k, v in ep.items()}
+    heartbeat_task = asyncio.create_task(_heartbeat())
 
-            # Auto-register any new extra-sensor parameters so they appear in
-            # the Super Admin company detail count and Config > Parameters tab.
-            if ep and company_id:
-                auto_register_extra_params(ep, company_id)
-
-            is_valid, reason = validate_reading(reading)
-
-            database.insert_reading(
-                reading["temperature"],
-                reading["timestamp"],
-                is_valid=is_valid,
-                extra_params=ep,
-                company_id=company_id,
-            )
-
-            if not is_valid:
-                logger.warning("Invalid reading skipped: %s", reason)
-                payload = {
-                    "temperature":      reading["temperature"],
-                    "timestamp":        reading["timestamp"],
-                    "breaches":         [],
-                    "is_valid":         False,
-                    "validation_error": reason,
-                    "extra_params":     ep,
-                }
-                await broadcast(payload)
-                continue
-
-            # CSV fallback readings never trigger alerts — only real sensor data does.
-            # Manual breach override (settings page) has no is_live key → defaults True.
-            reading["extra_params"] = ep
-            breaches = threshold.check_threshold(reading) if reading.get("is_live", True) else []
-
-            # Persisting alerts (DB insert) is fast — await it so the live
-            # broadcast below can include each breach's real alert_id (the
-            # mobile app needs this to POST /api/alerts/{id}/acknowledge).
-            # Notification delivery (email/SMS/push) still happens in the
-            # background inside trigger_alert() and is never awaited here.
-            alert_ids = await escalation.trigger_alert(reading, breaches) if breaches else []
-
-            import routers.health as _health_mod
-            _health_mod.last_reading = {
-                "temperature": reading["temperature"],
-                "timestamp":   reading["timestamp"],
-            }
-
-            breach_dicts = []
-            for b, aid in zip(breaches, alert_ids):
-                d = b.model_dump()
-                d["alert_id"] = aid
-                breach_dicts.append(d)
-
-            # ── Custom parameter threshold enforcement ────────────────────────
-            # For each live extra_param value, check against company_parameters
-            # min/max and fire an alert if it falls outside the configured range.
-            if ep:
-                check_extra_param_thresholds(ep, breach_dicts)
-
-            payload = {
-                "temperature":  reading["temperature"],
-                "timestamp":    reading["timestamp"],
-                "breaches":     breach_dicts,
-                "is_valid":     True,
-                "extra_params": ep,
-            }
-            await broadcast(payload)
-
+    # Readings reach this client through broadcast() from the shared loop.
+    # Here we only wait for the client to go away (clients send nothing).
+    try:
+        while True:
+            msg = await ws.receive()
+            if msg.get("type") == "websocket.disconnect":
+                break
+        logger.info("WebSocket client disconnected.")
     except WebSocketDisconnect:
         logger.info("WebSocket client disconnected.")
     except Exception as exc:
-        logger.exception("WebSocket error: %s", exc)
-        MODULE_STATUS["websocket"] = f"error: {exc}"
+        logger.warning("WebSocket closed: %s", exc)
     finally:
+        heartbeat_task.cancel()
         remove_connection(ws)
 
 
 # ─── Live log WebSocket ──────────────────────────────────────────────────────
 
 @app.websocket("/ws/logs")
-async def log_stream(websocket: WebSocket):
+async def log_stream(websocket: WebSocket, token: str = ""):
     """Stream sentineledge.log in real time to the admin dashboard."""
+    # Admin sessions only — subscriber (mobile) sessions must not see server logs
+    ctx = _ws_authenticate(token)
+    if ctx is None or ctx.get("admin_id") is None:
+        await websocket.close(code=4001, reason="Unauthorized")
+        return
     await websocket.accept()
 
-    # Resolve log path relative to this file so it works regardless of CWD
-    log_path = Path(os.path.join(os.path.dirname(__file__), "..", "logs", "sentineledge.log")).resolve()
+    # A company admin sees ONLY their company's activity log; a platform-level login (no
+    # company) sees the full server log.
+    if ctx.get("company_id") is not None:
+        from services import company_log as _clog
+        _clog.get(ctx["company_id"])              # make sure the file exists
+        log_path = Path(_clog.log_path(ctx["company_id"])).resolve()
+    else:
+        log_path = Path(os.path.join(os.path.dirname(__file__), "..", "logs", "sentineledge.log")).resolve()
 
     # Send last 200 lines on connect — tail-read from end of file so we
     # never load the full log into memory (O(chunk) not O(file)).
@@ -901,9 +1026,15 @@ async def log_stream(websocket: WebSocket):
 
 
     last_size = log_path.stat().st_size if log_path.exists() else 0
+    checked = time.monotonic()
     try:
         while True:
             await asyncio.sleep(0.5)
+            if time.monotonic() - checked > 15:          # same re-check as the live data socket
+                checked = time.monotonic()
+                if not await _ws_still_allowed(token, ctx):
+                    await websocket.close(code=4001, reason="Session ended")
+                    return
             if log_path.exists():
                 size = log_path.stat().st_size
                 if size > last_size:
@@ -930,11 +1061,11 @@ _readings_router = APIRouter(prefix="/api", tags=["Readings"])
     "/readings/recent",
     response_model=list[ReadingOut],
     summary="Get recent readings",
-    description="Returns the last 60 sensor readings in reverse-chronological order.",
+    description="Returns the caller's company's last 60 sensor readings.",
 )
 @limiter.limit("60/minute")
-async def get_recent_readings(request: Request):
-    rows = database.get_recent_readings(limit=60)
+async def get_recent_readings(request: Request, admin: dict = Depends(require_admin)):
+    rows = database.get_recent_readings(limit=60, company_id=admin.get("company_id"))
     return [
         ReadingOut(
             temperature=r["temperature"],
@@ -956,21 +1087,44 @@ app.include_router(simulate_router)
 app.include_router(health_router)
 app.include_router(admin_router)
 app.include_router(auth_router)
+app.include_router(mobile_app_router)
+app.include_router(tailscale_router)
 app.include_router(history_router)
 app.include_router(reports_router)
 app.include_router(receipts_router)
 app.include_router(events_router)
 app.include_router(notifications_router)
-app.include_router(super_admin_v2_router)
 from routers.analytics import router as analytics_router
 app.include_router(analytics_router)
-app.include_router(phase1_command_router)
-app.include_router(phase2_admin_control_router)
-app.include_router(phase3_config_router)
-app.include_router(phase4_analytics_router)
-app.include_router(phase5_comms_router)
-app.include_router(phase6_billing_router)
-app.include_router(phase7_security_router)
+app.include_router(collector_router)
+app.include_router(admin_inbox_router)
+
+# ── Role-specific routers ─────────────────────────────────────────────────────
+#   hub  — Super Admin and everything that manages companies, plus the HTTP API
+#          company nodes use to pair and sync.
+#   node — one company's own server: no Super Admin; instead the pairing/setup
+#          endpoints and the sync agent (started in lifespan).
+if SERVER_ROLE == "hub":
+    from routers.hub_api import router as hub_api_router
+    from routers.hub_admin import router as hub_admin_router
+    app.include_router(super_admin_v2_router)
+    app.include_router(phase1_command_router)
+    app.include_router(phase2_admin_control_router)
+    app.include_router(phase3_config_router)
+    app.include_router(phase4_analytics_router)
+    app.include_router(phase5_comms_router)
+    app.include_router(phase6_billing_router)
+    app.include_router(phase7_security_router)
+    app.include_router(hub_api_router)
+    app.include_router(hub_admin_router)
+    from routers.sensor_owner import router as sensor_owner_router
+    app.include_router(sensor_owner_router)
+    app.include_router(sa_router_factory())
+    from routers.sa_account import router as sa_account_router
+    app.include_router(sa_account_router)
+else:
+    from routers.node_api import router as node_api_router
+    app.include_router(node_api_router)
 
 # ─── Static files (built React app) ──────────────────────────────────────────
 _static_dir = os.path.join(os.path.dirname(__file__), "static")
@@ -989,7 +1143,9 @@ if os.path.isdir(_static_dir):
     async def serve_spa(full_path: str):
         index = os.path.join(_static_dir, "index.html")
         if os.path.exists(index):
-            return _FR(index)
+            # Always re-check the page so a new build is picked up straight away (the JS/CSS
+            # files have content hashes in their names, so they can stay cached).
+            return _FR(index, headers={"Cache-Control": "no-cache, must-revalidate"})
         return {"error": "Frontend not built. Run npm run build in frontend-web/"}
 
 else:

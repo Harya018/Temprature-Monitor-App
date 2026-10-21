@@ -2,6 +2,7 @@
  * src/pages/HistoryPage.jsx
  * Backup list, historical data explorer, CSV export.
  */
+import { fmtAlertNumber } from '../utils/alertFormat.js'
 import { useState, useCallback } from 'react'
 import { Archive, Download, Plus, Calendar, RefreshCw } from 'lucide-react'
 import {
@@ -148,7 +149,7 @@ export default function HistoryPage() {
                         {dayAlerts.map(a => (
                           <tr key={a.id}>
                             <td className="text-xs">{utcToIST(a.timestamp)}</td>
-                            <td className="font-bold">{a.value?.toFixed(1)}°C</td>
+                            <td className="font-bold">{fmtAlertNumber(a.parameter, a.value)}</td>
                             <td><Badge color={SEV_COLOR[a.severity] || 'gray'} label={a.severity} small /></td>
                             <td>{a.acknowledged ? <span className="text-emerald-600 text-xs">✅ Acked</span> : <span className="text-amber-600 text-xs">Pending</span>}</td>
                           </tr>

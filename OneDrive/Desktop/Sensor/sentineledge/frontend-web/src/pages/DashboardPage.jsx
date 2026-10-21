@@ -5,22 +5,22 @@
  */
 import { Component, useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { ArrowRight, Gauge, Droplets, Activity, Cpu, FlaskConical } from 'lucide-react'
+import { ArrowRight, Cpu, FlaskConical, AlertTriangle, SlidersHorizontal } from 'lucide-react'
+import { formatTime, formatDate } from '../utils/time.js'
 import TemperatureCard  from '../components/dashboard/TemperatureCard.jsx'
 import StatusCard       from '../components/dashboard/StatusCard.jsx'
 import AlertsTodayCard  from '../components/dashboard/AlertsTodayCard.jsx'
 import UptimeCard       from '../components/dashboard/UptimeCard.jsx'
 import LiveChart        from '../components/dashboard/LiveChart.jsx'
 import PhLiveChart      from '../components/dashboard/PhLiveChart.jsx'
+import ParamLiveChart   from '../components/dashboard/ParamLiveChart.jsx'
 import MiniAlertLog     from '../components/dashboard/MiniAlertLog.jsx'
-import SensorCard       from '../components/dashboard/SensorCard.jsx'
+import SensorCard, { displayParamName } from '../components/dashboard/SensorCard.jsx'
+import SuperAdminNotices from '../components/dashboard/SuperAdminNotices.jsx'
+import useCompanyParameters from '../hooks/useCompanyParameters.js'
 
 /* ── Truncate to 3 decimal places without rounding ──────────────────────────── */
 const trunc3 = v => { const n = Number(v); return isNaN(n) ? '—' : (Math.trunc(n * 1000) / 1000).toFixed(3) }
-
-/* ── Random helpers ─────────────────────────────────────────────────────────── */
-const randomInRange = (min, max) =>
-  trunc3(Math.random() * (max - min) + min)
 
 /* ── Error boundary ── catches any render crash and shows a readable message ── */
 class ErrorBoundary extends Component {
@@ -50,36 +50,64 @@ class ErrorBoundary extends Component {
   }
 }
 
-/* ── pH breach banner — full-width pulsing red bar ───────────────────────────── */
-function PhBreachBanner({ breaches }) {
-  const phBreach = breaches?.find(b => b.parameter === 'ph')
-  if (!phBreach) return null
+/* Red outline around a tile while its alert is open; pulses only while blinking. */
+function AlertFrame({ alert, blinking, children }) {
   return (
-    <div style={{
-      background: '#DC2626',
-      color: '#fff',
-      padding: '12px 20px',
-      borderRadius: 10,
-      display: 'flex',
-      alignItems: 'center',
-      gap: 12,
-      fontWeight: 700,
-      fontSize: 14,
-      animation: 'phPulse 1s ease-in-out infinite',
-      boxShadow: '0 0 0 0 rgba(220,38,38,0.7)',
-      marginBottom: 4,
+    <div className="h-full" data-alert-frame={alert ? alert.key : undefined} data-blinking={alert ? blinking : undefined} style={alert ? {
+      borderRadius: 12,
+      outline: '2px solid #DC2626',
+      animation: blinking ? 'phPulse 1s ease-in-out infinite' : 'none',
+    } : undefined}>
+      {children}
+    </div>
+  )
+}
+
+/* "Alert at 11:27:49 PM — 9.20 ≥ 8.00" — exact time and value the alert fired with */
+const alertLine = a =>
+  `Alert at ${formatTime(a.firedAt)} — ${fmtNum(a.value)} ${a.direction === 'low' ? '≤' : '≥'} ${fmtNum(a.threshold)}`
+
+/* ── Active alert banner ─────────────────────────────────────────────────────────
+   One line per unacknowledged alert with the exact value, threshold and time it
+   fired. Blinks for the first 10 s only; stays red until acknowledged. */
+const fmtNum = v => (v == null || isNaN(Number(v)) ? '—' : Number(v).toFixed(2))
+const alertTime = ts => (ts ? `${formatTime(ts)}, ${formatDate(ts)}` : '—')
+
+function AlertBanner({ alerts, now, unitOf, onAck, acking }) {
+  if (!alerts.length) return null
+  const anyBlinking = alerts.some(a => a.blinkUntil > now)
+  return (
+    <div data-alert-banner data-blinking={anyBlinking} style={{
+      background: '#DC2626', color: '#fff', borderRadius: 10, padding: '10px 16px',
+      display: 'flex', flexDirection: 'column', gap: 6,
+      animation: anyBlinking ? 'phPulse 1s ease-in-out infinite' : 'none',
     }}>
-      <span style={{ fontSize: 22 }}>🔴</span>
-      <span>pH ALERT — Current pH: {phBreach.value?.toFixed(2)} ≥ {phBreach.threshold} (threshold)</span>
-      <span style={{
-        marginLeft: 'auto',
-        background: 'rgba(255,255,255,0.2)',
-        borderRadius: 6,
-        padding: '2px 10px',
-        fontSize: 12,
-        fontWeight: 700,
-        letterSpacing: '0.05em',
-      }}>⚠ ACTION REQUIRED</span>
+      {alerts.map(a => {
+        const unit = unitOf(a.key)
+        const sign = a.direction === 'low' ? '≤' : '≥'
+        return (
+          <div key={a.key} style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap', fontSize: 14 }}>
+            <AlertTriangle size={18} style={{ flexShrink: 0 }} />
+            <span style={{ fontWeight: 700 }}>
+              {displayParamName(a.parameter)} {a.severity} — {fmtNum(a.value)}{unit} {sign} {fmtNum(a.threshold)}{unit}
+            </span>
+            <span style={{ opacity: 0.9, fontVariantNumeric: 'tabular-nums' }}>at {alertTime(a.firedAt)}</span>
+            {a.alertIds.length > 0 && (
+              <button
+                onClick={() => onAck(a)}
+                disabled={acking === a.key}
+                style={{
+                  marginLeft: 'auto', background: '#fff', color: '#B91C1C', border: 'none',
+                  borderRadius: 6, padding: '4px 12px', fontSize: 12, fontWeight: 700,
+                  cursor: acking === a.key ? 'wait' : 'pointer',
+                }}
+              >
+                {acking === a.key ? 'Acknowledging…' : 'Acknowledge'}
+              </button>
+            )}
+          </div>
+        )
+      })}
     </div>
   )
 }
@@ -87,75 +115,84 @@ function PhBreachBanner({ breaches }) {
 /* ── Dashboard page ─────────────────────────────────────────────────────────── */
 export default function DashboardPage({ wsData, health, thresholds, onAlertCount }) {
   // Defensive destructure — all values have safe defaults
-  const lastReading      = wsData?.lastReading      ?? null
-  const readings         = wsData?.readings         ?? []
-  const isConnected      = wsData?.isConnected      ?? false
-  const connectionStatus = wsData?.connectionStatus ?? 'CONNECTING'
-  const lastEvent        = wsData?.lastEvent        ?? null
+  const lastReading          = wsData?.lastReading          ?? null
+  const lastCollectorReading = wsData?.lastCollectorReading ?? null
+  const readings             = wsData?.readings             ?? []
+  const isConnected          = wsData?.isConnected          ?? false
+  const connectionStatus     = wsData?.connectionStatus     ?? 'CONNECTING'
+  const lastEvent            = wsData?.lastEvent            ?? null
+
+  // When the collector is active, use its reading as the authoritative live
+  // display value so the dashboard never switches to a non-collector source
+  // between the collector's ~4 s polling intervals.
+  const displayReading = lastCollectorReading ?? lastReading
 
   const navigate = useNavigate()
 
-  // ── Simulated sensor state ───────────────────────────────────────────────────
-  const [pressure,  setPressure]  = useState(() => randomInRange(1.98, 2.50))
-  const [humidity,  setHumidity]  = useState(() => randomInRange(54.0, 62.0))
-  const [vibration, setVibration] = useState(() => randomInRange(2.2,  2.5))
+  // ── Company parameters — drive every tile and chart on this page ────────────
+  // Only what the company has is shown (a pH-only company sees only pH; a new
+  // company sees none). The list refreshes live when a parameter is approved,
+  // added or removed (server events are already scoped to this company).
+  const { params, loading: paramsLoading, has } = useCompanyParameters()
+  const sensorParams = params.filter(p => p.name.toLowerCase() !== 'temperature')
+  const [paramToast, setParamToast] = useState('')
 
   useEffect(() => {
-    const id = setInterval(() => {
-      setPressure(randomInRange(1.98, 2.50))
-      setHumidity(randomInRange(54.0, 62.0))
-      setVibration(randomInRange(2.2, 2.5))
-    }, 3000)
-    return () => clearInterval(id)
-  }, [])
+    if (lastEvent?.type === 'parameter_added' && lastEvent.parameter?.name) {
+      setParamToast(`New parameter added: ${displayParamName(lastEvent.parameter.name)}`)
+    } else if (lastEvent?.type === 'parameter_deleted' && lastEvent.name) {
+      setParamToast(`Parameter removed: ${displayParamName(lastEvent.name)}`)
+    } else return
+    const t = setTimeout(() => setParamToast(''), 4000)
+    return () => clearTimeout(t)
+  }, [lastEvent])
 
-  // ── Dynamic parameters from DB ───────────────────────────────────────────────
-  const [companyId,   setCompanyId]   = useState(null)
-  const [extraParams, setExtraParams] = useState([])
-  const [paramToast,  setParamToast]  = useState('')
-
+  // ── Active (unacknowledged) alerts ─────────────────────────────────────────
+  // Driven by alert events, not by whichever reading is on screen, so tiles keep
+  // showing live values while an alert is open and the red goes on acknowledge.
+  const activeAlerts = wsData?.activeAlerts ?? []
+  const alertFor = name => activeAlerts.find(a => a.key === String(name).toLowerCase())
+  const [now, setNow] = useState(Date.now())
   useEffect(() => {
-    const token = sessionStorage.getItem('admin_token')
-    if (!token) return
-    const headers = { Authorization: `Bearer ${token}` }
-    fetch('/api/admin/me', { headers })
-      .then(r => r.ok ? r.json() : null)
-      .then(me => {
-        if (me?.company_id) setCompanyId(me.company_id)
-        return fetch('/api/admin/parameters', { headers })
-          .then(r => r.ok ? r.json() : [])
-          .then(params => setExtraParams(Array.isArray(params) ? params : []))
-      })
-      .catch(() => {})
-  }, [])
+    // Re-render when the next alert's 10 s blink ends so the blinking stops on time
+    const ends = activeAlerts.map(a => a.blinkUntil).filter(t => t > Date.now())
+    if (!ends.length) return
+    const t = setTimeout(() => setNow(Date.now()), Math.min(...ends) - Date.now() + 30)
+    return () => clearTimeout(t)
+  }, [activeAlerts, now])
+  const blinking = a => !!a && a.blinkUntil > now
 
-  useEffect(() => {
-    if (!lastEvent || lastEvent.type !== 'parameter_added') return
-    if (companyId && lastEvent.company_id !== companyId) return
-    const p = lastEvent.parameter
-    if (!p?.name) return
-    setExtraParams(prev => {
-      if (prev.some(ep => ep.name === p.name)) return prev
-      return [...prev, { name: p.name, unit: p.unit, min_value: p.min_value, max_value: p.max_value }]
-    })
-    setParamToast(`New parameter added: ${p.name}`)
-    setTimeout(() => setParamToast(''), 4000)
-  }, [lastEvent, companyId])
+  const unitOf = key => {
+    if (key === 'temperature') return '°C'
+    if (key === 'ph') return ''
+    const p = params.find(ep => ep.name.toLowerCase() === key)
+    return p?.unit ? ` ${p.unit}` : ''
+  }
 
-  useEffect(() => {
-    if (!lastEvent || lastEvent.type !== 'parameter_deleted') return
-    if (companyId && lastEvent.company_id !== companyId) return
-    const deletedId   = lastEvent.parameter_id
-    const deletedName = lastEvent.name
-    setExtraParams(prev =>
-      prev.filter(ep => ep.id !== deletedId && ep.name !== deletedName)
-    )
-    setParamToast(`Parameter removed: ${deletedName}`)
-    setTimeout(() => setParamToast(''), 4000)
-  }, [lastEvent, companyId])
-
-  const breaches = lastReading?.breaches ?? []
-  const phBreach = breaches.find(b => b.parameter === 'ph')
+  const [acking, setAcking] = useState(null)
+  const acknowledge = async (a) => {
+    setAcking(a.key)
+    const token = sessionStorage.getItem('admin_token') || ''
+    const who   = sessionStorage.getItem('admin_username') || 'admin'
+    const done  = []
+    for (const id of a.alertIds) {
+      try {
+        const r = await fetch(`/api/alerts/${id}/acknowledge`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+          body: JSON.stringify({ acknowledged_by: who }),
+        })
+        // 409 = another admin acknowledged it first, 404 = gone — clear it here too
+        if (r.ok || r.status === 404 || r.status === 409) done.push(id)
+      } catch { /* leave it active; the user can retry */ }
+    }
+    if (done.length) wsData?.clearAlerts?.(done)
+    if (done.length < a.alertIds.length) {
+      setParamToast('Could not acknowledge — check the connection and try again')
+      setTimeout(() => setParamToast(''), 4000)
+    }
+    setAcking(null)
+  }
 
   return (
     <ErrorBoundary>
@@ -177,114 +214,95 @@ export default function DashboardPage({ wsData, health, thresholds, onAlertCount
         </div>
       )}
       <div className="space-y-5">
-        {/* pH breach banner — appears at top when pH ≥ threshold */}
-        <PhBreachBanner breaches={breaches} />
+        {/* First screen: notices + the 8 tiles. It fills the visible area so the
+            charts below always start on the next screen, fully visible. */}
+        <section className="dash-first-screen space-y-5">
+        <SuperAdminNotices />
 
-        {/* Row 1 — Stat cards (4 columns) */}
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-          <TemperatureCard reading={lastReading} thresholds={thresholds} />
+        {/* Active alerts — red until acknowledged, blinks for the first 10 s */}
+        <AlertBanner alerts={activeAlerts} now={now} unitOf={unitOf} onAck={acknowledge} acking={acking} />
+
+        {/* Tiles — status tiles always; sensor tiles only for the company's own parameters */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 auto-rows-fr gap-4">
+          {has('temperature') && (
+            <AlertFrame alert={alertFor('temperature')} blinking={blinking(alertFor('temperature'))}>
+              <TemperatureCard reading={displayReading} thresholds={thresholds}
+                alert={alertFor('temperature')} blinking={blinking(alertFor('temperature'))} />
+            </AlertFrame>
+          )}
           <StatusCard isConnected={isConnected} connectionStatus={connectionStatus} />
-          <AlertsTodayCard count={health?.alerts_today ?? 0} />
+          <AlertsTodayCard count={Math.max(health?.alerts_today ?? 0, activeAlerts.length)} />
           <UptimeCard uptimeSeconds={health?.uptime_seconds ?? null} />
-        </div>
 
-        {/* Row 2 — Sensor parameter cards (show simulated unless real sensor data exists for that name) */}
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-          {(() => {
-            const ep    = lastReading?.extra_params ?? {}
-            const xlsP  = Object.entries(ep).find(([k]) => k.toLowerCase() === 'pressure')?.[1] ?? null
-            const livePh = Object.entries(ep).find(([k]) => k.toLowerCase() === 'ph')?.[1] ?? null
-            const liveP = xlsP
-            const liveH = Object.entries(ep).find(([k]) => k.toLowerCase() === 'humidity')?.[1]  ?? null
-            const liveV = Object.entries(ep).find(([k]) => k.toLowerCase() === 'vibration')?.[1] ?? null
-            const hasP  = extraParams.some(p => p.name.toLowerCase() === 'pressure')
-            const hasPh = extraParams.some(p => p.name.toLowerCase() === 'ph')
-            const hasH  = extraParams.some(p => p.name.toLowerCase() === 'humidity')
-            const hasV  = extraParams.some(p => p.name.toLowerCase() === 'vibration')
+          {sensorParams.map(p => {
+            // Case-insensitive match — Pro-Server EX column names may differ in case
+            const ep = displayReading?.extra_params
+            const liveValue = ep
+              ? (ep[p.name] ?? Object.entries(ep).find(([k]) => k.toLowerCase() === p.name.toLowerCase())?.[1] ?? null)
+              : null
+            const pa    = alertFor(p.name)
+            const shown = liveValue ?? pa?.latestValue ?? null
+            const mn = p.min_value != null ? Number(p.min_value) : null
+            const mx = p.max_value != null ? Number(p.max_value) : null
+            const inRange = shown != null && mn != null && mx != null ? shown >= mn && shown <= mx : null
+            const outOfRange = !pa && shown != null && inRange === false
+            const subtitle = pa
+              ? alertLine(pa)
+              : shown != null
+                ? (inRange == null ? 'Live reading' : inRange ? 'Within normal range' : 'Out of range')
+                : 'Waiting for sensor data…'
+            const isPh = p.name.toLowerCase() === 'ph'
             return (
-              <>
-                {!hasP && (
-                  <SensorCard icon={Gauge} iconColor="#0EA5E9" label="Pressure"
-                    value={liveP != null ? trunc3(liveP) : pressure}
-                    unit="bar"
-                    subtitle={liveP != null ? 'From Pro-Server EX' : 'Δ −0.2 predicted'}
-                    footer="Operating range 1.5 – 3.0 bar" />
-                )}
-                {!hasPh && (
-                  <SensorCard icon={FlaskConical} iconColor="#8B5CF6" label="pH"
-                    value={livePh != null ? trunc3(livePh) : '—'}
-                    unit="pH"
-                    subtitle={livePh != null ? 'From Pro-Server EX' : 'Awaiting sensor data'}
-                    footer="Range: 0 – 14" />
-                )}
-                {!hasH && (
-                  <SensorCard icon={Droplets} iconColor="#10B981" label="Humidity"
-                    value={humidity} unit="%" subtitle="Trending upward"
-                    footer="Acceptable 40 – 70 %" />
-                )}
-                {!hasV && (
-                  <SensorCard icon={Activity} iconColor="#F59E0B" label="Vibration"
-                    value={vibration} unit="mm/s" subtitle="RMS velocity"
-                    footer="Limit < 4.5 mm/s" />
-                )}
-              </>
+              <AlertFrame key={p.name} alert={pa} blinking={blinking(pa)}>
+                <SensorCard
+                  icon={isPh ? FlaskConical : Cpu}
+                  iconColor={pa ? '#DC2626' : outOfRange ? '#D97706' : '#7C3AED'}
+                  label={p.name}
+                  value={shown != null ? trunc3(shown) : null}
+                  alert={!!pa}
+                  warn={outOfRange}
+                  blink={blinking(pa)}
+                  unit={p.unit || ''}
+                  subtitle={subtitle}
+                  footer={`Live ${displayParamName(p.name)} reading`}
+                  range={mn != null && mx != null ? `${mn} – ${mx}` : undefined}
+                />
+              </AlertFrame>
             )
-          })()}
+          })}
         </div>
 
-        {/* Row 3 — Dynamic parameter cards (from approved company_parameters) */}
-        {extraParams.length > 0 && (
-          <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-            {extraParams.map(p => {
-              // Case-insensitive match — Pro-Server EX column names may differ in case
-              const ep = lastReading?.extra_params
-              const liveValue = ep
-                ? (ep[p.name] ?? Object.entries(ep).find(([k]) => k.toLowerCase() === p.name.toLowerCase())?.[1] ?? null)
-                : null
-              const mn = p.min_value != null ? Number(p.min_value) : null
-              const mx = p.max_value != null ? Number(p.max_value) : null
-              const inRange = liveValue != null && mn != null && mx != null
-                ? liveValue >= mn && liveValue <= mx
-                : null
-              const isPhParam   = p.name.toLowerCase() === 'ph'
-              const isPhBreached = isPhParam && !!phBreach
-              const subtitle = isPhBreached
-                ? `⚠ pH ALERT — ${liveValue?.toFixed(2)} ≥ threshold`
-                : liveValue != null && inRange != null
-                  ? inRange ? 'Within normal range' : 'Out of range!'
-                  : (mn != null && mx != null ? `Range: ${mn} – ${mx}` : undefined)
-              return (
-                <div
-                  key={p.name}
-                  style={isPhBreached ? {
-                    animation: 'phPulse 1s ease-in-out infinite',
-                    borderRadius: 12,
-                    outline: '2px solid #DC2626',
-                  } : undefined}
-                >
-                  <SensorCard
-                    icon={Cpu}
-                    iconColor={isPhBreached ? '#DC2626' : liveValue != null && inRange === false ? '#EF4444' : '#7C3AED'}
-                    label={p.name}
-                    value={liveValue != null ? trunc3(liveValue) : null}
-                    unit={p.unit || ''}
-                    subtitle={subtitle}
-                    footer={p.unit ? `Live ${p.name} reading (${p.unit})` : `Live ${p.name} reading`}
-                  />
-                </div>
-              )
-            })}
+        {/* Nothing configured yet (new company) */}
+        {!paramsLoading && params.length === 0 && (
+          <div className="card px-6 py-8 text-center">
+            <SlidersHorizontal size={26} className="mx-auto mb-2 text-purple-400" />
+            <p className="text-sm font-semibold text-gray-800">No parameters yet</p>
+            <p className="text-xs text-gray-500 mt-1 max-w-md mx-auto">
+              Request your first parameter in Settings → Add Parameter. Once the Super Admin
+              approves it, its tile and live chart appear here automatically.
+            </p>
+            <button onClick={() => navigate('/settings')}
+              className="mt-3 text-xs font-semibold text-purple-600 hover:text-purple-700">
+              Go to Settings →
+            </button>
           </div>
         )}
 
-        {/* Row 4 — Live charts side-by-side: Temperature | pH */}
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-          <LiveChart readings={readings} thresholds={thresholds} />
-          <PhLiveChart readings={readings} />
-        </div>
+        </section>
 
+        {/* Second screen — one live chart per parameter the company has */}
+        {params.length > 0 && (
+          <div className="dash-snap grid grid-cols-1 lg:grid-cols-2 gap-4">
+            {has('temperature') && <LiveChart readings={readings} thresholds={thresholds} />}
+            {sensorParams.map(p => (
+              p.name.toLowerCase() === 'ph'
+                ? <PhLiveChart key={p.name} readings={readings} />
+                : <ParamLiveChart key={p.name} readings={readings} param={p} />
+            ))}
+          </div>
+        )}
         {/* Row 5 — Mini alert preview */}
-        <div className="card">
+        <div className="dash-snap card">
           <div className="flex items-center justify-between px-5 py-4 border-b border-gray-100">
             <div>
               <h3 className="text-sm font-semibold text-gray-800">Recent Alerts</h3>

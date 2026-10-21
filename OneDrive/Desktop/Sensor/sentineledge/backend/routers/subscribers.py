@@ -158,6 +158,7 @@ async def disable_subscriber(subscriber_id: int, request: Request):
     ok = database.disable_subscriber(subscriber_id)
     if not ok:
         raise HTTPException(status_code=404, detail="Subscriber not found")
+    log_activity(_caller_admin_id(request), "disable_subscriber", "subscriber", str(subscriber_id))
     return {"status": "disabled", "id": subscriber_id}
 
 
@@ -173,6 +174,7 @@ async def enable_subscriber(subscriber_id: int, request: Request):
     ok = database.enable_subscriber(subscriber_id)
     if not ok:
         raise HTTPException(status_code=404, detail="Subscriber not found")
+    log_activity(_caller_admin_id(request), "enable_subscriber", "subscriber", str(subscriber_id))
     return {"status": "enabled", "id": subscriber_id}
 
 
@@ -205,10 +207,14 @@ async def set_subscriber_pin(subscriber_id: int, body: SetPinIn, request: Reques
             status_code=400,
             detail="subscriber_id in path and body must match",
         )
-    _assert_subscriber_company(subscriber_id, _caller_company_id(request))
+    sub_row = _assert_subscriber_company(subscriber_id, _caller_company_id(request))
+    from database.queries.subscribers import pin_conflicts
+    if pin_conflicts(subscriber_id, sub_row.get("name", ""), body.pin):
+        raise HTTPException(status_code=409, detail="Choose a different PIN: another person with the same name already uses it")
     ok = database.set_subscriber_pin(subscriber_id, body.pin)
     if not ok:
         raise HTTPException(status_code=404, detail="Subscriber not found")
+    log_activity(_caller_admin_id(request), "set_subscriber_pin", "subscriber", sub_row.get("name", str(subscriber_id)))
     return {"status": "pin_set", "subscriber_id": subscriber_id}
 
 
@@ -256,6 +262,7 @@ async def update_subscriber(subscriber_id: int, body: SubscriberUpdate, request:
         "Returns all alerts acknowledged by this subscriber, with breach metadata "
         "and computed response_time_seconds. Returns empty list if none found."
     ),
+    dependencies=[Depends(require_admin)],
 )
 @limiter.limit("30/minute")
 async def get_subscriber_acknowledgements(subscriber_id: int, request: Request):

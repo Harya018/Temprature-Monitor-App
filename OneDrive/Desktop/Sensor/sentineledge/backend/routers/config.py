@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 
 from typing import Optional
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 import database
@@ -38,11 +38,39 @@ router = APIRouter(prefix="/api")
 logger = logging.getLogger("sentineledge.routers.config")
 
 
+def _own_limits(company_id) -> dict:
+    """{parameter: (min, max, alerts_enabled)} from this company's own Settings."""
+    rows = database.execute_read(
+        "SELECT LOWER(name) AS n, min_value, max_value, COALESCE(alerts_enabled, TRUE) AS en "
+        "FROM company_parameters WHERE company_id = %s AND is_active = TRUE", (company_id,)) or []
+    return {r["n"]: (r["min_value"], r["max_value"], bool(r["en"])) for r in rows}
+
+
+def _who(admin: dict) -> str:
+    """Name of the admin making a change (for the change history)."""
+    try:
+        r = database.execute_read("SELECT name FROM admins WHERE id = %s", (admin.get("admin_id"),))
+        return r[0]["name"] if r else "admin"
+    except Exception:
+        return "admin"
+
+
 @router.get("/config/thresholds")
-async def get_thresholds():
+async def get_thresholds(admin: dict = Depends(require_admin)):
     """
     Return current thresholds with source info (Addition 11).
+    The sensor company sees the plant's values; every other company sees its own.
     """
+    from services.sensor_company import owns_sensor_feed
+    if not owns_sensor_feed(admin.get("company_id")):
+        t = _own_limits(admin.get("company_id")).get("temperature")
+        return {
+            "temperature": {"high": float(t[1]) if t and t[1] is not None else None,
+                            "low":  float(t[0]) if t and t[0] is not None else None,
+                            "unit": "°C", "name": "Temperature"},
+            "source": "company_settings",
+            "last_changed": None,
+        }
     return {
         "temperature": {
             "high": RUNTIME_THRESHOLDS["temp_high"],
@@ -58,10 +86,14 @@ async def get_thresholds():
 @router.post(
     "/config/thresholds",
     response_model=ThresholdConfigOut,
-    dependencies=[Depends(require_admin)],
 )
-async def update_thresholds(body: ThresholdConfigIn):
-    """Update runtime thresholds and log changes (Additions 6 + 10)."""
+async def update_thresholds(body: ThresholdConfigIn, admin: dict = Depends(require_admin)):
+    """Update runtime thresholds and log changes (Additions 6 + 10).
+    These are the live sensor's temperature limits, so only the company that
+    owns the sensor feed may change them."""
+    from services.sensor_company import owns_sensor_feed, get_sensor_company_id
+    if not owns_sensor_feed(admin.get("company_id")):
+        raise HTTPException(status_code=403, detail="These thresholds belong to another company's sensor")
     fields = {
         "temp_high": body.temp_high,
         "temp_low":  body.temp_low,
@@ -70,7 +102,7 @@ async def update_thresholds(body: ThresholdConfigIn):
         old_val = RUNTIME_THRESHOLDS[field]
         if old_val != new_val:
             database.log_config_change(
-                changed_by="admin",
+                changed_by=_who(admin),
                 field_name=field,
                 old_value=str(old_val),
                 new_value=str(new_val),
@@ -87,6 +119,16 @@ async def update_thresholds(body: ThresholdConfigIn):
     _config.RUNTIME_LAST_CHANGED = datetime.now(timezone.utc).isoformat()
     logger.info("Thresholds updated at runtime: %s", RUNTIME_THRESHOLDS)
 
+    # Keep the sensor company's 'temperature' parameter limits in step
+    try:
+        database.execute_write(
+            "UPDATE company_parameters SET min_value = %s, max_value = %s, updated_at = NOW() "
+            "WHERE company_id = %s AND LOWER(name) = 'temperature'",
+            (RUNTIME_THRESHOLDS["temp_low"], RUNTIME_THRESHOLDS["temp_high"], get_sensor_company_id()),
+        )
+    except Exception as exc:
+        logger.warning("Could not sync temperature parameter limits: %s", exc)
+
     # Broadcast to all WebSocket clients (mobile app + web)
     try:
         from modules.inapp.manager import broadcast as _broadcast
@@ -98,7 +140,7 @@ async def update_thresholds(body: ThresholdConfigIn):
             },
             "source":       _config.RUNTIME_SOURCE,
             "changed_at":   _config.RUNTIME_LAST_CHANGED,
-        })
+        }, company_id=get_sensor_company_id())
     except Exception as exc:
         logger.warning("config_update broadcast failed: %s", exc)
 
@@ -107,18 +149,20 @@ async def update_thresholds(body: ThresholdConfigIn):
 
 @router.post(
     "/config/thresholds/reset",
-    dependencies=[Depends(require_admin)],
 )
-async def reset_thresholds():
+async def reset_thresholds(admin: dict = Depends(require_admin)):
     """
     Reset RUNTIME_THRESHOLDS back to the values from .env (Addition 11).
-    Logs each changed field.
+    Logs each changed field. Only the company that owns the sensor feed may do this.
     """
+    from services.sensor_company import owns_sensor_feed, get_sensor_company_id
+    if not owns_sensor_feed(admin.get("company_id")):
+        raise HTTPException(status_code=403, detail="These thresholds belong to another company's sensor")
     for field, default_val in DEFAULT_THRESHOLDS.items():
         old_val = RUNTIME_THRESHOLDS[field]
         if old_val != default_val:
             database.log_config_change(
-                changed_by="admin",
+                changed_by=_who(admin),
                 field_name=field,
                 old_value=str(old_val),
                 new_value=str(default_val),
@@ -140,7 +184,7 @@ async def reset_thresholds():
             },
             "source":     _config.RUNTIME_SOURCE,
             "changed_at": _config.RUNTIME_LAST_CHANGED,
-        })
+        }, company_id=get_sensor_company_id())
     except Exception as exc:
         logger.warning("config_update broadcast failed: %s", exc)
 
@@ -162,8 +206,19 @@ async def get_vapid_public_key():
 
 
 @router.get("/config/alert-settings")
-async def get_alert_settings():
-    """Return alert enable/disable flags and the pH min/max thresholds."""
+async def get_alert_settings(admin: dict = Depends(require_admin)):
+    """Return alert enable/disable flags and the pH min/max thresholds
+    (the plant's for the sensor company, each company's own for everyone else)."""
+    from services.sensor_company import owns_sensor_feed
+    if not owns_sensor_feed(admin.get("company_id")):
+        own = _own_limits(admin.get("company_id"))
+        ph, tp = own.get("ph"), own.get("temperature")
+        return {
+            "temp_alerts_enabled": tp[2] if tp else False,
+            "ph_alerts_enabled":   ph[2] if ph else False,
+            "ph_threshold_max":    float(ph[1]) if ph and ph[1] is not None else 7.0,
+            "ph_threshold_min":    float(ph[0]) if ph and ph[0] is not None else 5.5,
+        }
     return {
         "temp_alerts_enabled": RUNTIME_THRESHOLDS.get("temp_alerts_enabled", True),
         "ph_alerts_enabled":   RUNTIME_THRESHOLDS.get("ph_alerts_enabled",   True),
@@ -172,13 +227,18 @@ async def get_alert_settings():
     }
 
 
-@router.post("/config/alert-settings", dependencies=[Depends(require_admin)])
-async def update_alert_settings(body: AlertSettingsIn):
-    """Enable/disable temperature or pH alerts, or change the pH threshold."""
+@router.post("/config/alert-settings")
+async def update_alert_settings(body: AlertSettingsIn, admin: dict = Depends(require_admin)):
+    """Enable/disable temperature or pH alerts, or change the pH threshold.
+    These switches are server-wide, so only the company that owns the sensor feed may change them
+    (every other company sets its own limits per parameter in Settings)."""
+    from services.sensor_company import owns_sensor_feed
+    if not owns_sensor_feed(admin.get("company_id")):
+        raise HTTPException(status_code=403, detail="These alert settings belong to another company's sensor")
     if body.temp_alerts_enabled is not None:
         RUNTIME_THRESHOLDS["temp_alerts_enabled"] = body.temp_alerts_enabled
         database.log_config_change(
-            changed_by="admin",
+            changed_by=_who(admin),
             field_name="temp_alerts_enabled",
             old_value=str(not body.temp_alerts_enabled),
             new_value=str(body.temp_alerts_enabled),
@@ -191,7 +251,7 @@ async def update_alert_settings(body: AlertSettingsIn):
     if body.ph_alerts_enabled is not None:
         RUNTIME_THRESHOLDS["ph_alerts_enabled"] = body.ph_alerts_enabled
         database.log_config_change(
-            changed_by="admin",
+            changed_by=_who(admin),
             field_name="ph_alerts_enabled",
             old_value=str(not body.ph_alerts_enabled),
             new_value=str(body.ph_alerts_enabled),
@@ -206,7 +266,7 @@ async def update_alert_settings(body: AlertSettingsIn):
     if new_max is not None:
         RUNTIME_THRESHOLDS["ph_threshold_max"] = new_max
         database.log_config_change(
-            changed_by="admin", field_name="ph_threshold_max",
+            changed_by=_who(admin), field_name="ph_threshold_max",
             old_value="", new_value=str(new_max),
         )
         database.execute_write(
@@ -217,7 +277,7 @@ async def update_alert_settings(body: AlertSettingsIn):
     if body.ph_threshold_min is not None:
         RUNTIME_THRESHOLDS["ph_threshold_min"] = body.ph_threshold_min
         database.log_config_change(
-            changed_by="admin", field_name="ph_threshold_min",
+            changed_by=_who(admin), field_name="ph_threshold_min",
             old_value="", new_value=str(body.ph_threshold_min),
         )
         database.execute_write(

@@ -9,6 +9,7 @@ import { getSeverityColor, getDirectionLabel, getSeverityLabel } from '../../uti
 import { utcToIST, timeAgo } from '../../utils/time.js'
 import Card from '../shared/Card.jsx'
 import Badge from '../shared/Badge.jsx'
+import TimeAgo from '../shared/TimeAgo.jsx'
 
 function sev2badge(s) {
   const m = { NORMAL:'green', WARNING:'amber', CRITICAL:'orange', EMERGENCY:'red' }
@@ -38,19 +39,19 @@ export default function AlertLog({ onCountChange }) {
   }, [load])
 
   const handleAck = async (alert) => {
-    const name = prompt('Acknowledge as (your name):')
-    if (!name?.trim()) return
     try {
-      await acknowledgeAlert(alert.id, name.trim())
+      const r = await acknowledgeAlert(alert.id)     // recorded under your own sign-in name
+      const by = r?.acknowledged_by || sessionStorage.getItem('admin_username') || 'admin'
+      if (r?.already) window.alert(`Already acknowledged by ${by}`)
       setAlerts(prev =>
         prev.map(a => a.id === alert.id
-          ? { ...a, acknowledged: true, acknowledged_by: name.trim() }
+          ? { ...a, acknowledged: true, acknowledged_by: by }
           : a
         )
       )
-      setAckMap(prev => ({ ...prev, [alert.id]: name.trim() }))
+      setAckMap(prev => ({ ...prev, [alert.id]: by }))
     } catch (e) {
-      alert('Failed to acknowledge: ' + e.message)
+      window.alert('Failed to acknowledge: ' + e.message)
     }
   }
 
@@ -111,7 +112,7 @@ export default function AlertLog({ onCountChange }) {
                     </td>
                     {/* Time */}
                     <td>
-                      <p className="text-xs text-gray-700">{timeAgo(alert.timestamp)}</p>
+                      <p className="text-xs text-gray-700"><TimeAgo ts={alert.timestamp} /></p>
                       <p className="text-xs text-gray-400">{utcToIST(alert.timestamp)}</p>
                     </td>
                     {/* Delivery */}

@@ -17,20 +17,26 @@ logger = get_logger(__name__)
 router = APIRouter(prefix="/api", tags=["Receipts"])
 
 
-@router.get("/receipts", dependencies=[Depends(require_admin)])
+@router.get("/receipts")
 async def get_receipts(
     limit:   int = Query(100, ge=1, le=500),
     channel: str = Query("all"),
     status:  str = Query("all"),
+    admin:   dict = Depends(require_admin),
 ):
     """
     Return delivery receipts joined with alert and subscriber info.
     channel: all | email | sms
     status:  all | success | failed
+    Scoped to the caller's company (a receipt belongs to its alert's company).
     """
     try:
         where_clauses = []
         params: list = []
+
+        if admin.get("company_id") is not None:
+            where_clauses.append("a.company_id = %s")
+            params.append(admin["company_id"])
 
         if channel != "all":
             where_clauses.append("dr.channel = %s")

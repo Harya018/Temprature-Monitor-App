@@ -70,19 +70,22 @@ def get_subscriber_by_name_and_pin(name: str, pin: str) -> Optional[dict]:
     try:
         rows = execute_read(
             """
-            SELECT * FROM subscribers
-            WHERE LOWER(name) = LOWER(%s)
-              AND active = 1
+            SELECT s.* FROM subscribers s
+              LEFT JOIN companies c ON c.id = s.company_id
+            WHERE LOWER(s.name) = LOWER(%s)
+              AND COALESCE(s.active, 1) = 1
+              AND COALESCE(s.is_active, 1) = 1
+              AND COALESCE(c.is_active, 1) != 0
             """,
             (name,),
         )
-        if not rows:
+        # Two companies may each have a person with the same name: check every one of them,
+        # not just the first row, and refuse if the PIN would open more than one account.
+        matches = [r for r in rows if r.get("pin") and _verify_pin(pin, r["pin"])]
+        if len(matches) > 1:
+            logger.warning("subscriber login refused: name=%r and this PIN match %d accounts", name, len(matches))
             return None
-        subscriber = rows[0]
-        stored_pin = subscriber.get("pin")
-        if not stored_pin or not _verify_pin(pin, stored_pin):
-            return None
-        return subscriber
+        return matches[0] if matches else None
     except Exception as exc:
         logger.error("get_subscriber_by_name_and_pin failed: %s", exc)
         return None
@@ -190,9 +193,10 @@ def clear_fcm_token(subscriber_id: int) -> bool:
 def delete_subscriber(subscriber_id: int) -> bool:
     """Hard-delete a subscriber and all related data in FK-safe order."""
     try:
+        # Acknowledgements are columns on alerts, so there is no separate table to clear.
+        # notification_retry_queue cascades and policy_escalation_log nulls via FK.
         execute_write("DELETE FROM subscriber_sessions WHERE subscriber_id = %s", (subscriber_id,))
-        execute_write("DELETE FROM notification_acknowledgements WHERE subscriber_id = %s", (subscriber_id,))
-        execute_write("DELETE FROM delivery_records WHERE subscriber_id = %s", (subscriber_id,))
+        execute_write("DELETE FROM delivery_receipts WHERE subscriber_id = %s", (subscriber_id,))
         execute_write("DELETE FROM subscribers WHERE id = %s", (subscriber_id,))
         return True
     except Exception as exc:
@@ -200,11 +204,25 @@ def delete_subscriber(subscriber_id: int) -> bool:
         return False
 
 
+def pin_conflicts(subscriber_id: int, name: str, pin: str) -> bool:
+    """True if another person with the same name (in any company) already uses this PIN: the app
+    logs in by name + PIN, so the two accounts could not be told apart."""
+    try:
+        rows = execute_read(
+            "SELECT pin FROM subscribers WHERE LOWER(name) = LOWER(%s) AND id != %s AND pin IS NOT NULL",
+            (name, subscriber_id),
+        )
+        return any(_verify_pin(pin, r["pin"]) for r in rows)
+    except Exception as exc:
+        logger.error("pin_conflicts failed: %s", exc)
+        return False
+
+
 def disable_subscriber(subscriber_id: int) -> bool:
     """Set is_active=0 for a subscriber. Returns True on success."""
     try:
         execute_write(
-            "UPDATE subscribers SET is_active = 0 WHERE id = %s",
+            "UPDATE subscribers SET is_active = 0, active = 0 WHERE id = %s",
             (subscriber_id,),
         )
         return True
@@ -217,7 +235,7 @@ def enable_subscriber(subscriber_id: int) -> bool:
     """Set is_active=1 for a subscriber. Returns True on success."""
     try:
         execute_write(
-            "UPDATE subscribers SET is_active = 1 WHERE id = %s",
+            "UPDATE subscribers SET is_active = 1, active = 1 WHERE id = %s",
             (subscriber_id,),
         )
         return True

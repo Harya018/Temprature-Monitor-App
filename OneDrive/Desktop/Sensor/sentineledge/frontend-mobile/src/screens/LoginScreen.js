@@ -1,7 +1,7 @@
 // ─────────────────────────────────────────────
 //  SentinelEdge — Login Screen
 // ─────────────────────────────────────────────
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   View,
   Text,
@@ -18,7 +18,8 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
 import { login, saveSession } from '../services/auth';
 import { registerPushToken } from '../services/pushTokenService';
-import { API_BASE } from '../config/config';
+import { loadServer, saveServer, serverBase, serverLabel } from '../config/config';
+import axios from 'axios';
 
 const LoginScreen = ({ navigation }) => {
   const [username, setUsername] = useState('');
@@ -26,10 +27,20 @@ const LoginScreen = ({ navigation }) => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [showPassword, setShowPassword] = useState(false);
+  const [server, setServer] = useState('');
+
+  // show the address that was used last time
+  useEffect(() => {
+    loadServer().then(() => setServer(serverLabel()));
+  }, []);
 
   const handleLogin = async () => {
+    if (!server.trim()) {
+      setError('Enter the server address given by your company.');
+      return;
+    }
     if (!username.trim() || !password.trim()) {
-      setError('Please enter both username and password.');
+      setError('Please enter both your name and your PIN / password.');
       return;
     }
 
@@ -37,17 +48,36 @@ const LoginScreen = ({ navigation }) => {
     setError('');
 
     try {
+      await saveServer(server);
+      // is there a SentinelEdge server at this address?
+      try {
+        await axios.get(`${serverBase()}/api/health`, { timeout: 6000 });
+      } catch (e) {
+        throw Object.assign(new Error('server'), { code: 'NOSERVER' });
+      }
       const data = await login(username.trim(), password);
       const token = data.token || data.access_token || data.auth_token;
       if (!token) throw new Error('No token received from server.');
 
-      await saveSession(token, username.trim());
+      await saveSession(token, data.name || username.trim(), data.kind || 'subscriber', data.company ? data.company.name : '');
       navigation.replace('Main');
-      registerPushToken(token, API_BASE.replace('/api', '')).catch(() => {});
+      if ((data.kind || 'subscriber') === 'subscriber') {
+        registerPushToken(token, serverBase()).catch(() => {});
+      }
     } catch (err) {
+      if (err.code === 'NOSERVER') {
+        setError(`Cannot reach a SentinelEdge server at ${serverLabel()}. Check the address and that this phone is on the same network (or VPN).`);
+        setLoading(false);
+        return;
+      }
+      if (err.message && !err.response && !err.request && err.code !== 'ECONNABORTED') {
+        setError(err.message);
+        setLoading(false);
+        return;
+      }
       console.error('[Login] Error:', err);
       if (err.response?.status === 401) {
-        setError('Invalid username or password.');
+        setError('Name or PIN / password is incorrect.');
       } else if (err.response?.status === 403) {
         setError('Account locked. Contact administrator.');
       } else if (err.code === 'ECONNABORTED' || err.message?.includes('timeout')) {
@@ -79,20 +109,36 @@ const LoginScreen = ({ navigation }) => {
               <Ionicons name="shield-checkmark" size={48} color="#818CF8" />
             </View>
             <Text style={styles.brandName}>SentinelEdge</Text>
-            <Text style={styles.brandSubtitle}>Industrial Temperature Monitor</Text>
+            <Text style={styles.brandSubtitle}>Industrial Monitoring</Text>
           </View>
 
           {/* Card */}
           <View style={styles.card}>
-            <Text style={styles.cardTitle}>Worker Login</Text>
-            <Text style={styles.cardSubtitle}>Sign in to access monitoring dashboard</Text>
+            <Text style={styles.cardTitle}>Sign in</Text>
+            <Text style={styles.cardSubtitle}>Enter the server address your company gave you, then your name and PIN</Text>
+
+            {/* Server address */}
+            <View style={styles.inputWrapper}>
+              <Ionicons name="server-outline" size={20} color="#818CF8" style={styles.inputIcon} />
+              <TextInput
+                style={styles.input}
+                placeholder="Server address (e.g. 192.168.1.20)"
+                placeholderTextColor="#6B7280"
+                value={server}
+                onChangeText={(t) => { setServer(t); setError(''); }}
+                autoCapitalize="none"
+                autoCorrect={false}
+                keyboardType="url"
+                returnKeyType="next"
+              />
+            </View>
 
             {/* Username */}
             <View style={styles.inputWrapper}>
               <Ionicons name="person-outline" size={20} color="#818CF8" style={styles.inputIcon} />
               <TextInput
                 style={styles.input}
-                placeholder="Username"
+                placeholder="Your name"
                 placeholderTextColor="#6B7280"
                 value={username}
                 onChangeText={(t) => { setUsername(t); setError(''); }}
@@ -107,7 +153,7 @@ const LoginScreen = ({ navigation }) => {
               <Ionicons name="lock-closed-outline" size={20} color="#818CF8" style={styles.inputIcon} />
               <TextInput
                 style={[styles.input, styles.passwordInput]}
-                placeholder="Password"
+                placeholder="PIN / password"
                 placeholderTextColor="#6B7280"
                 value={password}
                 onChangeText={(t) => { setPassword(t); setError(''); }}

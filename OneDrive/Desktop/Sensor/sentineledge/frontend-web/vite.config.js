@@ -6,6 +6,9 @@ export default defineConfig({
   build: {
     outDir: '../backend/static',
     emptyOutDir: true,
+    // Source maps expose the full frontend source when served from backend/static.
+    // Off for production builds; set SOURCEMAP=true to build them for debugging.
+    sourcemap: process.env.SOURCEMAP === 'true',
   },
   server: {
     proxy: {

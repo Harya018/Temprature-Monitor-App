@@ -3,6 +3,8 @@
  * Full dedicated alerts page with date filter, simplified table,
  * and a "Clear Alerts" button that opens a period selector + password modal.
  */
+
+import { fmtAlertNumber } from '../utils/alertFormat.js'
 import { useState, useEffect, useCallback } from 'react'
 import { RefreshCw, Filter, CheckCircle, Trash2, FileText, X, Download, Printer } from 'lucide-react'
 import { fetchAlerts, deleteAlerts } from '../services/api.js'
@@ -11,6 +13,7 @@ import PasswordConfirmModal from '../components/PasswordConfirmModal.jsx'
 import { useToast, ToastContainer } from '../components/shared/Toast.jsx'
 import EmptyState from '../components/EmptyState'
 import { exportCsv } from '../utils/exportCsv'
+import TimeAgo from '../components/shared/TimeAgo.jsx'
 
 // ─── Period options ───────────────────────────────────────────────────────────
 const CLEAR_PERIODS = [
@@ -238,11 +241,11 @@ export default function AlertsPage({ onCountChange }) {
                   {filtered.map(alert => (
                     <tr key={alert.id}>
                       <td>
-                        <span className="font-bold text-gray-800">{alert.value?.toFixed(1)}°C</span>
-                        <span className="text-gray-400"> / {alert.threshold?.toFixed(1)}°C</span>
+                        <span className="font-bold text-gray-800">{fmtAlertNumber(alert.parameter, alert.value)}</span>
+                        <span className="text-gray-400"> / {fmtAlertNumber(alert.parameter, alert.threshold)}</span>
                       </td>
                       <td>
-                        <p className="text-xs font-medium text-gray-700">{timeAgo(alert.timestamp)}</p>
+                        <p className="text-xs font-medium text-gray-700"><TimeAgo ts={alert.timestamp} /></p>
                         <p className="text-xs text-gray-400">{utcToIST(alert.timestamp)}</p>
                       </td>
                       <td style={{ textAlign: 'center' }}>
@@ -533,7 +536,7 @@ export default function AlertsPage({ onCountChange }) {
                             <div style={{ fontWeight: 700, color: r.side === 'after' ? '#1D4ED8' : '#374151' }}>
                               {Number(r.temperature).toFixed(1)}°C
                             </div>
-                            <div style={{ fontSize: 10, color: '#9CA3AF', marginTop: 2 }}>{timeAgo(r.timestamp)}</div>
+                            <div style={{ fontSize: 10, color: '#9CA3AF', marginTop: 2 }}><TimeAgo ts={r.timestamp} /></div>
                           </div>
                         ))}
                       </div>

@@ -1,0 +1,364 @@
+=====================================================================
+  SENTINELEDGE - INSTALL ON A NEW LAPTOP
+  (Windows 10/11, 64-bit)
+=====================================================================
+
+Follow the parts in order. Part A is done on the OLD laptop, the rest
+on the NEW laptop. Plan about 1-2 hours (mostly downloads and the
+database restore).
+
+Folder used below:  C:\Users\<you>\Desktop\Sensor   (call it SENSOR)
+Change the path if you put it somewhere else.
+
+
+---------------------------------------------------------------------
+ WHAT TO DOWNLOAD (on the new laptop)
+---------------------------------------------------------------------
+ 1. PostgreSQL 16 (Windows x86-64)
+      https://www.postgresql.org/download/windows/   (EDB installer)
+ 2. Python 3.12 64-bit  - for the backend
+      https://www.python.org/downloads/release/python-3125/
+      file: "Windows installer (64-bit)"
+ 3. Python 3.12.10 32-bit - for the Pro-Server EX collector ONLY
+      https://www.python.org/downloads/release/python-31210/
+      file: "Windows installer (32-bit)"  ->  python-3.12.10.exe
+ 4. Node.js 22 LTS (64-bit) - to build the web dashboard
+      https://nodejs.org/
+ 5. Pro-face Pro-Server EX  (from your Pro-face installation media)
+ 6. SIM7600 GSM modem USB driver (only if you use SMS alerts)
+ 7. Microsoft Excel (desktop Office) - only for the Excel reader, Part F2
+
+
+ HOW DATA GETS IN - TWO READERS
+ -------------------------------
+ a) ProEasy collector (Part F)  - the LIVE source. Reads the PLC
+    through Pro-Server EX every 5 s and sends it to the backend.
+ b) Excel reader (Part F2)      - built into the backend. Reads the
+    .xls/.xlsx/.csv file Pro-Server EX saves. Used when you switch
+    "Live data" OFF in Settings - then the dashboard shows the Excel
+    file instead of the collector.
+
+
+=====================================================================
+ PART A - ON THE OLD LAPTOP: TAKE A BACKUP
+=====================================================================
+
+A1. Stop the system: double-click STOP.bat.
+    (PostgreSQL keeps running - that is correct.)
+
+A2. Back up the database. Open Command Prompt and run:
+
+      "C:\Program Files\PostgreSQL\16\bin\pg_dump.exe" -U sentineledge -h localhost -d sentineledge -F c -f "%USERPROFILE%\Desktop\sentineledge.dump"
+
+    It asks for the database password. That is the password inside
+    DATABASE_URL in  SENSOR\sentineledge\.env.development
+      postgresql://sentineledge:<THIS PART>@localhost:5432/sentineledge
+    The readings table is large (8+ million rows) - this can take
+    several minutes and the file can be a few GB.
+
+A3. Copy the whole SENSOR folder to a USB drive / external disk,
+    but SKIP these folders (they are rebuilt on the new laptop and
+    will NOT work if copied):
+      SENSOR\sentineledge\venv
+      SENSOR\sentineledge\collector\venv32
+      SENSOR\sentineledge\frontend-web\node_modules
+      SENSOR\sentineledge\frontend-mobile\node_modules
+
+    With robocopy (example - change E:\Sensor to your drive):
+      robocopy "%USERPROFILE%\Desktop\Sensor" "E:\Sensor" /E /XD venv venv32 node_modules
+
+A4. Also copy  sentineledge.dump  (from step A2) to the USB drive.
+
+    Keep these files private - the .env files and the dump contain
+    passwords, phone numbers and e-mail addresses.
+
+
+=====================================================================
+ PART B - NEW LAPTOP: INSTALL POSTGRESQL 16
+=====================================================================
+
+B1. Run the PostgreSQL 16 installer.
+      - Components: PostgreSQL Server, Command Line Tools (pgAdmin optional)
+      - Password for the "postgres" super user: choose one and WRITE IT DOWN
+      - Port: 5432  (keep the default)
+      - Locale: default
+    Do NOT run Stack Builder at the end (not needed).
+
+B2. Check the Windows service exists and is running:
+      Win+R -> services.msc -> "postgresql-x64-16" -> Running, Startup = Automatic
+    (START.bat looks for this service name.)
+
+B3. Create the database user and the database. Open Command Prompt:
+
+      "C:\Program Files\PostgreSQL\16\bin\psql.exe" -U postgres -h localhost
+
+    Enter the postgres password from B1, then type (use the SAME password
+    that is in DATABASE_URL in your .env files, or a new one - see C3):
+
+      CREATE USER sentineledge WITH PASSWORD 'your-db-password';
+      CREATE DATABASE sentineledge OWNER sentineledge;
+      \q
+
+
+=====================================================================
+ PART C - NEW LAPTOP: COPY THE PROJECT AND RESTORE THE DATA
+=====================================================================
+
+C1. Copy the SENSOR folder from the USB drive to the Desktop
+    (or anywhere - START.bat works from its own folder).
+
+C2. Restore the database backup (from A2):
+
+      "C:\Program Files\PostgreSQL\16\bin\pg_restore.exe" -U sentineledge -h localhost -d sentineledge --no-owner --role=sentineledge "E:\sentineledge.dump"
+
+    Enter the sentineledge password. This can take 10-30 minutes.
+    A few "already exists" warnings are harmless.
+
+    Then refresh the database statistics (makes the dashboard fast):
+
+      "C:\Program Files\PostgreSQL\16\bin\psql.exe" -U sentineledge -h localhost -d sentineledge -c "VACUUM ANALYZE;"
+
+    NO BACKUP / FRESH START?  Skip C2. The backend creates all tables
+    automatically the first time it starts. You then create the company,
+    admins, subscribers and parameters again from the Super Admin page.
+
+C3. Check the database password in the settings files:
+      SENSOR\sentineledge\.env.development
+      SENSOR\sentineledge\.env.production
+    The line must match the user/password from B3:
+      DATABASE_URL=postgresql://sentineledge:your-db-password@localhost:5432/sentineledge
+
+
+=====================================================================
+ PART D - NEW LAPTOP: BACKEND (Python 64-bit)
+=====================================================================
+
+D1. Run the Python 3.12 64-bit installer.
+      - TICK "Add python.exe to PATH"   (START.bat runs "python")
+      - Install Now
+
+D2. Open a NEW Command Prompt and check:
+      python --version          -> Python 3.12.x
+      python -c "import struct; print(struct.calcsize('P')*8)"   -> 64
+
+D3. Install the backend packages:
+      cd /d "%USERPROFILE%\Desktop\Sensor\sentineledge\backend"
+      python -m pip install --upgrade pip
+      python -m pip install -r requirements.txt
+
+
+=====================================================================
+ PART E - NEW LAPTOP: WEB DASHBOARD (Node.js)
+=====================================================================
+
+The backend serves the dashboard from  backend\static . If you copied
+that folder it already works, but build it once to be sure:
+
+E1. Install Node.js 22 LTS (default options).
+
+E2. Open a NEW Command Prompt:
+      cd /d "%USERPROFILE%\Desktop\Sensor\sentineledge\frontend-web"
+      npm ci
+      npm run build
+    The build writes to  sentineledge\backend\static .
+
+
+=====================================================================
+ PART F - NEW LAPTOP: PRO-SERVER EX COLLECTOR (Python 32-bit)
+=====================================================================
+
+The collector reads the PLC through Pro-Server EX's ProEasyDotNet.dll,
+which is 32-bit - so it needs its own 32-bit Python. It must NOT use
+the 64-bit Python from Part D.
+
+F1. Install Pro-Server EX (same version as the old laptop) and open
+    your project (SAMPLE DATA.npxe). Do not change the PLC settings or
+    the project file. Check the DLL exists:
+      C:\Program Files (x86)\Pro-face\Pro-Server EX\PRO-SDK\DotNet40\bin\ProEasyDotNet.dll
+    If it is somewhere else, put the real path in "dll_path" inside
+      SENSOR\sentineledge\collector\collector_config.json
+
+F2. .NET Framework 4.8 must be installed (it is on Windows 10/11 by
+    default; check Settings -> Apps if unsure).
+
+F3. Put the 32-bit installer python-3.12.10.exe into
+      SENSOR\sentineledge\collector\
+    then double-click:
+      install_python32.bat      (installs to C:\Python312-32, does not touch PATH)
+      setup_32bit_env.bat       (creates collector\venv32, installs pythonnet 3.1.0)
+    The last check should print "bits: 32" and "clr OK".
+
+F4. Test the collector once (Pro-Server EX running, backend running):
+      SENSOR\sentineledge\collector\run_collector_32.bat --test
+
+    The collector key: "api_key" in collector_config.json must equal
+    COLLECTOR_API_KEY on the backend (see Part H).
+
+
+=====================================================================
+ PART F2 - NEW LAPTOP: EXCEL READER (built into the backend)
+=====================================================================
+
+The backend also contains an Excel reader (backend\core\excel_sensor.py)
+that reads the .xls/.xlsx file Pro-Server EX writes. It is installed
+with the backend - nothing separate to copy.
+
+F2-1. Install Microsoft Excel (desktop Office). The reader opens the
+      file through Excel itself (COM), so Excel must be on this laptop.
+
+F2-2. pywin32 (the Python-to-Excel link) is installed by step D3
+      (it is in requirements.txt). Check it in Command Prompt:
+        python -c "import win32com.client, pythoncom; print('pywin32 OK')"
+      If that fails:
+        python -m pip install pywin32==311
+
+F2-3. Tell the backend where the file is: log in -> Settings ->
+      "Pro-Server EX Data Source" -> enter the full path of the file
+      Pro-Server EX saves (same path as on the old laptop, e.g. the
+      SAMPLE DATA export folder) -> Save. The path is stored in the
+      database, so a restored backup (C2) already contains it - just
+      check the file exists at that path on the new laptop.
+
+F2-4. SWITCHES in Settings -> Pro-Server EX Data Source / Live Collector:
+        "Live collector" switch - the ProEasy collector feeds the dashboard.
+        "Excel reader"   switch - the dashboard follows the Excel file.
+      Each has its own ON/OFF button (save the file path before switching
+      the Excel reader on). The choice is saved and survives restarts.
+      The Excel reader shows the file's LAST ROW and keeps showing it until
+      the next row is added; each new row is then stored and checked for
+      alerts once. Works with .xls .xlsx .xlsm .xlsb .csv, also while Excel
+      has the file open (and sees rows typed into an open workbook).
+
+=====================================================================
+ PART G - FIRST START AND CHECKS
+=====================================================================
+
+G1. Double-click  SENSOR\START.bat
+      - starts PostgreSQL if needed
+      - starts the backend (window "SentinelEdge Backend")
+      - starts the collector (window "SentinelEdge ProEasy Collector")
+      - opens the dashboard in the browser
+    Keep both black windows open while the system runs.
+
+G2. Open in the browser:
+      Admin dashboard : http://localhost:5000
+      Super Admin     : http://localhost:5000/super-admin/login
+      Health check    : http://localhost:5000/api/health   (should say "ok")
+
+G3. Check, after logging in:
+      - Health page: Sensor = "Live" (collector sent a reading in the
+        last 2 minutes), Database = OK, SMS = "Connected" if the GSM
+        modem is plugged in.
+      - Dashboard: temperature / pH tiles update every 5 s.
+      - Super Admin -> Companies -> your company: admins, subscribers
+        and parameters are there (if you restored the backup).
+      - Daily CSV files appear in  SENSOR\sentineledge\data\readings_csv\
+
+G4. To stop everything: double-click STOP.bat.
+
+
+=====================================================================
+ PART H - PRODUCTION SETTINGS (do this before real use)
+=====================================================================
+
+H1. Make the backend use the production settings file:
+      Command Prompt (Run as administrator):
+        setx APP_ENV production /M
+      Close and reopen Command Prompt / restart the laptop.
+
+H2. In  SENSOR\sentineledge\.env.production  set:
+      ADMIN_PASSWORD=<a strong password>
+      COLLECTOR_API_KEY=<a long random text>
+      DATABASE_URL=postgresql://sentineledge:<db password>@localhost:5432/sentineledge
+    In production the backend REFUSES TO START if these are still
+    defaults - that is on purpose.
+
+H3. Put the SAME collector key in
+      SENSOR\sentineledge\collector\collector_config.json   ->  "api_key"
+
+H4. SMS (SIM7600 GSM modem): install the modem's USB driver, plug it in,
+    keep SMS_METHOD=sim7600 in the .env file. The Health page shows
+    "Connected" when the modem answers.
+
+H5. E-mail alerts: set SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASSWORD
+    in the .env file (for Gmail use an App Password, not your normal one).
+
+
+=====================================================================
+ PART I - LAPTOP SETTINGS SO IT KEEPS RUNNING
+=====================================================================
+
+I1. Never sleep: Settings -> System -> Power -> "When plugged in, put
+    my device to sleep" = Never. (If the laptop sleeps, monitoring stops.)
+I2. Edge: edge://settings/system -> "Never put these sites to sleep"
+    -> Add  http://localhost:5000
+I3. Other PCs / phones on the same network: allow the port in the
+    firewall (Command Prompt as administrator):
+      netsh advfirewall firewall add rule name="SentinelEdge 5000" dir=in action=allow protocol=TCP localport=5000
+    Then open  http://<this-laptop-IP>:5000  from the other device.
+    Keep it on the plant network - do not expose port 5000 to the internet.
+I4. Optional: put a shortcut to START.bat in the Startup folder
+    (Win+R -> shell:startup) so it starts after a reboot.
+
+
+=====================================================================
+ TROUBLESHOOTING
+=====================================================================
+
+ "python is not recognized"
+    -> Python 64-bit was installed without "Add to PATH". Re-run the
+       installer -> Modify -> tick "Add Python to environment variables".
+
+ Backend window closes at once / "password authentication failed"
+    -> DATABASE_URL in the .env file does not match the user/password
+       from B3. Fix it, then run START.bat again.
+
+ "Refusing to start in production with default secrets"
+    -> Part H2 not done. Set ADMIN_PASSWORD, COLLECTOR_API_KEY and
+       DATABASE_URL in .env.production.
+
+ Port 5000 already in use
+    -> Run STOP.bat, then START.bat.
+
+ Collector: "Python executable not found" in START.bat
+    -> Part F3 not done (collector\venv32 missing).
+
+ Collector: 401 Invalid API key
+    -> "api_key" in collector_config.json differs from COLLECTOR_API_KEY.
+
+ Collector: DLL / clr errors
+    -> Pro-Server EX not installed, wrong "dll_path", or the collector
+       is running with 64-bit Python. Only use venv32 (run_collector_32.bat).
+
+ Excel reader: "No module named win32com" / "pythoncom"
+    -> python -m pip install pywin32==311   (Part F2-2)
+
+ Excel reader: "Invalid class string" / cannot open the file
+    -> Microsoft Excel is not installed, or the file path in Settings
+       -> Pro-Server EX Data Source does not exist on this laptop.
+
+ Health page shows "CSV fallback"
+    -> No collector reading in the last 2 minutes. Check that Pro-Server
+       EX is running and the collector window has no errors.
+
+ Dashboard is slow after restoring the backup
+    -> Run the VACUUM ANALYZE command from step C2.
+
+ SMS "Not connected"
+    -> Modem driver missing or modem unplugged. Check Device Manager ->
+       Ports (COM & LPT) for the SIM7600 AT port.
+=====================================================================
+
+
+==================================================
+SETTING UP A COMPANY SERVER (node) THAT SYNCS TO THE HUB
+==================================================
+1. Install as above, but in sentineledge\.env.production add:   SERVER_ROLE=node
+   (the Super Admin laptop stays as the default, SERVER_ROLE=hub).
+2. Install Tailscale on both PCs (or use the same LAN) so the node can reach the hub.
+3. On the hub: Super Admin > Companies > open the company > "Company server" >
+   Generate pairing code. Note the hub address shown (Tailscale or Local network).
+4. On the node PC open  http://localhost:5000/node-setup , enter the hub address and
+   the code, press Connect. The code works once and expires in 24 hours.
+5. The node keeps its own database. If the hub or network is down, alerts and summaries
+   are queued on the node and sent automatically when the link returns.

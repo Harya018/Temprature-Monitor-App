@@ -17,6 +17,7 @@ function adminHeaders() {
 export default function ReportsPage() {
   const [reports,    setReports]    = useState([])
   const [loading,    setLoading]    = useState(false)
+  const [loadError,  setLoadError]  = useState('')
   const [expanded,   setExpanded]   = useState(null)
   const [exportFrom, setExportFrom] = useState(() => {
     const d = new Date(); d.setDate(d.getDate() - 7)
@@ -27,8 +28,12 @@ export default function ReportsPage() {
 
   const load = useCallback(async () => {
     setLoading(true)
-    try { setReports(await fetchDailyReports(30)) }
-    catch { /* silent */ }
+    setLoadError('')
+    try {
+      const data = await fetchDailyReports(30)
+      setReports(Array.isArray(data) ? data : [])
+    }
+    catch (e) { setLoadError(e?.message || 'Request failed') }
     finally { setLoading(false) }
   }, [])
 
@@ -101,6 +106,16 @@ export default function ReportsPage() {
 
       {loading && reports.length === 0 ? (
         <div className="card overflow-hidden"><SkeletonTable rows={5} /></div>
+      ) : loadError && reports.length === 0 ? (
+        <div className="card px-5 py-10 text-center">
+          <p className="text-sm font-semibold text-red-600">Could not load daily reports</p>
+          <p className="text-xs text-gray-400 mt-1">{loadError} — press Refresh to try again.</p>
+        </div>
+      ) : reports.length === 0 ? (
+        <div className="card px-5 py-10 text-center">
+          <p className="text-sm font-semibold text-gray-600">No daily reports yet</p>
+          <p className="text-xs text-gray-400 mt-1">A report appears here for each day that has sensor readings.</p>
+        </div>
       ) : (
         <div className="space-y-2">
           {reports.map(r => (

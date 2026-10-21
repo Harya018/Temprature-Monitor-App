@@ -30,7 +30,6 @@ import os
 import psycopg2.errors
 from collections import defaultdict
 from datetime import datetime, timezone, timedelta
-from pathlib import Path
 from typing import Any, List, Optional
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
@@ -41,7 +40,7 @@ import database
 from database.connection import execute_read, execute_write
 from middleware.rate_limit import limiter
 from models import AssignAdminIn, CompanyIn, CompanyOut
-from utils.logger import get_logger
+from utils.logger import get_logger, _LOGS_DIR
 from utils.security import hash_pin
 from utils.rate_limiter import check_rate_limit, record_attempt, clear_failed_attempts, remaining_attempts
 from utils.time import now_iso
@@ -78,7 +77,7 @@ def require_super_admin(
                a.email, COALESCE(a.requires_2fa, 0) AS requires_2fa,
                COALESCE(s.two_fa_verified, 0) AS two_fa_verified
         FROM admins a
-        JOIN admin_sessions s ON s.token = %s
+        JOIN admin_sessions s ON s.admin_id = a.id AND s.token = %s AND s.expires_at > NOW()
         WHERE a.role = 'super_admin'
         LIMIT 1
         """,
@@ -124,7 +123,7 @@ def _company_with_counts(row: dict) -> dict:
         "SELECT COUNT(*) AS cnt FROM admins WHERE company_id = %s", (row["id"],)
     )
     subscriber_count = execute_read(
-        "SELECT COUNT(*) AS cnt FROM subscribers WHERE company_id = %s", (row["id"],)
+        "SELECT COUNT(*) AS cnt FROM subscribers WHERE company_id = %s AND COALESCE(is_active, 1) = 1", (row["id"],)
     )
     return {
         **row,
@@ -390,6 +389,8 @@ async def toggle_company(
             "UPDATE companies SET is_active = CASE WHEN is_active = 1 THEN 0 ELSE 1 END WHERE id = %s",
             (company_id,),
         )
+        from services.sensor_company import invalidate_caches
+        invalidate_caches()           # a switched-off company stops owning live feeds at once
         row = execute_read(
             "SELECT id, name, slug, is_active, created_at::TEXT FROM companies WHERE id = %s",
             (company_id,),
@@ -415,6 +416,8 @@ async def assign_admin(
         admin_rows = execute_read("SELECT id, name, role FROM admins WHERE id = %s", (body.admin_id,))
         if not admin_rows:
             raise HTTPException(status_code=404, detail=f"Admin {body.admin_id} not found")
+        if admin_rows[0].get("role") == "super_admin":
+            raise HTTPException(status_code=422, detail="A Super Admin account cannot be tied to one company")
         execute_write("UPDATE admins SET company_id = %s WHERE id = %s", (company_id, body.admin_id))
         return {
             "message":    f"Admin '{admin_rows[0]['name']}' assigned to company {company_id}",
@@ -500,8 +503,8 @@ async def company_parameters(
         result = []
         for co in companies:
             cid = co["id"]
-            params = [{"name": "Temperature", "unit": "°C", "min_value": None, "max_value": None,
-                       "created_at": None, "builtin": True}] + custom_by_company.get(cid, [])
+            # Temperature is a normal per-company parameter now — no built-in row
+            params = custom_by_company.get(cid, [])
             result.append({"company_id": cid, "company_name": co["name"],
                            "is_active": co["is_active"], "parameters": params})
         return result
@@ -550,7 +553,7 @@ async def overview(
                    COALESCE(a_cnt.cnt, 0)             AS alerts_today
             FROM companies c
             LEFT JOIN (
-                SELECT company_id, COUNT(*) AS cnt FROM subscribers GROUP BY company_id
+                SELECT company_id, COUNT(*) AS cnt FROM subscribers WHERE COALESCE(is_active, 1) = 1 GROUP BY company_id
             ) s_cnt ON s_cnt.company_id = c.id
             LEFT JOIN (
                 SELECT company_id, COUNT(*) AS cnt FROM alerts WHERE timestamp >= %s GROUP BY company_id
@@ -709,11 +712,9 @@ async def get_company_detail(
             """,
             (company_id,),
         )
-        parameters = [
-            {"id": None, "name": "temperature", "unit": "°C",
-             "min_value": None, "max_value": None, "is_active": True,
-             "created_at": None, "builtin": True}
-        ] + [dict(p, builtin=False) for p in custom_params]
+        # Exactly the company's own parameters (temperature included only if
+        # the company has it) — a new company shows none.
+        parameters = [dict(p, builtin=False) for p in custom_params]
 
         # Alert stats
         alert_stats = execute_read(
@@ -722,28 +723,51 @@ async def get_company_detail(
                 COUNT(*)                                                      AS total_alerts,
                 SUM(CASE WHEN timestamp >= %s THEN 1 ELSE 0 END)             AS alerts_today,
                 SUM(CASE WHEN timestamp >= %s THEN 1 ELSE 0 END)             AS alerts_week,
-                SUM(CASE WHEN severity='critical' THEN 1 ELSE 0 END)         AS critical,
-                SUM(CASE WHEN severity='warning'  THEN 1 ELSE 0 END)         AS warning,
+                SUM(CASE WHEN UPPER(severity) IN ('CRITICAL','EMERGENCY') THEN 1 ELSE 0 END) AS critical,
+                SUM(CASE WHEN UPPER(severity) = 'WARNING' THEN 1 ELSE 0 END) AS warning,
                 SUM(CASE WHEN acknowledged=1 THEN 1 ELSE 0 END)              AS acknowledged
             FROM alerts WHERE company_id = %s
             """,
             (today, week, company_id),
         )
 
-        # Reading stats
+        # Reading stats — readings has ~8M rows and no company index, so avoid
+        # full scans: today's figures use the timestamp index (ISO text compares
+        # in order), the last reading walks that index backwards, and the
+        # all-time total is the planner's row estimate scaled by this company's
+        # share of the last 7 days (exact counts took ~8 s per page load).
         reading_stats = execute_read(
             """
             SELECT
-                COUNT(*)                                           AS total_readings,
-                SUM(CASE WHEN timestamp >= %s THEN 1 ELSE 0 END)  AS readings_today,
-                MIN(temperature)::FLOAT                            AS min_temp,
-                MAX(temperature)::FLOAT                            AS max_temp,
-                ROUND(AVG(temperature)::NUMERIC, 2)::FLOAT         AS avg_temp,
-                MAX(timestamp)::TEXT                               AS last_reading_at
-            FROM readings WHERE company_id = %s
+                COUNT(*)                                    AS readings_today,
+                MIN(temperature)::FLOAT                     AS min_temp,
+                MAX(temperature)::FLOAT                     AS max_temp,
+                ROUND(AVG(temperature)::NUMERIC, 2)::FLOAT  AS avg_temp
+            FROM readings WHERE timestamp >= %s AND company_id = %s
             """,
             (today, company_id),
         )
+        reading_stats = dict(reading_stats[0]) if reading_stats else {}
+        last = execute_read(
+            "SELECT timestamp::TEXT AS ts FROM readings WHERE company_id = %s "
+            "ORDER BY timestamp DESC LIMIT 1",
+            (company_id,),
+        )
+        reading_stats["last_reading_at"] = last[0]["ts"] if last else None
+        share = execute_read(
+            """
+            SELECT COUNT(*) FILTER (WHERE company_id = %s)::FLOAT / NULLIF(COUNT(*), 0) AS share,
+                   (SELECT reltuples::BIGINT FROM pg_class WHERE relname = 'readings' AND relnamespace = current_schema()::regnamespace) AS est
+            FROM readings WHERE timestamp >= %s
+            """,
+            (company_id, week),
+        )
+        if share and share[0]["est"] is not None:
+            frac = share[0]["share"] if share[0]["share"] is not None else 1.0
+            reading_stats["total_readings"] = int(max(share[0]["est"], 0) * frac)
+        else:
+            reading_stats["total_readings"] = None
+        reading_stats["total_is_estimate"] = True
 
         # Active sessions for admins in this company
         sessions = execute_read(
@@ -774,7 +798,7 @@ async def get_company_detail(
             "subscribers":   subscribers,
             "parameters":    parameters,
             "alert_stats":   alert_stats[0] if alert_stats else {},
-            "reading_stats": reading_stats[0] if reading_stats else {},
+            "reading_stats": reading_stats,
             "sessions":      sessions,
             "recent_alerts": recent_alerts,
         }
@@ -814,6 +838,30 @@ async def delete_company(
         logger.error("internal error: %s", exc, exc_info=True); return JSONResponse(status_code=500, content={"error": "An internal error occurred"})
 
 
+def _archive_company_files(company_id: int, slug) -> None:
+    """Move the company's CSV tables and activity log out of the live folders into
+    data/offboarded/<name>_<time>/ (nothing is deleted, but nothing stays where another company's
+    tools could pick it up)."""
+    import shutil
+    from datetime import datetime as _dt
+    from pathlib import Path as _P
+    from services import reading_csv, company_log
+    stamp = _dt.now().strftime("%Y%m%d_%H%M%S")
+    dest_root = _P(reading_csv.CSV_DIR).parent / "offboarded"
+    moves = []
+    folder = reading_csv.company_folder(company_id)
+    if folder != reading_csv.CSV_DIR and _P(folder).is_dir():
+        moves.append((_P(folder), dest_root / f"{_P(folder).name}_{stamp}"))
+    log_dir = _P(company_log.LOG_DIR)
+    for lf in log_dir.glob(f"company_{int(company_id)}.log*"):
+        moves.append((lf, dest_root / f"company_{int(company_id)}_{stamp}" / lf.name))
+    for src, dst in moves:
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(src), str(dst))
+    company_log._loggers.pop(int(company_id), None)
+    reading_csv._folder_cache.pop(company_id, None)
+
+
 @router.delete("/companies/{company_id}/offboard", summary="Full cascade offboard — deletes all company data")
 @limiter.limit("5/minute")
 async def offboard_company(
@@ -823,11 +871,27 @@ async def offboard_company(
 ):
     """
     Irreversibly purges all data belonging to the company in FK-safe order:
-    sessions → acks → delivery records → retry queue → alerts → readings
-    → subscribers → admin sessions → admins → company row.
+    subscriber sessions → delivery receipts → escalation log → retry queue
+    → alerts → readings → subscribers → admin sessions → admins
+    → remaining NO ACTION children → company row.
+
+    Alert acknowledgements are columns on `alerts`, so they are removed with it.
     """
+    from database.connection import get_db_pool
+    pool = get_db_pool()
+    conn = pool.getconn()
+    cur = conn.cursor()
+
+    def execute_write(sql, params=()):          # every step below runs in ONE transaction
+        cur.execute(sql, params)
+
     try:
         co = _get_company_or_404(company_id)
+        try:   # which live sources are this company's (must be known before it is deleted)
+            from services.sensor_company import sources_owned_by
+            _owned_sources = sources_owned_by(company_id)
+        except Exception:
+            _owned_sources = None
 
         # 1. Subscriber sessions for subscribers of this company
         execute_write(
@@ -838,20 +902,20 @@ async def offboard_company(
             (company_id,),
         )
 
-        # 2. Notification acknowledgements for subscribers of this company
+        # 2. Delivery receipts for alerts of this company
         execute_write(
             """
-            DELETE FROM notification_acknowledgements
-             WHERE subscriber_id IN (SELECT id FROM subscribers WHERE company_id = %s)
+            DELETE FROM delivery_receipts
+             WHERE alert_id IN (SELECT id FROM alerts WHERE company_id = %s)
             """,
             (company_id,),
         )
 
-        # 3. Delivery records for alerts of this company
+        # 3. Escalation log rows for subscribers of this company
         execute_write(
             """
-            DELETE FROM delivery_records
-             WHERE alert_id IN (SELECT id FROM alerts WHERE company_id = %s)
+            DELETE FROM escalation_log
+             WHERE subscriber_id IN (SELECT id FROM subscribers WHERE company_id = %s)
             """,
             (company_id,),
         )
@@ -885,14 +949,57 @@ async def offboard_company(
             (company_id,),
         )
 
+        # 8b. Approval requests made by (or about) this company
+        execute_write(
+            """
+            DELETE FROM pending_approvals
+             WHERE admin_id IN (SELECT id FROM admins WHERE company_id = %s AND role != 'super_admin')
+                OR (payload->>'company_id') = %s
+            """,
+            (company_id, str(company_id)),
+        )
+
         # 9. Admins (excluding super_admin, which has no company_id)
         execute_write(
             "DELETE FROM admins WHERE company_id = %s AND role != 'super_admin'",
             (company_id,),
         )
 
-        # 10. Company row
+        # 10. Remaining company-owned rows whose FK is ON DELETE NO ACTION —
+        # these would otherwise raise a foreign-key violation on step 11.
+        # (CASCADE / SET NULL children are handled by PostgreSQL automatically.)
+        for _tbl in (
+            "company_config",
+            "company_messages",
+            "company_notes",
+            "company_onboarding",
+            "company_subscriptions",
+            "incident_reports",
+            "usage_snapshots",
+        ):
+            execute_write(f"DELETE FROM {_tbl} WHERE company_id = %s", (company_id,))
+
+        # 10b. Activity rows have no foreign key, so they would stay behind
+        execute_write("DELETE FROM admin_activity WHERE company_id = %s", (company_id,))
+
+        # 11. Company row
         execute_write("DELETE FROM companies WHERE id = %s", (company_id,))
+        conn.commit()                           # all-or-nothing
+
+        # Outside the database: its live feeds, live dashboards, cached settings and files
+        try:
+            import asyncio as _aio
+            from services.sensor_company import release_company
+            stopped = await _aio.to_thread(release_company, company_id, _owned_sources)
+            if stopped:
+                logger.warning("Offboard company %s: switched off live source(s): %s", company_id, ", ".join(stopped))
+            from services.live_ingest import forget_parameters
+            forget_parameters(company_id)
+            from modules.inapp.manager import close_company_connections
+            await close_company_connections(company_id)
+            _archive_company_files(company_id, co.get("slug"))
+        except Exception as _post_exc:
+            logger.warning("Offboard company %s: clean-up after delete was incomplete: %s", company_id, _post_exc)
 
         ip = request.client.host if request.client else "unknown"
         _log_audit(
@@ -905,10 +1012,14 @@ async def offboard_company(
         )
         return {"status": "offboarded", "company_id": company_id, "company_name": co["name"]}
     except HTTPException:
+        conn.rollback()
         raise
     except Exception as exc:
+        conn.rollback()                         # nothing is half-deleted
         logger.error("internal error: %s", exc, exc_info=True)
         return JSONResponse(status_code=500, content={"error": "An internal error occurred"})
+    finally:
+        pool.putconn(conn)
 
 
 @router.get("/companies/{company_id}/admins", summary="List admins for a company")
@@ -971,6 +1082,19 @@ async def list_admins(
         logger.error("internal error: %s", exc, exc_info=True); return JSONResponse(status_code=500, content={"error": "An internal error occurred"})
 
 
+def _admin_name_problem(name: str) -> Optional[str]:
+    """Sign-in names must be unique however they are typed ("Ravi" = "ravi" = "ravi ") and must not be
+    one of the built-in sign-in names, or one person could end up signing in to another's account."""
+    import config as _c
+    n = (name or "").strip()
+    reserved = {"superadmin", "super_admin", "super admin", str(getattr(_c, "ADMIN_USERNAME", "admin")).lower(), "admin"}
+    if n.lower() in reserved:
+        return f"'{n}' is reserved. Choose another sign-in name."
+    if execute_read("SELECT 1 FROM admins WHERE LOWER(TRIM(name)) = LOWER(%s) LIMIT 1", (n,)):
+        return f"Admin '{n}' already exists (names are not case-sensitive)."
+    return None
+
+
 @router.post("/admins", status_code=201, summary="Create an admin")
 @limiter.limit("20/minute")
 async def create_admin(
@@ -981,6 +1105,16 @@ async def create_admin(
     try:
         if body.role not in ("main", "sub", "super_admin"):
             return JSONResponse(status_code=422, content={"error": "role must be main, sub, or super_admin"})
+        problem = _admin_name_problem(body.name)
+        if problem:
+            return JSONResponse(status_code=409, content={"error": problem})
+        # A company admin without a company would be treated as "no company = everything",
+        # so every non-Super-Admin account must belong to an existing company.
+        if body.role != "super_admin":
+            if not body.company_id:
+                return JSONResponse(status_code=422, content={"error": "Choose the company this admin belongs to"})
+            if not execute_read("SELECT 1 FROM companies WHERE id = %s", (body.company_id,)):
+                return JSONResponse(status_code=404, content={"error": "Company not found"})
         from datetime import datetime, timezone
         ts = datetime.now(timezone.utc).isoformat()
         result = execute_write(
@@ -1103,12 +1237,22 @@ async def assign_admin_company(
     _admin: dict = Depends(require_super_admin),
 ):
     try:
-        _get_admin_or_404(admin_id)
-        if body.company_id is not None:
-            rows = execute_read("SELECT id FROM companies WHERE id = %s", (body.company_id,))
-            if not rows:
-                raise HTTPException(status_code=404, detail=f"Company {body.company_id} not found")
+        before = _get_admin_or_404(admin_id)
+        if before.get("role") == "super_admin":
+            return JSONResponse(status_code=403, content={"error": "The Super Admin does not belong to a company"})
+        if body.company_id is None:
+            return JSONResponse(status_code=422, content={"error": "Choose the company this admin belongs to"})
+        rows = execute_read("SELECT id FROM companies WHERE id = %s", (body.company_id,))
+        if not rows:
+            raise HTTPException(status_code=404, detail=f"Company {body.company_id} not found")
+        if before.get("company_id") == body.company_id:
+            return before
         execute_write("UPDATE admins SET company_id = %s WHERE id = %s", (body.company_id, admin_id))
+        # signed out everywhere: pages and live dashboards opened for the old company must not stay open
+        execute_write("DELETE FROM admin_sessions WHERE admin_id = %s", (admin_id,))
+        ip = request.client.host if request.client else "unknown"
+        _log_audit(_admin["id"], body.company_id, f"move_admin:{admin_id}", "admin", "high",
+                   f"name={before['name']} from_company={before.get('company_id')} to_company={body.company_id}", ip)
         return _get_admin_or_404(admin_id)
     except HTTPException:
         raise
@@ -1344,18 +1488,12 @@ async def companies_health(
         # exponentially with row counts, causing very slow or hanging queries.
         rows = execute_read(
             """
-            WITH reading_stats AS (
-                SELECT company_id,
-                       MAX(timestamp::timestamptz) AS last_reading_at
-                FROM   readings
-                GROUP  BY company_id
-            ),
-            alert_stats AS (
+            WITH alert_stats AS (
                 SELECT company_id,
                        COUNT(*) FILTER (WHERE (acknowledged = 0 OR acknowledged IS NULL)
-                                          AND severity = 'critical')      AS unack_critical,
+                                          AND UPPER(severity) IN ('CRITICAL','EMERGENCY')) AS unack_critical,
                        COUNT(*) FILTER (WHERE (acknowledged = 0 OR acknowledged IS NULL)
-                                          AND severity = 'warning')       AS unack_warning,
+                                          AND UPPER(severity) = 'WARNING') AS unack_warning,
                        COUNT(*) FILTER (WHERE  acknowledged = 0 OR acknowledged IS NULL) AS unack_total,
                        COUNT(*) FILTER (WHERE  timestamp >= %s)           AS alerts_today
                 FROM   alerts
@@ -1389,7 +1527,15 @@ async def companies_health(
                    COALESCE(ss.subscriber_count, 0)  AS subscriber_count,
                    COALESCE(asm.admin_count,     0)  AS admin_count
             FROM   companies c
-            LEFT JOIN reading_stats rs  ON rs.company_id  = c.id
+            -- Latest reading per company via idx_readings_company_ts (a
+            -- GROUP BY over the whole readings table took ~30 s).
+            LEFT JOIN LATERAL (
+                SELECT r.timestamp::timestamptz AS last_reading_at
+                FROM   readings r
+                WHERE  r.company_id = c.id
+                ORDER  BY r.timestamp DESC
+                LIMIT  1
+            ) rs ON TRUE
             LEFT JOIN alert_stats   als ON als.company_id = c.id
             LEFT JOIN sub_stats     ss  ON ss.company_id  = c.id
             LEFT JOIN admin_stats   asm ON asm.company_id = c.id
@@ -1564,17 +1710,20 @@ async def sa_acknowledge_alert(
 ):
     try:
         rows = execute_read(
-            "SELECT id, company_id, severity FROM alerts WHERE id = %s", (alert_id,)
+            "SELECT id, company_id, severity, acknowledged, acknowledged_by, acknowledged_at FROM alerts WHERE id = %s", (alert_id,)
         )
         if not rows:
             raise HTTPException(status_code=404, detail=f"Alert {alert_id} not found")
         alert = rows[0]
-        execute_write(
+        done = execute_write(
             """UPDATE alerts
                SET acknowledged = 1, acknowledged_at = NOW(), acknowledged_by = %s
-               WHERE id = %s""",
+               WHERE id = %s AND COALESCE(acknowledged, 0) = 0""",
             (_admin.get("name", "super_admin"), alert_id),
         )
+        if not done.rowcount:   # someone was first: keep their name and time
+            return {"status": "already_acknowledged", "alert_id": alert_id,
+                    "acknowledged_by": alert.get("acknowledged_by"), "acknowledged_at": str(alert.get("acknowledged_at") or "")}
         ip = request.client.host if request.client else "unknown"
         _log_audit(
             _admin["id"], alert["company_id"],
@@ -1582,6 +1731,18 @@ async def sa_acknowledge_alert(
             f"alert_id={alert_id} severity={alert['severity']}",
             ip,
         )
+        try:   # if it is a company server's alert, that server's own copy is acknowledged too
+            from services.hub_sync import queue_node_ack
+            queue_node_ack(alert_id, _admin.get("name", "super_admin"))
+        except Exception:
+            pass
+        # Tell open dashboards so the alert stops showing as active there too
+        try:
+            from modules.inapp.manager import broadcast as _broadcast
+            await _broadcast({"type": "acknowledgement", "alert_id": alert_id,
+                              "acknowledged_by": _admin.get("name", "super_admin")}, company_id=alert["company_id"])
+        except Exception as exc:
+            logger.warning("sa_acknowledge_alert: broadcast failed: %s", exc)
         return {"status": "acknowledged", "alert_id": alert_id}
     except HTTPException:
         raise
@@ -2032,11 +2193,11 @@ async def monthly_usage_report(
     alert_rows = execute_read("""
         SELECT COUNT(*) AS total_alerts,
                SUM(CASE WHEN acknowledged = 1 THEN 1 ELSE 0 END) AS acknowledged,
-               SUM(CASE WHEN severity = 'critical' THEN 1 ELSE 0 END) AS critical,
-               SUM(CASE WHEN severity = 'warning'  THEN 1 ELSE 0 END) AS warning
+               SUM(CASE WHEN UPPER(severity) IN ('CRITICAL','EMERGENCY') THEN 1 ELSE 0 END) AS critical,
+               SUM(CASE WHEN UPPER(severity) = 'WARNING' THEN 1 ELSE 0 END) AS warning
           FROM alerts
          WHERE company_id = %s
-           AND timestamp >= %s AND timestamp < %s
+           AND timestamp::timestamptz >= %s AND timestamp::timestamptz < %s
     """, (company_id, period_start, period_end))
     alerts = alert_rows[0] if alert_rows else {}
 
@@ -2718,8 +2879,8 @@ async def export_alerts_csv(
                    a.timestamp::TEXT
             FROM alerts a
             JOIN companies c ON c.id = a.company_id
-            WHERE a.timestamp >= NOW() - INTERVAL '%(days)s days'
-            ORDER BY a.timestamp DESC
+            WHERE a.timestamp::timestamptz >= NOW() - INTERVAL '%(days)s days'
+            ORDER BY a.timestamp::timestamptz DESC
             """ % {"days": int(days)}
         )
         buf = _io.StringIO()
@@ -2858,6 +3019,11 @@ async def wizard_create_admin(
     try:
         if body.role not in ("main", "sub"):
             return JSONResponse(status_code=422, content={"error": "role must be main or sub"})
+        problem = _admin_name_problem(body.name)
+        if problem:
+            return JSONResponse(status_code=409, content={"error": problem})
+        if not execute_read("SELECT 1 FROM companies WHERE id = %s", (body.company_id,)):
+            return JSONResponse(status_code=404, content={"error": "Company not found"})
         result = execute_write(
             "INSERT INTO admins (name, password_hash, role, company_id, created_at) VALUES (%s, %s, %s, %s, NOW()) RETURNING id",
             (body.name, hash_pin(body.password), body.role, body.company_id),
@@ -3114,9 +3280,9 @@ async def analytics_alerts(
                a.company_id,
                c.name AS company_name,
                COUNT(*)                                                      AS total,
-               COUNT(*) FILTER (WHERE a.severity = 'critical')               AS critical,
-               COUNT(*) FILTER (WHERE a.severity = 'warning')                AS warning,
-               COUNT(*) FILTER (WHERE a.severity NOT IN ('critical','warning')) AS info
+               COUNT(*) FILTER (WHERE UPPER(a.severity) IN ('CRITICAL','EMERGENCY')) AS critical,
+               COUNT(*) FILTER (WHERE UPPER(a.severity) = 'WARNING')         AS warning,
+               COUNT(*) FILTER (WHERE UPPER(a.severity) NOT IN ('CRITICAL','EMERGENCY','WARNING')) AS info
           FROM alerts a
           JOIN companies c ON c.id = a.company_id
          WHERE a.timestamp::timestamptz >= NOW() - (%s || ' days')::interval
@@ -3139,7 +3305,7 @@ async def analytics_platform(
         """
         SELECT DATE(timestamp::timestamptz) AS day,
                COUNT(*)                                               AS total_alerts,
-               COUNT(*) FILTER (WHERE severity = 'critical')          AS critical,
+               COUNT(*) FILTER (WHERE UPPER(severity) IN ('CRITICAL','EMERGENCY')) AS critical,
                COUNT(*) FILTER (WHERE acknowledged = 1)               AS acknowledged
           FROM alerts
          WHERE timestamp::timestamptz >= NOW() - (%s || ' days')::interval
@@ -3149,10 +3315,10 @@ async def analytics_platform(
     )
     reading_trend = execute_read(
         """
-        SELECT DATE(timestamp::timestamptz) AS day, COUNT(*) AS readings
+        SELECT LEFT(timestamp, 10) AS day, COUNT(*) AS readings
           FROM readings
-         WHERE timestamp::timestamptz >= NOW() - (%s || ' days')::interval
-         GROUP BY day ORDER BY day
+         WHERE timestamp >= to_char((NOW() - (%s || ' days')::interval) AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS')
+         GROUP BY 1 ORDER BY 1
         """,
         (days,),
     )
@@ -3200,7 +3366,7 @@ async def analytics_top_companies(
             SELECT c.id, c.name, COUNT(r.id) AS value
               FROM companies c
               LEFT JOIN readings r ON r.company_id = c.id
-                AND r.timestamp::timestamptz >= NOW() - (%s || ' days')::interval
+                AND r.timestamp >= to_char((NOW() - (%s || ' days')::interval) AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS')
              GROUP BY c.id, c.name
              ORDER BY value DESC
              LIMIT %s
@@ -3250,24 +3416,24 @@ async def analytics_compare(
               WHERE a.company_id = c.id
                 AND a.timestamp::timestamptz >= NOW() - (%s || ' days')::interval) AS alerts_period,
             (SELECT COUNT(*) FROM alerts a
-              WHERE a.company_id = c.id AND a.severity = 'critical'
+              WHERE a.company_id = c.id AND UPPER(a.severity) IN ('CRITICAL','EMERGENCY')
                 AND a.timestamp::timestamptz >= NOW() - (%s || ' days')::interval) AS critical_period,
             (SELECT COUNT(*) FROM alerts a
               WHERE a.company_id = c.id AND a.acknowledged = 0)                    AS unacked_now,
             (SELECT COUNT(*) FROM readings r
               WHERE r.company_id = c.id
-                AND r.timestamp::timestamptz >= NOW() - (%s || ' days')::interval) AS readings_period,
+                AND r.timestamp >= to_char((NOW() - (%s || ' days')::interval) AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS')) AS readings_period,
             (SELECT COUNT(*) FROM subscribers s
               WHERE s.company_id = c.id AND s.is_active = 1)                       AS active_subscribers,
             (SELECT COUNT(*) FROM admins ad
               WHERE ad.company_id = c.id)                                           AS admin_count,
-            (SELECT MAX(r2.timestamp::timestamptz) FROM readings r2
-              WHERE r2.company_id = c.id)                                           AS last_reading_at
+            (SELECT r2.timestamp::timestamptz FROM readings r2
+              WHERE r2.company_id = c.id ORDER BY r2.timestamp DESC LIMIT 1)       AS last_reading_at
           FROM companies c
          WHERE c.id IN ({placeholders})
          ORDER BY alerts_period DESC
         """,
-        [days, days, days, days] + id_list,
+        [days, days, days] + id_list,
     )
 
     # Add uptime % (readings in period vs expected at 1/min)
@@ -3308,13 +3474,14 @@ async def platform_health(
         "SELECT COUNT(*) AS n FROM admin_sessions WHERE expires_at > NOW()", []
     )
     readings_last_hour = execute_read(
-        "SELECT COUNT(*) AS n FROM readings WHERE timestamp::timestamptz >= NOW() - INTERVAL '1 hour'", []
+        "SELECT COUNT(*) AS n FROM readings WHERE timestamp >= "
+        "to_char((NOW() - INTERVAL '1 hour') AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS')", []
     )
     alerts_last_hour = execute_read(
         "SELECT COUNT(*) AS n FROM alerts WHERE timestamp::timestamptz >= NOW() - INTERVAL '1 hour'", []
     )
     unacked_critical = execute_read(
-        "SELECT COUNT(*) AS n FROM alerts WHERE acknowledged = 0 AND severity = 'critical'", []
+        "SELECT COUNT(*) AS n FROM alerts WHERE acknowledged = 0 AND UPPER(severity) IN ('CRITICAL','EMERGENCY')", []
     )
     recent_audit_errors = execute_read(
         "SELECT COUNT(*) AS n FROM audit_log WHERE severity = 'critical' AND created_at >= NOW() - INTERVAL '1 hour'",
@@ -3939,7 +4106,7 @@ async def update_incident(
 ):
     rows = execute_read(
         "SELECT id, title, description, status, severity, assignee_id, "
-        "company_id, alert_id, created_at, updated_at, resolved_at "
+        "company_id, created_at, updated_at, resolved_at "
         "FROM incidents WHERE id = %s",
         (incident_id,),
     )
@@ -4053,8 +4220,8 @@ async def sla_metrics(
             COUNT(a.id)                                                 AS total_alerts,
             COUNT(a.id) FILTER (WHERE a.acknowledged = 1)               AS acked_alerts,
             COUNT(a.id) FILTER (WHERE a.acknowledged = 0)               AS unacked_alerts,
-            COUNT(a.id) FILTER (WHERE a.severity = 'critical')          AS critical_total,
-            COUNT(a.id) FILTER (WHERE a.severity = 'critical' AND a.acknowledged = 1) AS critical_acked,
+            COUNT(a.id) FILTER (WHERE UPPER(a.severity) IN ('CRITICAL','EMERGENCY')) AS critical_total,
+            COUNT(a.id) FILTER (WHERE UPPER(a.severity) IN ('CRITICAL','EMERGENCY') AND a.acknowledged = 1) AS critical_acked,
             ROUND(
                 AVG(
                     CASE WHEN a.acknowledged = 1 AND a.acknowledged_at IS NOT NULL
@@ -4153,7 +4320,7 @@ async def detect_anomalies(
                 WHERE a.timestamp::timestamptz >= NOW() - (%s || ' days')::interval
             ) AS baseline_count,
             COUNT(a.id) FILTER (
-                WHERE a.severity = 'critical'
+                WHERE UPPER(a.severity) IN ('CRITICAL','EMERGENCY')
                   AND a.timestamp::timestamptz >= NOW() - (%s || ' days')::interval
             ) AS recent_critical
           FROM companies c
@@ -4292,7 +4459,9 @@ async def export_incidents_csv(
 
 # ─── System Logs ─────────────────────────────────────────────────────────────
 
-_LOG_PATH = (Path(__file__).parent.parent / "logs" / "sentineledge.log").resolve()
+# Sourced from utils.logger so this can never drift from where logs are written
+# (project root logs/, not backend/logs/).
+_LOG_PATH = (_LOGS_DIR / "sentineledge.log").resolve()
 
 _LEVEL_KEYWORDS = ("CRITICAL", "ERROR", "WARNING", "INFO", "DEBUG")
 

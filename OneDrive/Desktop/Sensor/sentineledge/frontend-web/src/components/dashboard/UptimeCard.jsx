@@ -1,8 +1,11 @@
 /** src/components/dashboard/UptimeCard.jsx */
 import { Clock } from 'lucide-react'
+import DashTile from './DashTile.jsx'
+import Badge from '../shared/Badge.jsx'
+import { useLiveSeconds } from '../../hooks/useNow.js'
 
 function humanUptime(seconds) {
-  if (!seconds && seconds !== 0) return '—'
+  if (!seconds && seconds !== 0) return null
   const d = Math.floor(seconds / 86400)
   const h = Math.floor((seconds % 86400) / 3600)
   const m = Math.floor((seconds % 3600) / 60)
@@ -14,22 +17,19 @@ function humanUptime(seconds) {
 }
 
 export default function UptimeCard({ uptimeSeconds }) {
+  const live  = useLiveSeconds(uptimeSeconds)      // counts every second between health checks
+  const known = uptimeSeconds != null
   return (
-    <div className="card p-5 flex flex-col gap-3">
-      <div className="flex items-center justify-between">
-        <span className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Server Uptime</span>
-        <div className="w-8 h-8 rounded-lg flex items-center justify-center" style={{ background: '#ECFDF5' }}>
-          <Clock size={16} style={{ color: '#10B981' }} />
-        </div>
-      </div>
-      <div>
-        <p className="text-2xl font-bold text-emerald-600">{humanUptime(uptimeSeconds)}</p>
-        <p className="text-xs text-gray-400 mt-0.5">Since last restart</p>
-      </div>
-      <div className="flex items-center gap-1.5">
-        <span className="status-dot bg-emerald-500" />
-        <span className="text-xs text-gray-500">Server running normally</span>
-      </div>
-    </div>
+    <DashTile
+      icon={Clock}
+      iconColor="#10B981"
+      label="Server Uptime"
+      badge={<Badge color={known ? 'green' : 'gray'} label={known ? 'RUNNING' : 'UNKNOWN'} />}
+      value={humanUptime(live)}
+      valueColor="#059669"
+      caption={known ? 'Server running normally' : 'Waiting for health check'}
+      footerLeft="Since last restart"
+      footerRight="Health check"
+    />
   )
 }

@@ -43,8 +43,12 @@ def get_sub_session(token: str) -> Optional[dict]:
                    s.name, s.escalation_order
               FROM subscriber_sessions ss
               JOIN subscribers s ON s.id = ss.subscriber_id
+              LEFT JOIN companies c ON c.id = s.company_id
              WHERE ss.token = %s
                AND ss.expires_at > NOW()
+               AND COALESCE(s.is_active, 1) = 1
+               AND COALESCE(s.active, 1) = 1
+               AND COALESCE(c.is_active, 1) != 0
             """,
             (token,),
         )

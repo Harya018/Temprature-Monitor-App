@@ -15,19 +15,23 @@ import {
 import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
 import { useFocusEffect } from '@react-navigation/native';
-import { getAlerts } from '../services/api';
+import { getAlerts, acknowledgeAlert } from '../services/api';
+import { getSession } from '../services/auth';
+import { unitFor, formatValue } from '../services/appConfig';
 
 const AlertTypeConfig = {
-  HIGH: { label: 'HIGH TEMP', color: '#EF4444', bg: 'rgba(239,68,68,0.15)', icon: 'thermometer' },
-  LOW:  { label: 'LOW TEMP',  color: '#10B981', bg: 'rgba(16,185,129,0.15)', icon: 'thermometer-outline' },
-  DEFAULT: { label: 'ALERT', color: '#F59E0B', bg: 'rgba(245,158,11,0.15)', icon: 'warning-outline' },
+  HIGH: { word: 'HIGH', color: '#EF4444', bg: 'rgba(239,68,68,0.15)', icon: 'arrow-up-circle-outline' },
+  LOW:  { word: 'LOW',  color: '#F59E0B', bg: 'rgba(245,158,11,0.15)', icon: 'arrow-down-circle-outline' },
 };
 
-const AlertCard = ({ item }) => {
-  const typeCfg = AlertTypeConfig[item.type?.toUpperCase()] || AlertTypeConfig.DEFAULT;
+const AlertCard = ({ item, onAcknowledge, acking }) => {
+  const dir = String(item.direction || '').toUpperCase();
+  const typeCfg = AlertTypeConfig[dir] || { word: 'ALERT', color: '#F59E0B', bg: 'rgba(245,158,11,0.15)', icon: 'warning-outline' };
+  const unit = unitFor(item.parameter);
+  const label = `${typeCfg.word} ${String(item.parameter || '').toUpperCase()}`.trim();
   const timestamp = item.timestamp ? new Date(item.timestamp).toLocaleString() : 'Unknown time';
   const ackTime = item.acknowledged_at ? new Date(item.acknowledged_at).toLocaleString() : null;
-  const temp = item.temperature != null ? `${Number(item.temperature).toFixed(1)}°C` : '--';
+  const temp = item.value != null ? `${formatValue(item.value)} ${unit}`.trim() : '--';
 
   return (
     <View style={[styles.alertCard, { borderLeftColor: typeCfg.color }]}>
@@ -35,10 +39,17 @@ const AlertCard = ({ item }) => {
       <View style={styles.cardHeader}>
         <View style={[styles.typeBadge, { backgroundColor: typeCfg.bg }]}>
           <Ionicons name={typeCfg.icon} size={14} color={typeCfg.color} />
-          <Text style={[styles.typeBadgeText, { color: typeCfg.color }]}>{typeCfg.label}</Text>
+          <Text style={[styles.typeBadgeText, { color: typeCfg.color }]}>{label}</Text>
         </View>
         <Text style={styles.tempValue}>{temp}</Text>
       </View>
+
+      {item.threshold != null ? (
+        <View style={styles.infoRow}>
+          <Ionicons name="speedometer-outline" size={14} color="#9CA3AF" />
+          <Text style={styles.infoText}>Limit: {formatValue(item.threshold)} {unit}</Text>
+        </View>
+      ) : null}
 
       {/* Timestamp */}
       <View style={styles.infoRow}>
@@ -47,7 +58,7 @@ const AlertCard = ({ item }) => {
       </View>
 
       {/* Acknowledged */}
-      {item.acknowledged_by ? (
+      {item.acknowledged || item.acknowledged_by ? (
         <View style={styles.ackRow}>
           <Ionicons name="checkmark-circle" size={14} color="#34D399" />
           <Text style={styles.ackText}>
@@ -59,6 +70,13 @@ const AlertCard = ({ item }) => {
         <View style={styles.ackRow}>
           <Ionicons name="ellipse-outline" size={14} color="#F87171" />
           <Text style={[styles.ackText, { color: '#F87171' }]}>Not yet acknowledged</Text>
+          <TouchableOpacity
+            onPress={() => onAcknowledge && onAcknowledge(item)}
+            disabled={acking}
+            style={{ marginLeft: 'auto', backgroundColor: '#6366F1', borderRadius: 10, paddingHorizontal: 12, paddingVertical: 6, opacity: acking ? 0.5 : 1 }}
+          >
+            <Text style={{ color: '#FFFFFF', fontSize: 12, fontWeight: '700' }}>{acking ? 'Sending…' : 'Acknowledge'}</Text>
+          </TouchableOpacity>
         </View>
       )}
     </View>
@@ -78,6 +96,20 @@ const AlertsScreen = () => {
   const [refreshing, setRefreshing] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [ackingId, setAckingId] = useState(null);
+
+  const handleAcknowledge = async (item) => {
+    setAckingId(item.id);
+    try {
+      const session = await getSession();
+      await acknowledgeAlert(item.id, session.username || 'App user');
+      setAlerts((prev) => prev.map((a) => (a.id === item.id ? { ...a, acknowledged: true, acknowledged_by: session.username || 'App user', acknowledged_at: new Date().toISOString() } : a)));
+    } catch (err) {
+      setError('Could not acknowledge. Check the connection and try again.');
+    } finally {
+      setAckingId(null);
+    }
+  };
 
   const fetchAlerts = useCallback(async () => {
     setError('');
@@ -85,7 +117,7 @@ const AlertsScreen = () => {
       const data = await getAlerts();
       const today = new Date().toDateString();
       const todayAlerts = Array.isArray(data)
-        ? data.filter((a) => new Date(a.timestamp).toDateString() === today)
+        ? data.filter((a) => new Date(a.timestamp).toDateString() === today || !a.acknowledged)   // today's, plus anything still open
         : [];
       // Sort newest first
       todayAlerts.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
@@ -133,7 +165,7 @@ const AlertsScreen = () => {
         <FlatList
           data={alerts}
           keyExtractor={(item, idx) => String(item.id ?? idx)}
-          renderItem={({ item }) => <AlertCard item={item} />}
+          renderItem={({ item }) => <AlertCard item={item} onAcknowledge={handleAcknowledge} acking={ackingId === item.id} />}
           contentContainerStyle={[
             styles.listContent,
             alerts.length === 0 && styles.listContentEmpty,

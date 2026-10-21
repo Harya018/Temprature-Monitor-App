@@ -1,9 +1,10 @@
 // ─────────────────────────────────────────────
 //  SentinelEdge — Dashboard Screen
-//  Shows live temperature, color-coded status,
-//  alert overlay integration, and connection banner
+//  One card per parameter THIS company measures (the server says which), coloured by that
+//  parameter's own limits. Live values arrive over the websocket; the latest stored value is
+//  shown straight away when the screen opens.
 // ─────────────────────────────────────────────
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
   View,
   Text,
@@ -11,8 +12,6 @@ import {
   ScrollView,
   RefreshControl,
   StatusBar,
-  Animated,
-  TouchableOpacity,
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
@@ -23,123 +22,68 @@ import ConnectionBanner from '../components/ConnectionBanner';
 import AlertOverlay from '../components/AlertOverlay';
 import { DashboardSkeleton } from '../components/ScreenSkeleton';
 import ErrorState from '../components/ErrorState';
-import { getAlerts, getCurrentReading } from '../services/api';
+import { getAlerts, getLatest } from '../services/api';
+import { loadAppConfig, statusFor, formatValue } from '../services/appConfig';
 
-// ── Temperature thresholds ───────────────────
-const TEMP_DANGER  = 90;  // > 90°C → RED (DANGER)
-const TEMP_NORMAL  = 42;  // 42–90°C → YELLOW (NORMAL)
-// < 42°C → GREEN (READY — trigger alert)
+const STALE_AFTER_S = 10 * 60; // no new value for 10 minutes: say so instead of showing an old figure as live
 
-const getTempStatus = (temp) => {
-  if (temp === null || temp === undefined) return 'UNKNOWN';
-  if (temp > TEMP_DANGER) return 'DANGER';
-  if (temp >= TEMP_NORMAL) return 'NORMAL';
-  return 'READY';
-};
-
-const STATUS_CONFIG = {
-  DANGER:  { label: 'DANGER',  emoji: '🔴', colors: ['#7F1D1D', '#991B1B', '#B91C1C'], textColor: '#FCA5A5', badge: '#EF4444' },
-  NORMAL:  { label: 'NORMAL',  emoji: '🟡', colors: ['#78350F', '#92400E', '#B45309'], textColor: '#FDE68A', badge: '#F59E0B' },
-  READY:   { label: 'READY',   emoji: '🟢', colors: ['#064E3B', '#065F46', '#047857'], textColor: '#6EE7B7', badge: '#10B981' },
-  UNKNOWN: { label: 'NO DATA', emoji: '⚪', colors: ['#111827', '#1F2937', '#374151'], textColor: '#9CA3AF', badge: '#6B7280' },
+const ago = (iso, now) => {
+  if (!iso) return 'No data yet';
+  const secs = Math.max(0, Math.floor((now - new Date(iso).getTime()) / 1000));
+  if (secs < 60) return `${secs}s ago`;
+  if (secs < 3600) return `${Math.floor(secs / 60)}m ago`;
+  return `${Math.floor(secs / 3600)}h ago`;
 };
 
 const DashboardScreen = () => {
-  const { connected, temperature: wsTemperature, alerts: wsAlerts } = useWebSocket();
+  const { connected, values: wsValues, alerts: wsAlerts } = useWebSocket();
 
-  const [displayTemp, setDisplayTemp] = useState(null);
-  const [lastUpdated, setLastUpdated] = useState(null);
+  const [config, setConfig] = useState(null);           // { company, parameters }
+  const [latest, setLatest] = useState({});             // { "pH": { value, timestamp } } from the server
   const [todayAlertCount, setTodayAlertCount] = useState(0);
+  const [openAlerts, setOpenAlerts] = useState(0);
   const [refreshing, setRefreshing] = useState(false);
   const [activeAlert, setActiveAlert] = useState(null);
-  const [secondsAgo, setSecondsAgo] = useState(null);
   const [loading, setLoading] = useState(true);
   const [fetchError, setFetchError] = useState(null);
+  const [now, setNow] = useState(Date.now());
 
-  const pulseAnim = useRef(new Animated.Value(1)).current;
-  const secondsTimerRef = useRef(null);
-
-  // ── Pulse the temperature display ───────────
+  // tick once a second so "x seconds ago" counts live
   useEffect(() => {
-    Animated.loop(
-      Animated.sequence([
-        Animated.timing(pulseAnim, { toValue: 1.04, duration: 1200, useNativeDriver: true }),
-        Animated.timing(pulseAnim, { toValue: 1, duration: 1200, useNativeDriver: true }),
-      ])
-    ).start();
-  }, [pulseAnim]);
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, []);
 
-  // ── Update temperature from WebSocket ───────
+  // a new alert from the server opens the overlay
   useEffect(() => {
-    if (wsTemperature !== null && wsTemperature !== undefined) {
-      setDisplayTemp(wsTemperature);
-      setLastUpdated(new Date());
-    }
-  }, [wsTemperature]);
+    if (wsAlerts && wsAlerts.length > 0 && !activeAlert) setActiveAlert(wsAlerts[0]);
+  }, [wsAlerts, activeAlert]);
 
-  // ── Watch for new alerts from WebSocket ─────
-  useEffect(() => {
-    if (wsAlerts && wsAlerts.length > 0) {
-      const newest = wsAlerts[0];
-      if (!activeAlert) {
-        setActiveAlert(newest);
-      }
-    }
-  }, [wsAlerts]);
-
-  // ── "X seconds ago" counter ─────────────────
-  useEffect(() => {
-    if (secondsTimerRef.current) clearInterval(secondsTimerRef.current);
-    if (lastUpdated) {
-      secondsTimerRef.current = setInterval(() => {
-        const secs = Math.floor((Date.now() - lastUpdated.getTime()) / 1000);
-        setSecondsAgo(secs);
-      }, 1000);
-    }
-    return () => clearInterval(secondsTimerRef.current);
-  }, [lastUpdated]);
-
-  // ── Fetch initial data when screen is focused
   const fetchData = useCallback(async () => {
     setFetchError(null);
     try {
-      const [currentData, alertsData] = await Promise.allSettled([
-        getCurrentReading(),
-        getAlerts(),
-      ]);
-
-      if (currentData.status === 'fulfilled' && currentData.value) {
-        const t = currentData.value.temperature ?? currentData.value.temp;
-        if (t !== undefined) {
-          setDisplayTemp(t);
-          setLastUpdated(new Date());
-        }
+      const cfg = await loadAppConfig();
+      setConfig(cfg);
+      const [lat, alertsData] = await Promise.allSettled([getLatest(), getAlerts()]);
+      if (lat.status === 'fulfilled' && lat.value) {
+        setLatest(lat.value.values || {});
+        setOpenAlerts(lat.value.open_alerts || 0);
       }
-
       if (alertsData.status === 'fulfilled' && Array.isArray(alertsData.value)) {
         const today = new Date().toDateString();
-        const todayCount = alertsData.value.filter(
-          (a) => new Date(a.timestamp).toDateString() === today
-        ).length;
-        setTodayAlertCount(todayCount);
-      }
-
-      if (currentData.status === 'rejected' && alertsData.status === 'rejected') {
-        setFetchError('Could not reach server. Check your connection.');
+        setTodayAlertCount(alertsData.value.filter((a) => new Date(a.timestamp).toDateString() === today).length);
       }
     } catch (err) {
       console.warn('[Dashboard] Fetch error:', err);
-      setFetchError('Could not reach server. Check your connection.');
+      setFetchError(err.response && err.response.status === 401
+        ? 'Your sign-in is no longer valid. Open Settings and sign out, then sign in again.'
+        : 'Could not reach the server. Check your connection and the server address.');
     } finally {
       setLoading(false);
     }
   }, []);
 
-  useFocusEffect(
-    useCallback(() => {
-      fetchData();
-    }, [fetchData])
-  );
+  useFocusEffect(useCallback(() => { fetchData(); }, [fetchData]));
 
   const onRefresh = async () => {
     setRefreshing(true);
@@ -147,20 +91,17 @@ const DashboardScreen = () => {
     setRefreshing(false);
   };
 
-  const handleAlertDismiss = () => {
-    setActiveAlert(null);
+  // value of a parameter: the newer of the live one and the stored one
+  const readingFor = (p) => {
+    const k = String(p.name).toLowerCase();
+    const live = wsValues[k];
+    const stored = Object.entries(latest).find(([n]) => n.toLowerCase() === k);
+    const s = stored ? stored[1] : null;
+    if (live && (!s || new Date(live.timestamp) >= new Date(s.timestamp))) return live;
+    return s;
   };
 
-  const status = getTempStatus(displayTemp);
-  const cfg = STATUS_CONFIG[status];
-
-  const lastUpdatedLabel =
-    secondsAgo === null ? 'Never' :
-    secondsAgo < 60 ? `${secondsAgo}s ago` :
-    `${Math.floor(secondsAgo / 60)}m ago`;
-
-  // ── Loading skeleton (initial fetch only, not shown during pull-to-refresh)
-  if (loading && displayTemp === null) {
+  if (loading && !config) {
     return (
       <View style={styles.flex}>
         <StatusBar barStyle="light-content" backgroundColor="#0F0C29" />
@@ -171,9 +112,7 @@ const DashboardScreen = () => {
       </View>
     );
   }
-
-  // ── Error state (HTTP failed and WS has no data yet either)
-  if (fetchError && displayTemp === null) {
+  if (fetchError && !config) {
     return (
       <View style={styles.flex}>
         <StatusBar barStyle="light-content" backgroundColor="#0F0C29" />
@@ -185,101 +124,74 @@ const DashboardScreen = () => {
     );
   }
 
+  const params = (config && config.parameters) || [];
   return (
     <View style={styles.flex}>
       <StatusBar barStyle="light-content" backgroundColor="#0F0C29" />
+      <AlertOverlay visible={!!activeAlert} alertData={activeAlert} onDismiss={() => setActiveAlert(null)} />
 
-      {/* Alert Overlay — mounts at root of this screen too as fallback */}
-      <AlertOverlay
-        visible={!!activeAlert}
-        alertData={activeAlert}
-        onDismiss={handleAlertDismiss}
-      />
-
-      <LinearGradient colors={cfg.colors} style={styles.flex}>
-        {/* Connection Banner */}
+      <LinearGradient colors={['#111827', '#1F2937', '#374151']} style={styles.flex}>
         <ConnectionBanner connected={connected} />
-
         <ScrollView
           contentContainerStyle={styles.scrollContent}
-          refreshControl={
-            <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#FFFFFF" />
-          }
+          refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor="#FFFFFF" />}
         >
-          {/* Header */}
           <View style={styles.header}>
-            <View>
-              <Text style={styles.headerTitle}>SentinelEdge</Text>
-              <Text style={styles.headerSubtitle}>Live Temperature Monitor</Text>
+            <View style={{ flexShrink: 1 }}>
+              <Text style={styles.headerTitle}>{(config && config.company && config.company.name) || 'SentinelEdge'}</Text>
+              <Text style={styles.headerSubtitle}>Live monitoring</Text>
             </View>
-            <View style={[styles.statusBadge, { backgroundColor: cfg.badge }]}>
-              <Text style={styles.statusBadgeText}>{cfg.emoji} {cfg.label}</Text>
+            <View style={[styles.liveBadge, { backgroundColor: connected ? '#065F46' : '#7F1D1D' }]}>
+              <Text style={styles.liveBadgeText}>{connected ? '● LIVE' : '○ OFFLINE'}</Text>
             </View>
           </View>
 
-          {/* Main Temperature Display */}
-          <View style={styles.tempSection}>
-            <Text style={[styles.tempLabel, { color: cfg.textColor }]}>CURRENT TEMPERATURE</Text>
-            <Animated.View style={{ transform: [{ scale: pulseAnim }] }}>
-              <Text style={styles.tempValue}>
-                {displayTemp !== null ? `${Number(displayTemp).toFixed(1)}°` : '--°'}
-              </Text>
-              <Text style={[styles.tempUnit, { color: cfg.textColor }]}>Celsius</Text>
-            </Animated.View>
-          </View>
+          {params.length === 0 ? (
+            <View style={styles.emptyBox}>
+              <Ionicons name="information-circle-outline" size={40} color="#9CA3AF" />
+              <Text style={styles.emptyTitle}>No parameters yet</Text>
+              <Text style={styles.emptyText}>Your company has no approved parameters. Ask your administrator.</Text>
+            </View>
+          ) : (
+            params.map((p) => {
+              const r = readingFor(p);
+              const secs = r ? (now - new Date(r.timestamp).getTime()) / 1000 : null;
+              const stale = r && secs > STALE_AFTER_S;
+              const st = stale ? { label: 'NO RECENT DATA', color: '#6B7280' } : statusFor(p, r ? r.value : null);
+              return (
+                <View key={p.name} style={[styles.paramCard, { borderLeftColor: st.color }]}>
+                  <View style={styles.paramHeader}>
+                    <Text style={styles.paramName}>{p.name}</Text>
+                    <View style={[styles.statusChip, { backgroundColor: st.color }]}>
+                      <Text style={styles.statusChipText}>{st.label}</Text>
+                    </View>
+                  </View>
+                  <View style={styles.valueRow}>
+                    <Text style={[styles.paramValue, stale && { opacity: 0.45 }]}>{r ? formatValue(r.value) : '--'}</Text>
+                    <Text style={styles.paramUnit}>{p.unit}</Text>
+                  </View>
+                  <Text style={styles.rangeText}>
+                    Allowed range: {p.min !== null && p.min !== undefined ? formatValue(p.min) : '—'} to {p.max !== null && p.max !== undefined ? formatValue(p.max) : '—'} {p.unit}
+                    {p.alerts_enabled === false ? '  ·  alerts off' : ''}
+                  </Text>
+                  <Text style={styles.agoText}>{r ? `Updated ${ago(r.timestamp, now)}` : 'No reading received yet'}</Text>
+                </View>
+              );
+            })
+          )}
 
-          {/* Status Cards Row */}
           <View style={styles.cardsRow}>
-            {/* Last Updated */}
             <View style={styles.card}>
-              <Ionicons name="time-outline" size={22} color={cfg.textColor} />
-              <Text style={[styles.cardValue, { color: '#FFFFFF' }]}>{lastUpdatedLabel}</Text>
-              <Text style={styles.cardLabel}>Last Updated</Text>
-            </View>
-
-            {/* Today's Alerts */}
-            <View style={styles.card}>
-              <Ionicons name="warning-outline" size={22} color={cfg.textColor} />
-              <Text style={[styles.cardValue, { color: '#FFFFFF' }]}>{todayAlertCount}</Text>
+              <Ionicons name="warning-outline" size={22} color="#FBBF24" />
+              <Text style={styles.cardValue}>{todayAlertCount}</Text>
               <Text style={styles.cardLabel}>Alerts Today</Text>
             </View>
-
-            {/* Connection Status */}
             <View style={styles.card}>
-              <Ionicons
-                name={connected ? 'wifi' : 'wifi-outline'}
-                size={22}
-                color={connected ? '#34D399' : '#F87171'}
-              />
-              <Text style={[styles.cardValue, { color: connected ? '#34D399' : '#F87171' }]}>
-                {connected ? 'Live' : 'Off'}
-              </Text>
-              <Text style={styles.cardLabel}>WebSocket</Text>
+              <Ionicons name="alert-circle-outline" size={22} color={openAlerts ? '#F87171' : '#34D399'} />
+              <Text style={[styles.cardValue, { color: openAlerts ? '#F87171' : '#34D399' }]}>{openAlerts}</Text>
+              <Text style={styles.cardLabel}>Not Acknowledged</Text>
             </View>
           </View>
-
-          {/* Threshold Guide */}
-          <View style={styles.thresholdCard}>
-            <Text style={styles.thresholdTitle}>Temperature Thresholds</Text>
-            <View style={styles.thresholdRow}>
-              <View style={[styles.thresholdDot, { backgroundColor: '#EF4444' }]} />
-              <Text style={styles.thresholdText}>DANGER  — above 90°C</Text>
-            </View>
-            <View style={styles.thresholdRow}>
-              <View style={[styles.thresholdDot, { backgroundColor: '#F59E0B' }]} />
-              <Text style={styles.thresholdText}>NORMAL  — 42°C to 90°C</Text>
-            </View>
-            <View style={styles.thresholdRow}>
-              <View style={[styles.thresholdDot, { backgroundColor: '#10B981' }]} />
-              <Text style={styles.thresholdText}>READY   — below 42°C (Alert triggered)</Text>
-            </View>
-          </View>
-
-          {/* Refresh hint */}
-          <TouchableOpacity style={styles.refreshHint} onPress={onRefresh}>
-            <Ionicons name="refresh-outline" size={16} color="rgba(255,255,255,0.5)" />
-            <Text style={styles.refreshHintText}>Pull down to refresh</Text>
-          </TouchableOpacity>
         </ScrollView>
       </LinearGradient>
     </View>
@@ -288,136 +200,31 @@ const DashboardScreen = () => {
 
 const styles = StyleSheet.create({
   flex: { flex: 1 },
-  scrollContent: {
-    paddingHorizontal: 20,
-    paddingBottom: 40,
-    paddingTop: 16,
+  scrollContent: { padding: 20, paddingBottom: 40 },
+  header: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20 },
+  headerTitle: { fontSize: 22, fontWeight: '800', color: '#FFFFFF' },
+  headerSubtitle: { fontSize: 12, color: '#9CA3AF', marginTop: 2 },
+  liveBadge: { paddingHorizontal: 12, paddingVertical: 6, borderRadius: 14 },
+  liveBadgeText: { color: '#FFFFFF', fontSize: 11, fontWeight: '700' },
+  paramCard: {
+    backgroundColor: 'rgba(255,255,255,0.07)', borderRadius: 16, padding: 16, marginBottom: 14, borderLeftWidth: 5,
   },
-  header: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'flex-start',
-    marginBottom: 32,
-  },
-  headerTitle: {
-    fontSize: 22,
-    fontWeight: '800',
-    color: '#FFFFFF',
-    letterSpacing: 0.5,
-  },
-  headerSubtitle: {
-    fontSize: 12,
-    color: 'rgba(255,255,255,0.6)',
-    marginTop: 2,
-  },
-  statusBadge: {
-    paddingVertical: 6,
-    paddingHorizontal: 14,
-    borderRadius: 20,
-  },
-  statusBadgeText: {
-    color: '#FFFFFF',
-    fontWeight: '700',
-    fontSize: 13,
-    letterSpacing: 0.5,
-  },
-  tempSection: {
-    alignItems: 'center',
-    marginBottom: 36,
-    paddingVertical: 24,
-    backgroundColor: 'rgba(0,0,0,0.2)',
-    borderRadius: 24,
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.1)',
-  },
-  tempLabel: {
-    fontSize: 12,
-    letterSpacing: 3,
-    marginBottom: 8,
-    fontWeight: '600',
-  },
-  tempValue: {
-    fontSize: 100,
-    fontWeight: '900',
-    color: '#FFFFFF',
-    textAlign: 'center',
-    lineHeight: 110,
-  },
-  tempUnit: {
-    fontSize: 18,
-    textAlign: 'center',
-    letterSpacing: 2,
-    marginTop: -4,
-  },
-  cardsRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    marginBottom: 20,
-    gap: 10,
-  },
-  card: {
-    flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.25)',
-    borderRadius: 16,
-    padding: 14,
-    alignItems: 'center',
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.1)',
-  },
-  cardValue: {
-    fontSize: 18,
-    fontWeight: '800',
-    marginTop: 6,
-    marginBottom: 2,
-  },
-  cardLabel: {
-    fontSize: 10,
-    color: 'rgba(255,255,255,0.5)',
-    letterSpacing: 0.5,
-    textAlign: 'center',
-  },
-  thresholdCard: {
-    backgroundColor: 'rgba(0,0,0,0.25)',
-    borderRadius: 16,
-    padding: 16,
-    borderWidth: 1,
-    borderColor: 'rgba(255,255,255,0.1)',
-    marginBottom: 20,
-  },
-  thresholdTitle: {
-    color: 'rgba(255,255,255,0.7)',
-    fontSize: 12,
-    letterSpacing: 1,
-    textTransform: 'uppercase',
-    marginBottom: 12,
-    fontWeight: '600',
-  },
-  thresholdRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: 8,
-  },
-  thresholdDot: {
-    width: 10,
-    height: 10,
-    borderRadius: 5,
-    marginRight: 10,
-  },
-  thresholdText: {
-    color: 'rgba(255,255,255,0.75)',
-    fontSize: 13,
-  },
-  refreshHint: {
-    flexDirection: 'row',
-    justifyContent: 'center',
-    alignItems: 'center',
-    gap: 6,
-    marginTop: 4,
-  },
-  refreshHintText: {
-    color: 'rgba(255,255,255,0.4)',
-    fontSize: 12,
-  },
+  paramHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  paramName: { fontSize: 14, fontWeight: '700', color: '#D1D5DB', letterSpacing: 0.5 },
+  statusChip: { paddingHorizontal: 10, paddingVertical: 4, borderRadius: 10 },
+  statusChipText: { color: '#FFFFFF', fontSize: 10, fontWeight: '800', letterSpacing: 0.5 },
+  valueRow: { flexDirection: 'row', alignItems: 'flex-end', marginTop: 8 },
+  paramValue: { fontSize: 46, fontWeight: '800', color: '#FFFFFF' },
+  paramUnit: { fontSize: 16, color: '#9CA3AF', marginLeft: 8, marginBottom: 8 },
+  rangeText: { fontSize: 12, color: '#9CA3AF', marginTop: 4 },
+  agoText: { fontSize: 11, color: '#6B7280', marginTop: 2 },
+  cardsRow: { flexDirection: 'row', gap: 12, marginTop: 6 },
+  card: { flex: 1, backgroundColor: 'rgba(255,255,255,0.07)', borderRadius: 14, padding: 14, alignItems: 'center' },
+  cardValue: { fontSize: 22, fontWeight: '800', color: '#FFFFFF', marginTop: 6 },
+  cardLabel: { fontSize: 11, color: '#9CA3AF', marginTop: 2 },
+  emptyBox: { alignItems: 'center', padding: 30 },
+  emptyTitle: { fontSize: 16, fontWeight: '700', color: '#E5E7EB', marginTop: 10 },
+  emptyText: { fontSize: 13, color: '#9CA3AF', textAlign: 'center', marginTop: 4 },
 });
 
 export default DashboardScreen;

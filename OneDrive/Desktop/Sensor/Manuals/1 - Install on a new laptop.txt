@@ -1,0 +1,120 @@
+=====================================================================
+  INSTALL SENTINELEDGE ON A NEW LAPTOP (one company per laptop)
+=====================================================================
+
+WHAT YOU NEED
+-------------
+  * The package folder "SentinelEdge_NewLaptop" (made on the main
+    laptop with  sentineledge\tools\MAKE_NEW_LAPTOP_PACKAGE.bat ).
+    It contains no other company's data, passwords or files.
+  * Internet for the first setup (to download Python libraries).
+  * Windows 10 / 11.
+
+
+STEP 1 - PYTHON AND POSTGRESQL (installed for you)
+--------------------------------------------------
+  Nothing to do: FIRST_TIME_SETUP.bat (step 3) checks for Python 3.12
+  and PostgreSQL 16 and, if one is missing, downloads the official
+  installer and installs it silently. This needs internet (about
+  360 MB) and takes 5-15 minutes the first time.
+  If you prefer to install them yourself: Python 3.12 from python.org
+  (tick "Add python.exe to PATH") and PostgreSQL 16 from
+  postgresql.org (keep port 5432).
+
+
+STEP 2 - COPY THE PACKAGE
+-------------------------
+  Copy the whole "SentinelEdge_NewLaptop" folder to the laptop, for
+  example to the Desktop. (Rename it if you like, e.g. "SentinelEdge".)
+
+
+STEP 3 - FIRST-TIME SETUP (ONE CLICK, once)
+-------------------------------------------
+  Open the folder and double-click FIRST_TIME_SETUP.bat - it is in the
+  main folder, next to START.bat and STOP.bat. Click "Yes" when Windows
+  asks for Administrator rights. That is the only click: setup asks
+  nothing else (only if PostgreSQL was ALREADY on the PC does it ask
+  for that PostgreSQL's password once).
+    * It installs Python 3.12 and PostgreSQL 16 if they are missing.
+    * It installs the Python libraries and checks every one of them.
+    * It creates the database with its own random password.
+    * It sets up the Super Admin with the STANDARD Super Admin password
+      (the same on every SentinelEdge PC). Only a scrambled hash of it
+      is in the program - the password itself is not written anywhere.
+    * It opens port 5000 in the Windows firewall (phone app, main server).
+    * It writes the passwords of this PC (database) and the dashboard
+      addresses into one file in the main folder:
+                SentinelEdge PASSWORDS - KEEP PRIVATE.txt
+    * It starts SentinelEdge (the dashboard opens in the browser), opens
+      the passwords file in Notepad and ends with a message that says
+      where the file is.
+  Keep the passwords file private: store the passwords safely, then
+  move the file off the PC or delete it. Never give it to the company.
+
+
+STEP 4 - START (every day)
+--------------------------
+  Double-click START.bat (in the main folder). The browser opens
+  http://localhost:5000
+  If START.bat says "This PC is not set up yet" or "Python or its
+  libraries were not found", run FIRST_TIME_SETUP.bat again.
+
+
+STEP 5 - SUPER ADMIN: CREATE THE COMPANY AND ITS ADMIN
+------------------------------------------------------
+  1. Go to  http://localhost:5000/super-admin/login
+        Username:  superadmin
+        Password:  the standard Super Admin password (the same on every
+                   SentinelEdge PC; not written in any file - you are
+                   given it separately)
+     Keep it private: only the person who adds companies needs it.
+  2. Companies > + New Company. The wizard has 5 steps:
+        Company Details   name of the company
+        Admin & Password  the company admin's name and password
+                          (10+ characters with upper and lower case,
+                          a number and a symbol, e.g.  Elroi@1234 )
+        Parameters        ONLY the parameters this company measures,
+                          e.g.  pH  (unit pH, min 6, max 8)
+                          or    temperature (unit °C) and pH
+        Subscriber        the first person who gets alerts (optional)
+        Review & Enable   press Enable
+  3. Write the company admin's name and password into the passwords
+     file (the program never shows a password again), then sign out of
+     Super Admin.
+  4. Give the company admin their username and password, and the
+     "Company Admin Manual" (Manuals\Handover). They sign in at
+     http://localhost:5000 - never at the Super Admin address.
+
+
+STEP 6 - COMPANY ADMIN: CONNECT THE EXCEL FILE
+----------------------------------------------
+  1. Go to http://localhost:5000 and sign in with the company admin's
+     name and password.
+  2. The dashboard shows one tile per parameter (only those you added).
+  3. Settings > Excel Live Reader:
+        File Path    full path of the Excel file the logger writes
+        Date column  Date      Time column  Time
+                     (or put the combined column in Timestamp column)
+        Temperature column  the temperature column name, or leave it
+                     as it is if the company has no temperature
+     Save Settings, then switch "Excel reader" ON.
+  4. Add a new row to the file (or let the logger write one): it
+     appears on the dashboard within a few seconds.
+  See "3 - Excel live reader.txt" for the file format.
+
+
+EVERY DAY
+---------
+  START.bat to start, STOP.bat to stop. Nothing else is needed.
+  (PostgreSQL starts automatically with Windows.)
+
+
+NOTES
+-----
+  * Each laptop has its own database: data never mixes with another
+    company's laptop.
+  * The Pro-face live collector is not part of this package; new
+    companies use the Excel live reader.
+  * To connect this laptop to the main Super Admin hub later, see
+    "2 - Super Admin guide.txt" (Company server / pairing).
+=====================================================================

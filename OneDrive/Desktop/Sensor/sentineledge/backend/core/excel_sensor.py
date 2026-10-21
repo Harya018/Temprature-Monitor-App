@@ -38,6 +38,7 @@ import os
 import shutil
 import tempfile
 import threading
+import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -56,6 +57,16 @@ EXCEL_SHEET         : str   = os.environ.get("EXCEL_SHEET",         "0").strip()
 EXCEL_POLL_INTERVAL : float = float(os.environ.get("EXCEL_POLL_INTERVAL", "1.0"))
 EXCEL_ENCODING      : str   = os.environ.get("EXCEL_ENCODING",      "").strip()
 
+# ── Data source gate ───────────────────────────────────────────────────────────
+# Which source feeds the dashboard — chosen in Settings → Pro-Server EX Data
+# Source ("Live" toggle) and stored in app_settings as data_source:
+#   False ("collector") — the ProEasy collector (collector/proserver_collector.py)
+#                         is the live source; this Excel reader does not run.
+#   True  ("excel")     — Live is switched off: this reader polls the Excel/CSV
+#                         file path from Settings and feeds the dashboard.
+# Switched on/off in Settings (independent of the live collector) via set_excel_enabled().
+EXCEL_LIVE_ENABLED: bool = False
+
 # Encoding candidates tried in order when EXCEL_ENCODING is not forced.
 _ENCODINGS = ["utf-8-sig", "utf-8", "shift-jis", "cp932", "latin-1"]
 
@@ -69,20 +80,23 @@ _last_mtime     : float = 0.0
 _last_file_size : int   = 0
 _last_row_sig   : str   = ""
 _active         : bool  = False
-# True = replaying historical rows → alerts suppressed in main.py
-# False = new live rows → alerts fire normally
-_in_loop_mode   : bool  = True
+_in_loop_mode   : bool  = True      # True = showing the last row again (no new row yet)
 
-# User-controlled: when False, playback stops and only the watchdog runs.
-# The watchdog checks every poll cycle for new rows whose timestamp is recent
-# (within LIVE_STALE_SECONDS of now), then temporarily serves those live rows
-# without looping historical data.  Alerts fire only for live rows.
-_excel_enabled   : bool  = True
-_auto_save_enabled: bool  = False   # auto-save .xls via COM every 5 s
+_auto_save_enabled: bool = False    # legacy flag kept for the settings API
 
-AUTO_SAVE_INTERVAL: int = 1    # seconds between COM reads (was save interval)
-REPLAY_WINDOW     : int = 20   # rows cycled when idle (no new live data)
-LIVE_STALE_SECONDS: int = 300  # rows timestamped within 5 min of now = live
+# New rows detected by the poll thread and not yet consumed by the reading loop.
+# One tick of the reading loop consumes one, so every row is stored and checked
+# exactly once; ticks with nothing pending re-show the last row (no DB insert,
+# no alerts).
+_new_rows_pending : int   = 0
+_new_rows_total   : int   = 0
+_last_new_row_at  : str   = ""
+_last_new_row_mono: float = 0.0
+_read_mode        : str   = ""      # "com" (running Excel) | "disk" (file)
+
+POLL_STALE_S      = 10      # no new row for this long → reported as "replaying last row"
+REPLAY_WINDOW     : int = 1
+LIVE_STALE_SECONDS: int = 300  # a row timestamped within 5 min of now is current
 
 # ── Thread control ─────────────────────────────────────────────────────────────
 _stop_evt   : threading.Event            = threading.Event()
@@ -90,61 +104,70 @@ _thread_ref : Optional[threading.Thread] = None
 
 
 def is_live_data() -> bool:
-    """True when the background thread is serving newly-written rows (alerts fire).
-    False during the idle loop through the last REPLAY_WINDOW rows (alerts suppressed)."""
-    return not _in_loop_mode
+    """True when a brand-new row has just arrived (alerts + storage apply);
+    False while the last row is being shown again."""
+    return _new_rows_pending > 0
+
+
+def consume_new_row() -> bool:
+    """Called once per reading-loop tick: True (once) for each new row."""
+    global _new_rows_pending
+    if _new_rows_pending > 0:
+        _new_rows_pending -= 1
+        return True
+    return False
 
 
 def is_active() -> bool:
-    """True when EXCEL_FILE_PATH is configured and the file currently exists."""
+    """True when the Excel file path is set, the file exists and was read."""
     return _active
 
 
-def set_enabled(enabled: bool) -> None:
-    """
-    Enable or disable Excel reading and persist the choice to DB.
-    Enabled  = normal loop + live detection.
-    Disabled = live-only mode: show NULL when no recent data, show live when present.
-    Survives server restarts (stored in app_settings).
-    """
-    global _excel_enabled
-    _excel_enabled = enabled
-    try:
-        from database.connection import execute_write
-        execute_write(
-            "INSERT INTO app_settings (key, value) VALUES (%s, %s) "
-            "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()",
-            ("proserver_live_only", "0" if enabled else "1"),
-        )
-    except Exception as exc:
-        logger.warning("Could not persist proserver_live_only setting: %s", exc)
-    logger.info(
-        "Pro-Server EX reading %s by user — persisted to DB",
-        "ENABLED (loop+live)" if enabled else "DISABLED (live-only, NULL when idle)",
-    )
+def excel_enabled() -> bool:
+    return EXCEL_LIVE_ENABLED
 
 
 def load_persistent_settings() -> None:
-    """Load persisted enable/disable state and auto-save flag from DB — called at startup."""
-    global _excel_enabled, _auto_save_enabled
+    """Load the Excel on/off switch and auto-save flag from the DB (startup,
+    before reload_settings so the reader starts in the saved state)."""
+    global _auto_save_enabled, EXCEL_LIVE_ENABLED
     try:
+        from services.data_sources import load_switches
+        EXCEL_LIVE_ENABLED = load_switches()
         from database.connection import execute_read
-        rows = execute_read(
-            "SELECT key, value FROM app_settings WHERE key IN ('proserver_live_only', 'proserver_auto_save')",
-        )
-        for row in (rows or []):
-            if row["key"] == "proserver_live_only" and row["value"] == "1":
-                _excel_enabled = False
-                logger.info("Pro-Server EX: loaded live-only mode (disabled loop) from DB")
-            elif row["key"] == "proserver_auto_save" and row["value"] == "1":
-                _auto_save_enabled = True
-                logger.info("Pro-Server EX: auto-save enabled from DB")
+        rows = execute_read("SELECT value FROM app_settings WHERE key = 'proserver_auto_save'")
+        _auto_save_enabled = bool(rows and rows[0]["value"] == "1")
+        logger.info("Excel reader %s (from DB)", "ENABLED" if EXCEL_LIVE_ENABLED else "disabled")
     except Exception as exc:
-        logger.debug("Could not load proserver persistent settings from DB: %s", exc)
+        logger.debug("Could not load excel reader settings from DB: %s", exc)
+
+
+def _current_settings() -> Dict[str, str]:
+    return {
+        "file_path":     EXCEL_FILE_PATH,
+        "temp_col":      EXCEL_TEMP_COL,
+        "date_col":      EXCEL_DATE_COL,
+        "time_col":      EXCEL_TIME_COL,
+        "timestamp_col": EXCEL_TIMESTAMP_COL,
+        "sheet":         EXCEL_SHEET,
+        "encoding":      EXCEL_ENCODING,
+        "poll_interval": str(EXCEL_POLL_INTERVAL),
+    }
+
+
+def set_excel_enabled(on: bool) -> None:
+    """Turn the Excel reader on or off (independent of the Pro-Server EX live
+    collector) and persist it. On = start polling the saved file path."""
+    global EXCEL_LIVE_ENABLED
+    EXCEL_LIVE_ENABLED = bool(on)
+    from services.data_sources import KEY_EXCEL, _save
+    _save(KEY_EXCEL, EXCEL_LIVE_ENABLED)
+    reload_settings(_current_settings())   # starts or stops the reader thread
+    logger.info("Excel reader %s", "ENABLED" if on else "DISABLED")
 
 
 def set_auto_save(enabled: bool) -> None:
-    """Enable or disable COM auto-save and persist to DB."""
+    """Persist the legacy auto-save flag."""
     global _auto_save_enabled
     _auto_save_enabled = enabled
     try:
@@ -159,13 +182,20 @@ def set_auto_save(enabled: bool) -> None:
 
 
 def get_enabled_status() -> dict:
+    age = (time.monotonic() - _last_new_row_mono) if _last_new_row_mono else None
     return {
-        "enabled":             _excel_enabled,
+        "enabled":             EXCEL_LIVE_ENABLED,
         "auto_save":           _auto_save_enabled,
         "is_active":           _active,
-        "in_loop_mode":        _in_loop_mode,
+        "in_loop_mode":        _active and (age is None or age > max(POLL_STALE_S, 3 * EXCEL_POLL_INTERVAL)),
+        "mode":                _read_mode,
+        "file_path":           EXCEL_FILE_PATH,
+        "format":              Path(EXCEL_FILE_PATH).suffix.lower() if EXCEL_FILE_PATH else "",
         "current_temperature": current_temperature,
         "current_timestamp":   current_timestamp,
+        "last_new_row_at":     _last_new_row_at,
+        "new_rows_seen":       _new_rows_total,
+        "values":              dict(extra_readings),
     }
 
 
@@ -239,9 +269,34 @@ def _clear_readings() -> None:
     extra_readings.clear()
 
 
+def _excel_window_shows(abs_path: str) -> bool:
+    """True if a running Excel has a window whose title names this file
+    (e.g. "proserver.xls - Excel"), i.e. the workbook is open there."""
+    try:
+        import win32gui
+    except ImportError:
+        return False
+    name = os.path.basename(abs_path).lower()
+    found = []
+
+    def _cb(hwnd, _):
+        try:
+            if win32gui.GetClassName(hwnd) == "XLMAIN" and name in win32gui.GetWindowText(hwnd).lower():
+                found.append(hwnd)
+        except Exception:
+            pass
+        return True
+
+    try:
+        win32gui.EnumWindows(_cb, None)
+    except Exception:
+        return False
+    return bool(found)
+
+
 class _ComReader:
     """
-    Persistent Excel COM connection for a single .xls workbook.
+    Persistent Excel COM connection to the file's workbook in a running Excel.
 
     Opening a COM session (GetObject + CoInitialize) costs ~200 ms.
     By keeping the workbook reference alive across poll cycles we pay
@@ -272,7 +327,27 @@ class _ComReader:
                     self._coinit = True
                 except Exception:
                     pass
-            self._wb      = win32com.client.GetObject(abs_path)
+            # Attach ONLY to a workbook that is already open in a running Excel.
+            # GetObject(path) on a closed file would start a hidden Excel and open
+            # (lock) it, so it is used only after checking Excel's window shows it.
+            target = os.path.normcase(os.path.abspath(abs_path))
+            self._wb = None
+            try:
+                xl = win32com.client.GetActiveObject("Excel.Application")
+                for i in range(1, xl.Workbooks.Count + 1):
+                    wb = xl.Workbooks(i)
+                    try:
+                        if os.path.normcase(os.path.abspath(wb.FullName)) == target:
+                            self._wb = wb
+                            break
+                    except Exception:
+                        continue
+            except Exception:
+                pass   # Excel not registered for automation — try the file moniker below
+            if self._wb is None and _excel_window_shows(abs_path):
+                self._wb = win32com.client.GetObject(abs_path)   # binds to the open workbook
+            if self._wb is None:
+                return False   # file is not open in Excel — caller reads the file instead
             self._ws      = self._wb.Sheets(1)
             self._headers = None   # force header re-scan on fresh connect
             logger.info("Pro-Server EX COM: connected to '%s'", abs_path)
@@ -405,17 +480,20 @@ class _ComReader:
             self._coinit = False
 
 
+_EXCEL_EXTS = (".xls", ".xlsx", ".xlsm", ".xlsb")
+SUPPORTED_EXTS = _EXCEL_EXTS + (".csv", ".txt")
+
 # Module-level persistent COM reader (one per process, reused across poll cycles)
 _com_reader = _ComReader()
 
 
 def _com_save_and_read() -> Optional[Dict[str, object]]:
     """
-    Read last row from the live Excel COM session.
-    No disk save needed — Pro-Server EX data is already in Excel's memory.
-    Uses the persistent _com_reader to avoid reconnect overhead every poll.
+    Read the last row from the file's open workbook in a running Excel (COM).
+    Returns None when Excel is not running or the file is not open there — the
+    caller then reads the saved file instead. Excel formats only.
     """
-    if not EXCEL_FILE_PATH or Path(EXCEL_FILE_PATH).suffix.lower() != ".xls":
+    if not EXCEL_FILE_PATH or Path(EXCEL_FILE_PATH).suffix.lower() not in _EXCEL_EXTS:
         return None
     return _com_reader.read_last_row(os.path.abspath(EXCEL_FILE_PATH))
 
@@ -574,12 +652,17 @@ def _read_xlsx(filepath: str, row_idx: Optional[int] = None) -> Optional[Dict[st
         else:
             ws = wb.active
 
-        # Headers from row 1
-        raw_hdr = next(ws.iter_rows(min_row=1, max_row=1, values_only=True), None)
-        if not raw_hdr:
+        # Header row: first of the first 10 rows that contains text (Pro-Server EX may
+        # leave row 1 blank / titled, like its .xls files)
+        hdr_row, raw_hdr = 1, None
+        for i, r in enumerate(ws.iter_rows(min_row=1, max_row=10, values_only=True), start=1):
+            if any(isinstance(v, str) and v.strip() for v in r):
+                hdr_row, raw_hdr = i, r
+                break
+        if raw_hdr is None:
             return None
         headers = [
-            str(h).strip() if h is not None else f"col_{i}"
+            str(h).strip() if h is not None and str(h).strip() else f"col_{i}"
             for i, h in enumerate(raw_hdr)
         ]
 
@@ -587,7 +670,7 @@ def _read_xlsx(filepath: str, row_idx: Optional[int] = None) -> Optional[Dict[st
         last_row: Optional[tuple] = None
         max_r = ws.max_row
 
-        if max_r and max_r > 1:
+        if max_r and max_r > hdr_row:
             candidate = next(
                 ws.iter_rows(min_row=max_r, max_row=max_r, values_only=True), None
             )
@@ -595,7 +678,7 @@ def _read_xlsx(filepath: str, row_idx: Optional[int] = None) -> Optional[Dict[st
                 last_row = candidate
 
         if last_row is None:
-            for row in ws.iter_rows(min_row=2, values_only=True):
+            for row in ws.iter_rows(min_row=hdr_row + 1, values_only=True):
                 if any(v is not None for v in row):
                     last_row = row
 
@@ -607,7 +690,7 @@ def _read_xlsx(filepath: str, row_idx: Optional[int] = None) -> Optional[Dict[st
 
         if row_idx is not None:
             # Playback: specific data row (2-indexed in sheet, row 1 = headers)
-            target_sheet_row = 2 + row_idx
+            target_sheet_row = hdr_row + 1 + row_idx
             if target_sheet_row > (max_r or 1):
                 return None
             last_row = next(ws.iter_rows(min_row=target_sheet_row, max_row=target_sheet_row, values_only=True), None)
@@ -729,20 +812,38 @@ def _extract_single_timestamp(value) -> str:
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def _col_match(header: str, target: str) -> bool:
-    """Case-insensitive column header comparison."""
-    return header.strip().lower() == target.strip().lower()
+    """Column header comparison that ignores capitals, spaces and punctuation ("Date/Time" = "date time")."""
+    from utils.column_match import norm
+    t = norm(target)
+    return bool(t) and norm(header) == t
+
+
+def _locate_time(row: Dict):
+    """(timestamp cell, date cell, time cell) of a row: the configured columns first, otherwise found by
+    their names (Timestamp, DateTime, Date + Time ...), so a differently named file still works."""
+    from utils.column_match import find_time_columns
+    ts_val = date_val = time_val = None
+    if EXCEL_TIMESTAMP_COL:
+        ts_val = next((v for k, v in row.items() if _col_match(k, EXCEL_TIMESTAMP_COL)), None)
+    else:
+        date_val = next((v for k, v in row.items() if _col_match(k, EXCEL_DATE_COL)), None)
+        time_val = next((v for k, v in row.items() if _col_match(k, EXCEL_TIME_COL)), None)
+    if ts_val is None and date_val is None and time_val is None:
+        found = find_time_columns(list(row.keys()))
+        if found["timestamp"]:
+            ts_val = row.get(found["timestamp"])
+        else:
+            date_val = row.get(found["date"]) if found["date"] else None
+            time_val = row.get(found["time"]) if found["time"] else None
+    return ts_val, date_val, time_val
 
 
 def _is_skip_col(header: str) -> bool:
-    """True if this column should not go into extra_readings."""
-    h = header.strip().lower()
-    skip = {
-        EXCEL_TEMP_COL.lower(),
-        EXCEL_DATE_COL.lower(),
-        EXCEL_TIME_COL.lower(),
-        EXCEL_TIMESTAMP_COL.lower(),
-    }
-    return h in skip
+    """True if this column should not go into extra_readings (time columns, the temperature column)."""
+    from utils.column_match import norm
+    h = norm(header)
+    skip = {norm(EXCEL_TEMP_COL), norm(EXCEL_DATE_COL), norm(EXCEL_TIME_COL), norm(EXCEL_TIMESTAMP_COL)} - {""}
+    return h in skip or "timestamp" in h or h in ("date", "time", "datetime")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -751,18 +852,27 @@ def _is_skip_col(header: str) -> bool:
 
 def _read_latest_row(row_idx: Optional[int] = None) -> Optional[Dict]:
     """
-    Dispatch to the correct reader based on file extension.
-    row_idx=None  → read last row (live mode)
-    row_idx=int   → read that specific data row, 0-indexed from first data row
-                    returns None when index is past end of file (caller loops back)
+    Read the last data row of the configured file, by extension:
+      .xlsx .xlsm        → openpyxl       .xls   → xlrd (olefile fallback)
+      .xlsb              → open Excel only (COM)
+      .csv .txt (other)  → text reader with encoding detection
     """
     ext = Path(EXCEL_FILE_PATH).suffix.lower()
-    if ext == ".xlsx":
+    if ext in (".xlsx", ".xlsm"):
         return _read_xlsx(EXCEL_FILE_PATH, row_idx=row_idx)
-    elif ext == ".xls":
-        return _read_xls(EXCEL_FILE_PATH, row_idx=row_idx)
-    else:
-        return _read_csv(EXCEL_FILE_PATH, row_idx=row_idx)
+    if ext == ".xls":
+        row = _read_xls(EXCEL_FILE_PATH, row_idx=row_idx)
+        if row is None and row_idx is None:
+            # Multi-block Pro-Server EX .xls that plain xlrd cannot open
+            try:
+                rows = _load_all_xls_xlrd(EXCEL_FILE_PATH)
+                row = rows[-1] if rows else None
+            except Exception as exc:
+                logger.debug("xls olefile fallback failed: %s", exc)
+        return row
+    if ext == ".xlsb":
+        return _com_save_and_read()   # no pure-Python .xlsb reader — needs Excel with the file open
+    return _read_csv(EXCEL_FILE_PATH, row_idx=row_idx)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -892,20 +1002,11 @@ def _apply_row(row: Dict) -> None:
 
     # ── Timestamp ─────────────────────────────────────────────────────────────
     import datetime as _dt
-    if EXCEL_TIMESTAMP_COL:
-        ts_val = next(
-            (v for k, v in row.items() if _col_match(k, EXCEL_TIMESTAMP_COL)), None
-        )
+    ts_val, date_val, time_val = _locate_time(row)
+    if ts_val is not None:
         current_timestamp = _extract_single_timestamp(ts_val)
     else:
-        date_val = next(
-            (v for k, v in row.items() if _col_match(k, EXCEL_DATE_COL)), None
-        )
-        time_val = next(
-            (v for k, v in row.items() if _col_match(k, EXCEL_TIME_COL)), None
-        )
-        # Auto-detect: if the configured date column didn't match any header
-        # (e.g. DB has "Date" but XLS has "DATE/TIME"), scan for any cell that
+        # Auto-detect: if no date column was found by name, scan for any cell that
         # xlrd already converted to a Python datetime/date object.
         if date_val is None and time_val is None:
             for v in row.values():
@@ -915,9 +1016,11 @@ def _apply_row(row: Dict) -> None:
         current_timestamp = _parse_proserver_datetime(date_val, time_val)
 
     # ── Sensor columns ────────────────────────────────────────────────────────
+    from utils.column_match import is_temperature_header
+    has_cfg_temp = any(_col_match(h, EXCEL_TEMP_COL) for h in row)
     for col_header, raw_value in row.items():
 
-        if _col_match(col_header, EXCEL_TEMP_COL):
+        if _col_match(col_header, EXCEL_TEMP_COL) or (not has_cfg_temp and is_temperature_header(col_header)):
             val = _to_float(raw_value)
             if val is not None:
                 current_temperature = round(val, 3)
@@ -1674,13 +1777,9 @@ def _is_recent_timestamp(ts_str: str, max_age_seconds: int = LIVE_STALE_SECONDS)
 def _get_row_timestamp(row: Dict) -> str:
     """Extract the timestamp string from a row dict using configured column names."""
     import datetime as _dt
-    if EXCEL_TIMESTAMP_COL:
-        ts_val = next(
-            (v for k, v in row.items() if _col_match(k, EXCEL_TIMESTAMP_COL)), None
-        )
+    ts_val, date_val, time_val = _locate_time(row)
+    if ts_val is not None:
         return _extract_single_timestamp(ts_val)
-    date_val = next((v for k, v in row.items() if _col_match(k, EXCEL_DATE_COL)), None)
-    time_val = next((v for k, v in row.items() if _col_match(k, EXCEL_TIME_COL)), None)
     if date_val is None and time_val is None:
         for v in row.values():
             if isinstance(v, (_dt.datetime, _dt.date)):
@@ -1715,218 +1814,90 @@ def _com_live_row_count() -> int:
     return -1
 
 
+def _row_signature(row: Dict) -> tuple:
+    return tuple((str(k), str(v)) for k, v in row.items())
+
+
 def _poll_loop(stop_evt: threading.Event) -> None:
     """
-    Daemon thread — checks the file every EXCEL_POLL_INTERVAL seconds.
+    Follow the Excel/CSV file Pro-Server EX appends to, one row at a time.
 
-    Startup  : jumps to the last REPLAY_WINDOW rows, plays them in a loop.
-               _in_loop_mode = True  → main.py marks is_live=False → no alerts.
-
-    New data : when the file grows OR the COM session has more rows (for .xls
-               files where Pro-Server EX writes without saving), switches to
-               live mode.
-               _in_loop_mode = False → main.py marks is_live=True → alerts fire.
-
-    End      : once new rows are exhausted, loops back through the last
-               REPLAY_WINDOW rows of the updated cache with alerts off.
+      • Reads ONLY the last data row (never the whole file).
+      • A running Excel that has the file open is read through COM (live, no
+        disk round-trip); otherwise the saved file is read — and only when its
+        size / modified time changed (the file is auto-saved after every row).
+      • When the last row differs from the previous one it is a NEW row: it is
+        queued for storage + alerts (consume_new_row) and shown live.
+      • Until the next row arrives the same last row stays on screen — it is
+        never replayed from history and never stored twice.
     """
-    global _last_mtime, _last_file_size, _active, _in_loop_mode
+    global _active, _in_loop_mode, _new_rows_pending, _new_rows_total
+    global _last_new_row_at, _last_new_row_mono, _read_mode, current_timestamp
 
-    _playback_idx: int        = 0
-    _cached_rows:  List[Dict] = []
-    _live_from:    int        = 0   # rows at index >= _live_from are live rows
-    _last_save_ts: float      = 0.0  # monotonic time of last COM auto-save
-
-    logger.info(
-        "Pro-Server EX reader started: '%s' every %.1f s",
-        EXCEL_FILE_PATH, EXCEL_POLL_INTERVAL,
-    )
+    last_stat = None
+    last_sig  = None
+    have_row  = False
+    logger.info("Excel reader started: %s (poll %.1fs)", EXCEL_FILE_PATH, EXCEL_POLL_INTERVAL)
 
     while not stop_evt.is_set():
         try:
-            fp_str = EXCEL_FILE_PATH
-            if not fp_str:
+            fp = EXCEL_FILE_PATH
+            if not fp:
+                _active = False
                 stop_evt.wait(EXCEL_POLL_INTERVAL)
                 continue
-
-            file_path = Path(fp_str)
-
-            # ── File existence check ──────────────────────────────────────────
-            if not file_path.exists():
+            path = Path(fp)
+            if not path.exists():
                 if _active:
-                    logger.warning("Pro-Server EX file disappeared: %s — waiting", file_path)
-                    _active = False
+                    logger.warning("Excel file disappeared: %s — waiting", fp)
+                _active = False
                 stop_evt.wait(EXCEL_POLL_INTERVAL)
                 continue
 
-            stat      = file_path.stat()
-            mtime     = stat.st_mtime
-            file_size = stat.st_size
-            _active   = True
+            st       = path.stat()
+            stat_key = (st.st_mtime, st.st_size)
+            row, mode = None, "disk"
 
-            file_changed = (mtime != _last_mtime or file_size != _last_file_size)
-            if file_changed:
-                _last_mtime     = mtime
-                _last_file_size = file_size
-
-            # ── COM live read for .xls (every poll cycle — no save needed) ────
-            # Pro-Server EX writes rows into Excel's in-memory session via DDE/OPC.
-            # GetObject() attaches to that live session directly — the data is already
-            # there in memory, no disk save needed.  We keep the COM connection open
-            # across cycles (_com_reader) so each read costs only ~5-20 ms instead of
-            # the ~200 ms connect overhead on every cycle.
-            _is_xls = file_path.suffix.lower() == ".xls"
-            if _is_xls or _auto_save_enabled:
-                com_row = _com_save_and_read()
-                if com_row is not None:
-                    _apply_row(com_row)
-                    _in_loop_mode = False   # COM data = live data → alerts fire
-                    logger.debug(
-                        "ProFace | COM live: T=%.3f  extras=%s",
-                        current_temperature or 0.0, extra_readings,
-                    )
-
-            # ── First load ────────────────────────────────────────────────────
-            if not _cached_rows:
-                # Apply a quick read immediately so temperature shows on the
-                # dashboard without waiting for the slow COM/BIFF bulk loaders
-                # (which can take 30-90 seconds when Excel is not already running).
-                _quick_row = _read_latest_row()
-                if _quick_row is not None:
-                    _apply_row(_quick_row)
-                    logger.info(
-                        "ProFace | Quick seed: T=%.3f — building full cache now…",
-                        current_temperature or 0.0,
-                    )
-
-                _cached_rows = _load_all_rows()
-                if not _cached_rows:
-                    logger.warning("ProFace | Could not load rows — retrying")
-                    stop_evt.wait(EXCEL_POLL_INTERVAL)
-                    continue
-                n             = len(_cached_rows)
-                _live_from    = n                          # nothing is live yet
-                _playback_idx = max(0, n - REPLAY_WINDOW)  # start of last-20 window
-                _in_loop_mode = True
-                logger.info(
-                    "ProFace | Loaded %d rows — starting at row %d "
-                    "(last %d rows). LOOP mode ON — alerts suppressed until live data arrives.",
-                    n, _playback_idx, REPLAY_WINDOW,
-                )
-
-            # ── Live-only mode (disabled loop): show NULL or live, never loop ──
-            # When the user disables looping via Settings:
-            #   1. Read the LAST row from COM session (.xls) or disk (.csv/.xlsx)
-            #   2. If its timestamp is within LIVE_STALE_SECONDS → live data: apply it
-            #   3. If timestamp is old → no live data: clear all readings (NULL shown)
-            # This cycle repeats every second.  Alerts fire only during live windows.
-            # When Pro-Server EX stops writing, values return to NULL automatically.
-            if not _excel_enabled:
-                _in_loop_mode = True   # default: no alerts
-                # For .xls: save + read from COM (one round-trip, all columns)
-                # For csv/xlsx: read from disk
-                row = _com_save_and_read() if _is_xls else _read_latest_row()
+            com_row = _com_save_and_read()
+            if com_row is not None:
+                row, mode = com_row, "com"
+            elif stat_key != last_stat or not have_row:
+                row = _read_latest_row()
                 if row is None:
-                    row = _read_latest_row()
+                    # locked / mid-write — leave last_stat unchanged so the next poll retries
+                    stat_key = last_stat
 
-                if row is not None:
-                    ts = _get_row_timestamp(row)
-                    if _is_recent_timestamp(ts):
-                        _apply_row(row)
-                        _in_loop_mode = False   # live data → alerts fire
-                        logger.debug(
-                            "ProFace | LIVE-ONLY ● LIVE | T=%.3f ts=%s extras=%s",
-                            current_temperature or 0.0, ts, extra_readings,
-                        )
+            last_stat = stat_key
+            _active = True
+
+            if row is not None:
+                sig = _row_signature(row)
+                if sig != last_sig:
+                    _apply_row(row)
+                    _read_mode = mode
+                    have_row = True
+                    if last_sig is not None:
+                        # A row we have not seen: new live data
+                        if not _is_recent_timestamp(current_timestamp):
+                            # Pro-Server EX sometimes leaves the DATE/TIME cell stale
+                            current_timestamp = now_iso()
+                        _new_rows_pending += 1
+                        _new_rows_total   += 1
+                        _last_new_row_at   = current_timestamp
+                        _last_new_row_mono = time.monotonic()
+                        logger.debug("Excel NEW row (%s): T=%s extras=%s", mode, current_temperature, extra_readings)
                     else:
-                        _clear_readings()
-                        logger.debug(
-                            "ProFace | LIVE-ONLY ○ IDLE (last ts=%s — too old)", ts,
-                        )
-                else:
-                    _clear_readings()
-
-                stop_evt.wait(EXCEL_POLL_INTERVAL)
-                continue   # skip all loop/replay logic below
-
-            # ── File grew → new live rows (disk-based detection) ─────────────
-            elif file_changed:
-                new_cache = _load_all_rows()
-                if len(new_cache) > len(_cached_rows):
-                    old_len      = len(_cached_rows)
-                    _cached_rows = new_cache
-                    new_count    = len(_cached_rows) - old_len
-                    _live_from   = old_len    # rows from old_len onward are live
-                    _playback_idx = old_len   # jump to first new row
-                    _in_loop_mode = False
-                    logger.info(
-                        "ProFace | %d new live row(s) from row %d — "
-                        "LIVE mode ON, alerts enabled.",
-                        new_count, old_len,
-                    )
-
-            # ── COM session check for .xls (Pro-Server EX writes without saving) ──
-            # Pro-Server EX pushes rows into Excel's in-memory session via DDE/OPC.
-            # The file on disk never changes, so mtime detection misses new rows.
-            # We query the running Excel COM object directly to catch them.
-            elif not file_changed:
-                com_count = _com_live_row_count()
-                if com_count > len(_cached_rows):
-                    new_cache = _load_all_rows()
-                    if len(new_cache) > len(_cached_rows):
-                        old_len       = len(_cached_rows)
-                        _cached_rows  = new_cache
-                        new_count     = len(_cached_rows) - old_len
-                        _live_from    = old_len
-                        _playback_idx = old_len
-                        _in_loop_mode = False
-                        logger.info(
-                            "ProFace | COM session: %d new live row(s) at row %d — "
-                            "LIVE mode ON (detected without file save).",
-                            new_count, old_len,
-                        )
-
-            # ── End-of-data: loop back through last REPLAY_WINDOW rows ──────────
-            total = len(_cached_rows)
-            if _playback_idx >= total:
-                _live_from    = total
-                _playback_idx = max(0, total - REPLAY_WINDOW)
-                _in_loop_mode = True
-                logger.debug(
-                    "ProFace | End of data — looping to row %d. "
-                    "LOOP mode ON — alerts suppressed.",
-                    _playback_idx,
-                )
-
-            # ── Determine live/loop for this specific row ─────────────────────
-            # Rows below _live_from = historical/loop  → alerts OFF
-            # Rows >= _live_from    = newly written    → alerts ON
-            _in_loop_mode = (_playback_idx < _live_from)
-
-            # ── Apply row and advance ─────────────────────────────────────────
-            row = _cached_rows[_playback_idx] if _cached_rows else None
-            if row is None:
-                stop_evt.wait(EXCEL_POLL_INTERVAL)
-                continue
-
-            _apply_row(row)
-            logger.debug(
-                "ProFace | %s row %-6d | T=%.3f  ts=%s  extras=%s",
-                "LOOP   " if _in_loop_mode else "LIVE   ",
-                _playback_idx,
-                current_temperature or 0.0,
-                current_timestamp,
-                extra_readings,
-            )
-            _playback_idx += 1
+                        logger.info("Excel reader: last row loaded (%s) T=%s ts=%s", mode, current_temperature, current_timestamp)
+                    last_sig = sig
+            _in_loop_mode = _new_rows_pending == 0
 
         except Exception as exc:
-            logger.warning("Pro-Server EX reader error: %s", exc)
+            logger.warning("Excel reader error: %s", exc)
 
         stop_evt.wait(EXCEL_POLL_INTERVAL)
 
-    # Thread exiting — release persistent COM connection
     _com_reader.close()
+    logger.info("Excel reader stopped")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -1978,9 +1949,12 @@ def reload_settings(db_values: Dict[str, str]) -> None:
     _last_mtime         = 0.0
     _last_file_size     = 0
     _active             = False
+    global _new_rows_pending, _last_new_row_mono
+    _new_rows_pending   = 0
+    _last_new_row_mono  = 0.0
     _com_reader.close()  # drop stale COM connection; new thread will reconnect
 
-    if EXCEL_FILE_PATH:
+    if EXCEL_FILE_PATH and EXCEL_LIVE_ENABLED:
         _thread_ref = threading.Thread(
             target=_poll_loop,
             args=(_stop_evt,),      # pass the new event so old thread can't interfere
@@ -1991,14 +1965,20 @@ def reload_settings(db_values: Dict[str, str]) -> None:
         logger.info("Pro-Server EX reader restarted: %s", EXCEL_FILE_PATH)
     else:
         _thread_ref = None
-        logger.info("Pro-Server EX reader stopped (no file path configured)")
+        if EXCEL_FILE_PATH and not EXCEL_LIVE_ENABLED:
+            logger.info(
+                "Pro-Server EX reader not running — data source is the ProEasy "
+                "collector (Live on). Excel path kept for when Live is switched off."
+            )
+        else:
+            logger.info("Pro-Server EX reader stopped (no file path configured)")
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Auto-start (only when EXCEL_FILE_PATH is configured via env var)
 # ═══════════════════════════════════════════════════════════════════════════════
 
-if EXCEL_FILE_PATH:
+if EXCEL_FILE_PATH and EXCEL_LIVE_ENABLED:
     _thread_ref = threading.Thread(
         target=_poll_loop,
         args=(_stop_evt,),
@@ -2007,4 +1987,10 @@ if EXCEL_FILE_PATH:
     )
     _thread_ref.start()
 else:
-    logger.debug("Pro-Server EX reader: EXCEL_FILE_PATH not set — inactive (configure via Admin → Settings)")
+    if EXCEL_FILE_PATH and not EXCEL_LIVE_ENABLED:
+        logger.info(
+            "Pro-Server EX reader: EXCEL_FILE_PATH configured but EXCEL_LIVE_ENABLED=False "
+            "— Excel live polling suppressed. ProEasy collector is the live source."
+        )
+    else:
+        logger.debug("Pro-Server EX reader: EXCEL_FILE_PATH not set — inactive (configure via Admin → Settings)")

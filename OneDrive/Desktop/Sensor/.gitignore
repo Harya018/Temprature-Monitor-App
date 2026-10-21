@@ -1,0 +1,6 @@
+# Local tool folders
+.claude/
+.kilo/
+
+# Written by FIRST_TIME_SETUP on each PC (database passwords) - never in git
+*PASSWORDS*KEEP PRIVATE*.txt

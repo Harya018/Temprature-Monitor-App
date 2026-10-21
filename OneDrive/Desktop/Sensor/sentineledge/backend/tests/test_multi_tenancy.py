@@ -139,7 +139,7 @@ def _insert_alert(company_id: int, level: str = "HIGH") -> int:
 def _cleanup(company_ids: list[int]) -> None:
     for cid in company_ids:
         execute_write("DELETE FROM admin_sessions WHERE admin_id IN (SELECT id FROM admins WHERE company_id = %s)", (cid,))
-        execute_write("DELETE FROM delivery_records WHERE alert_id IN (SELECT id FROM alerts WHERE company_id = %s)", (cid,))
+        execute_write("DELETE FROM delivery_receipts WHERE alert_id IN (SELECT id FROM alerts WHERE company_id = %s)", (cid,))
         execute_write("DELETE FROM alerts WHERE company_id = %s", (cid,))
         execute_write("DELETE FROM readings WHERE company_id = %s", (cid,))
         execute_write("DELETE FROM subscribers WHERE company_id = %s", (cid,))

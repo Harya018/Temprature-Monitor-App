@@ -51,7 +51,13 @@ def insert_alert(
             (parameter, value, threshold, direction, severity, ts, cooldown_until,
              company_id),
         )
-        return cur.lastrowid or -1
+        alert_id = cur.lastrowid or -1
+        if alert_id > 0:
+            from services import outbox          # no-op unless this server is a company node
+            outbox.enqueue("alert", {"node_alert_id": alert_id, "parameter": parameter, "value": value,
+                                     "threshold": threshold, "direction": direction,
+                                     "severity": severity, "timestamp": ts})
+        return alert_id
     except Exception as exc:
         logger.error("insert_alert failed: %s", exc)
         return -1
@@ -85,17 +91,31 @@ def get_unacknowledged_alerts() -> list:
 
 
 def acknowledge_alert(alert_id: int, acknowledged_by: str) -> bool:
-    """Mark an alert as acknowledged. Returns True on success."""
+    """Mark an alert as acknowledged. Returns True on success, False if it was already acknowledged
+    (the FIRST person keeps the acknowledgement: a second admin must not overwrite who/when, which
+    would also falsify the response time)."""
     try:
         ts = datetime.now(timezone.utc).isoformat()
-        execute_write(
+        res = execute_write(
             """
             UPDATE alerts
             SET acknowledged = 1, acknowledged_by = %s, acknowledged_at = %s
-            WHERE id = %s
+            WHERE id = %s AND COALESCE(acknowledged, 0) = 0
             """,
             (acknowledged_by, ts, alert_id),
         )
+        if not res.rowcount:
+            return False
+        from services import outbox
+        outbox.enqueue("alert_ack", {"node_alert_id": alert_id, "acknowledged_by": acknowledged_by,
+                                     "acknowledged_at": ts})
+        try:
+            r = execute_read("SELECT company_id, parameter FROM alerts WHERE id = %s", (alert_id,))
+            if r:
+                from services import company_log
+                company_log.log(r[0]["company_id"], f"Alert #{alert_id} ({r[0]['parameter']}) acknowledged by {acknowledged_by}")
+        except Exception:
+            pass
         return True
     except Exception as exc:
         logger.error("acknowledge_alert failed: %s", exc)
@@ -143,12 +163,14 @@ def get_recent_alerts(limit: int = 50, offset: int = 0, company_id: Optional[int
         return []
 
 
-def get_alerts_today_count() -> int:
-    """Return the number of alerts created today (UTC)."""
+def get_alerts_today_count(company_id: int | None = None) -> int:
+    """Return the number of alerts created today (UTC) — one company's when given."""
     today = datetime.now(timezone.utc).date().isoformat()
     try:
         rows = execute_read(
-            "SELECT COUNT(*) as cnt FROM alerts WHERE timestamp >= %s", (today,)
+            "SELECT COUNT(*) as cnt FROM alerts WHERE timestamp >= %s "
+            "AND (%s::int IS NULL OR company_id = %s::int)",
+            (today, company_id, company_id),
         )
         return rows[0]["cnt"] if rows else 0
     except Exception as exc:

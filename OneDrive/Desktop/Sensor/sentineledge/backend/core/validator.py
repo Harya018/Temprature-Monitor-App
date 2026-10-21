@@ -95,8 +95,15 @@ class ReadingValidator:
 
 # ─── Module-level singleton ───────────────────────────────────────────────────
 validator = ReadingValidator()
+_per_company: dict = {}      # company_id -> its own validator (spike check compares a company's
+                             # reading only with that company's previous one)
 
 
-def validate_reading(reading: dict) -> tuple[bool, str]:
-    """Validate a sensor reading using the module singleton."""
-    return validator.validate(reading)
+def validate_reading(reading: dict, company_id=None) -> tuple[bool, str]:
+    """Validate a sensor reading. With company_id, the spike check is per company."""
+    if company_id is None:
+        return validator.validate(reading)
+    v = _per_company.get(company_id)
+    if v is None:
+        v = _per_company[company_id] = ReadingValidator()
+    return v.validate(reading)

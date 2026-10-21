@@ -9,6 +9,7 @@
  *  - Mobile app PIN management unchanged
  */
 import { useState, useEffect, useCallback } from 'react'
+import useAdminIdentity from '../hooks/useAdminIdentity.js'
 import {
   Plus, Trash2, Key, Check, Phone, Mail,
   ChevronDown, ChevronUp, Users, ChevronLeft, ChevronRight,
@@ -250,13 +251,16 @@ export default function SubscribersPage() {
     }
   }
 
+  const me = useAdminIdentity()
+  const ro = me?.role === 'sub'        // a sub-admin can look, not change
+
   // ── Pagination ──────────────────────────────────────────────────────────────
   const totalPages = Math.ceil(subs.length / PAGE_SIZE)
   const pageSubs   = subs.slice(page * PAGE_SIZE, page * PAGE_SIZE + PAGE_SIZE)
 
   // ── Render ──────────────────────────────────────────────────────────────────
   return (
-    <div className="space-y-5">
+    <fieldset disabled={ro} style={{ border: 0, margin: 0, padding: 0, minWidth: 0 }} className="space-y-5">
 
       {/* ── Tab switcher ────────────────────────────────────────────────────── */}
       <div className="sub-tabs">
@@ -629,6 +633,6 @@ export default function SubscribersPage() {
 
       </> /* end subscribers tab */}
 
-    </div>
+    </fieldset>
   )
 }

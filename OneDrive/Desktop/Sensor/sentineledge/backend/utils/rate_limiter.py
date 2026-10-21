@@ -15,6 +15,8 @@ remaining_attempts(username, ip)        → int — attempts left before lockout
 from fastapi import HTTPException
 
 MAX_ATTEMPTS: int = 5
+# Account-wide cap across ALL IPs — stops brute force that rotates source IPs
+MAX_ATTEMPTS_PER_ACCOUNT: int = 20
 LOCKOUT_MINUTES: int = 15
 
 # Hardcoded interval string — safe because LOCKOUT_MINUTES is an internal constant.
@@ -38,13 +40,30 @@ def _failed_count(username: str, ip: str) -> int:
     return rows[0]["cnt"] if rows else 0
 
 
+def _failed_count_any_ip(username: str) -> int:
+    from database.connection import execute_read
+    rows = execute_read(
+        f"""
+        SELECT COUNT(*) AS cnt
+          FROM login_attempts
+         WHERE username = %s
+           AND success = 0
+           AND attempted_at > NOW() - {_WINDOW}
+        """,
+        (username,),
+    )
+    return rows[0]["cnt"] if rows else 0
+
+
 def check_rate_limit(username: str, ip: str) -> None:
     """
     Call at the START of any login route, before credential checks.
-    Raises HTTP 429 if the account+IP has hit MAX_ATTEMPTS failures
-    within the last LOCKOUT_MINUTES minutes.
+    Raises HTTP 429 if the account+IP has hit MAX_ATTEMPTS failures, or the
+    account has hit MAX_ATTEMPTS_PER_ACCOUNT failures from any IP, within
+    the last LOCKOUT_MINUTES minutes.
     """
-    if _failed_count(username, ip) >= MAX_ATTEMPTS:
+    if (_failed_count(username, ip) >= MAX_ATTEMPTS
+            or _failed_count_any_ip(username) >= MAX_ATTEMPTS_PER_ACCOUNT):
         raise HTTPException(
             status_code=429,
             detail=(

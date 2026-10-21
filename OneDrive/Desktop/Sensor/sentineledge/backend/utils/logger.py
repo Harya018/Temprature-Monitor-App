@@ -18,6 +18,21 @@ import sys
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
+
+class _SafeRotatingFileHandler(RotatingFileHandler):
+    """RotatingFileHandler that survives PermissionError on stream.tell().
+
+    On Windows, USB/shared drives sometimes deny tell() inside shouldRollover.
+    Rather than crashing the logging thread, we skip the rotation check and
+    keep writing to the current file.
+    """
+
+    def shouldRollover(self, record: logging.LogRecord) -> int:
+        try:
+            return super().shouldRollover(record)
+        except (PermissionError, OSError):
+            return 0
+
 # ── Constants ─────────────────────────────────────────────────────────────────
 _ROOT_LOGGER_NAME = "sentineledge"
 _LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
@@ -62,7 +77,7 @@ def _configure() -> None:
     try:
         _LOGS_DIR.mkdir(parents=True, exist_ok=True)
         log_file = _LOGS_DIR / "sentineledge.log"
-        fh = RotatingFileHandler(
+        fh = _SafeRotatingFileHandler(
             log_file,
             maxBytes=_MAX_BYTES,
             backupCount=_BACKUP_COUNT,
@@ -78,7 +93,7 @@ def _configure() -> None:
     # ── Error-only rotating file handler ──────────────────────────────────────
     try:
         error_file = _LOGS_DIR / "sentineledge_error.log"
-        efh = RotatingFileHandler(
+        efh = _SafeRotatingFileHandler(
             error_file,
             maxBytes=5 * 1024 * 1024,   # 5 MB
             backupCount=5,

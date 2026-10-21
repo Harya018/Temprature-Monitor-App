@@ -1,0 +1,250 @@
+=====================================================================
+  SENTINELEDGE  -  COMPANY ADMIN MANUAL
+  For the person who runs the monitoring for your company
+=====================================================================
+
+YOUR LOGIN
+----------
+  Web address :  http://localhost:5000
+  Username    :  ______________________
+  Password    :  ______________________
+  (written in by the person who set up your company - keep it private)
+
+  Wrong password 5 times locks the sign-in for 15 minutes.
+  The username is not case-sensitive (Ravi = ravi).
+  Change your own password in  My Account  (left menu): type the current
+  password and the new one (8 characters or more). Only YOUR account
+  changes; your sign-ins on other PCs end, other admins are not affected.
+  If you forget the password, ask the person who set up your company.
+  Press Logout when you leave a shared PC - it ends the sign-in on the
+  server, so nobody can carry on in your name.
+
+  SEVERAL ADMINS IN ONE COMPANY
+  Each person has their own account (never share one). Everything is
+  recorded under the name of the person who did it: acknowledgements,
+  subscriber changes, limit changes, deleting alerts. A "Sub Admin" can
+  view everything and acknowledge alerts but cannot change settings.
+  If the Super Admin switches your account off, resets your password or
+  moves you to another company, your open pages sign out within about
+  15 seconds.
+
+
+1. EVERY DAY
+------------
+  * Start:  double-click START.bat. After 10-20 seconds your browser
+    opens the dashboard. Keep the black windows open (you can
+    minimise them).
+  * Stop:   double-click STOP.bat.
+  * If the page does not open, type  http://localhost:5000  in the
+    browser yourself.
+  * Switching the PC off stops monitoring. Start it again with
+    START.bat; nothing is lost.
+
+
+2. WHAT YOU SEE
+---------------
+  You see ONLY your own company's data.
+
+  Dashboard     One tile for each parameter your company measures.
+                The values, the clock and "x seconds ago" count live.
+                A red banner appears when a value goes out of limits.
+  Alerts        Every alert, newest first. Press Acknowledge to say
+                "I have seen it" - reminders stop. It is recorded under
+                your own sign-in name. If another admin was quicker, you
+                are told who acknowledged it; their name and time stay.
+  Analytics     Charts of your parameters over time.
+  Live Logs     What is happening right now: readings, alerts,
+                acknowledgements, sign-ins, settings changes.
+  Reports       Daily summary, and EXPORT of every reading between any
+                two dates (CSV or JSON). Nothing is deleted
+                automatically, so old dates can always be exported.
+  History       Past readings and alerts.
+  Subscribers   The people who receive alerts.
+  Health        Whether SentinelEdge is working. The Sensor card shows what
+                feeds your dashboard: "Live" (the live collector is sending),
+                "Excel Live" (new rows are arriving in your Excel file),
+                "No Data" (a source is on but nothing new is arriving; the
+                card says why) or "No Live Source" (none switched on in
+                Settings). Nothing is ever shown from old or demo data.
+  Admins        Everyone who can sign in for your company: role, account
+                on/off, last sign-in. Only the Super Admin adds, removes
+                or resets admin accounts.
+  My Account    Your own name, role and company; change your password.
+  Settings      Limits, live data source, e-mail / SMS test.
+
+
+3. WHEN AN ALERT COMES
+----------------------
+  1. The dashboard shows a red banner and sounds a warning beep. (The
+     page must have been clicked once after it was opened, otherwise
+     the browser keeps it silent.)
+  2. Your subscribers get an SMS / e-mail / app message, 1st contact
+     first, then the next contact if nobody acknowledges in time.
+  3. Press Acknowledge (on the dashboard, the Alerts page, or from the
+     SMS / app). The same parameter alerts again at most once every
+     5 minutes while it stays outside the limits.
+
+
+4. SUBSCRIBERS (people who get alerts)
+--------------------------------------
+  Subscribers > Add: name, phone number (with country code, for
+  example +91...), e-mail, and the contact order (1 = first person to
+  be told, 2 = next, ...). Each order number can be used once.
+  Edit or remove a person at any time.
+
+
+5. SETTINGS
+-----------
+  Parameter limits & alerts
+      One row per parameter. Set the Minimum and Maximum and press
+      Save on that row. A reading below the minimum or above the
+      maximum raises an alert.
+      "Alerts" off = readings are still recorded but no alert is sent.
+      "Send test alert" sends a clearly marked TEST message to your
+      subscribers, so you can check the whole chain works.
+
+  Alert messages (SMS and e-mail)
+      Each parameter has its own SMS and its own e-mail. Write what your
+      people should read when that parameter goes out of range:
+        * SMS   one text box (an SMS is cut at 160 characters).
+        * E-mail   a subject and a text.
+      Click a placeholder such as {value} to put it in the text; it is
+      replaced by the real figure when the alert is sent:
+        {name} person   {company}   {parameter}   {unit}   {value} reading
+        {limit} limit crossed   {direction} above / below   {severity}
+        {time} when (IST)   {min} {max} allowed range
+      Example SMS:  {company}: {parameter} is {value}{unit}, {direction}
+                    the limit {limit}{unit}. {time}
+      Buttons: Preview (shows it with example figures), Use example,
+      Save, and Standard message (go back to the built-in wording; an
+      empty box always means the standard message). Press "Send test
+      alert" above to receive the real message on your own phone.
+      Each company's wording is its own: nobody else sees or uses it.
+
+  Tailscale (connecting this computer to the main server)
+      Company servers send their data to the main (Super Admin) server, and
+      phones reach company servers, over Tailscale (a free private network).
+      When you sign in, a notification in the bell (top right) tells you if
+      Tailscale is missing, signed out or turned off, or if the main server
+      cannot be reached. Settings > Tailscale shows the status and these steps:
+        1. Download Tailscale for Windows from tailscale.com/download and
+           install it.
+        2. Click its icon near the clock > Log in (Google or Microsoft
+           account).
+        3. Open the invitation link from Super Admin (Settings > Tailscale
+           shows it) and press Accept.
+        4. In the Tailscale menu turn on "Run unattended" and "Start on
+           login", so it stays on after a restart.
+        5. Settings > Tailscale > Check again: it turns green.
+      An invitation or share link works once per person and expires if not
+      used within 30 days; ask Super Admin for a new one.
+
+  Phone app (the same app for every company)
+      Everyone installs the same SentinelEdge app. It builds its screens
+      from YOUR company: one card per parameter you added, with your own
+      limits and units, your live values and your alerts. A company with
+      only pH sees only pH; another with temperature and pressure sees
+      those. Nothing is built into the app.
+        1. Settings > Phone app shows the server address to type
+           (this computer's address and port, e.g. 192.168.1.20:5000;
+           a Tailscale address works from anywhere).
+        2. In the app type that address, then the person's name and PIN
+           (set the PIN under Subscribers). A company admin can sign in
+           with the admin name and password.
+        3. The phone must reach this computer: same Wi-Fi, or Tailscale /
+           VPN when away. The address is remembered; to switch to another
+           company's server, sign out in the app and enter the new address.
+      The app shows the alert, lets the person press Acknowledge, and
+      receives alerts as notifications.
+
+  SMS (text messages) - needs a GSM modem
+      SMS alerts are sent by a GSM modem plugged into this computer:
+      the SIM7600 (SIM7600 EI 4G modem, connected by USB), the module
+      SentinelEdge is built and tested with. You need:
+        1. the SIM7600 USB modem with its antenna;
+        2. a SIM card in it that can send SMS (plan or balance, signal,
+           PIN lock off);
+        3. the modem's USB driver installed (Device Manager > Ports
+           (COM & LPT) shows its COM ports, one of them an "AT" port).
+      Plug the modem in, then restart (STOP.bat, START.bat). Settings >
+      SMS Configuration shows "Connected" when the modem answers; press
+      Send Test (to someone on your Subscribers list) to check. One modem
+      serves the whole computer; each company's SMS goes only to its own
+      subscribers. SMS is charged by the SIM's plan, 160 characters each.
+      Without the modem only e-mail and app alerts are sent.
+
+  E-mail account for alerts
+      Alert e-mails and the daily report are sent from YOUR company's
+      e-mail account. Nothing is set by default: until you add one, no
+      e-mail is sent for your company, and a company never sends from
+      another company's mailbox. The main company of the computer has its
+      account written into the server's settings file (.env) automatically
+      when you press Save (no restart, no editing the file); every other
+      company's account is stored encrypted.
+      Choose the provider, type the e-mail address and the APP PASSWORD
+      (not your normal password), press Save, then "Send test e-mail".
+      The password is stored encrypted and is never shown again.
+      How to get an app password:
+        Gmail:      myaccount.google.com > Security > turn on 2-Step
+                    Verification > myaccount.google.com/apppasswords >
+                    name it SentinelEdge > Create > copy the 16 letters.
+        Outlook.com / Hotmail:  account.microsoft.com > Security >
+                    Advanced security options > turn on two-step
+                    verification > App passwords > Create.
+        Yahoo:      Account Info > Account security > turn on two-step
+                    verification > Generate app password.
+        Microsoft 365 (work): ask your IT administrator to allow
+                    "Authenticated SMTP" for the mailbox (and an app
+                    password if two-step verification is on).
+        Other:      ask your IT department for the outgoing (SMTP) server,
+                    port (587 STARTTLS or 465 SSL) and password.
+      If a test fails, the page says why (usually: use the app password,
+      not the normal one). SentinelEdge only sends from the account; it
+      never reads it.
+
+  Request Parameter
+      Need a new parameter (for example Flow)? Press Request
+      Parameter and type its name and unit. It is added after your
+      system administrator approves it. Only approved parameters are
+      recorded.
+
+  Excel Live Reader  (how the readings come in)
+      Your logger writes a new row to an Excel file each time. Here you
+      tell SentinelEdge where that file is:
+        File Path            full path, e.g.  C:\Logger\ph_data_live.xlsx
+        Date column / Time column   Date / Time   (or one Timestamp column)
+        Temperature column   only if you measure temperature
+      Press Save Settings, then Test File (shows the last row it found),
+      then switch the Excel reader ON.
+      Each NEW row is recorded once, checked against your limits and
+      shown live. Rows that were already in the file are not imported.
+      The column heading must be the same as the parameter name
+      (capital or small letters do not matter: pH = ph = PH).
+
+  E-mail / SMS test
+      Sends a test message so you know alerts can reach people. It can
+      only go to someone who is already on your Subscribers list, so add
+      the person there first.
+
+
+6. EXPORTING DATA
+-----------------
+  Reports > choose the From and To dates > CSV or JSON. Any dates,
+  any amount of data. Your company's daily tables are also kept on
+  this PC in  sentineledge\data\readings_csv  (one file per day).
+
+
+7. PROBLEMS
+-----------
+  Page will not open        Run STOP.bat, then START.bat again.
+  Old screens after update  Press Ctrl + F5 in the browser.
+  No live readings          Settings > Excel Live Reader: check the file
+                            path, press Test File, make sure the reader
+                            is ON, a NEW row was added and the Excel file
+                            was SAVED, and the column name matches the
+                            parameter name.
+  No SMS / e-mail           Settings > send a test. Check the numbers in
+                            Subscribers.
+  Something else            Open Live Logs and tell your support contact
+                            what the last lines say.
+=====================================================================

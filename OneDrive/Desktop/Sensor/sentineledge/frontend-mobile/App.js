@@ -20,16 +20,22 @@ import SettingsScreen from './src/screens/SettingsScreen';
 import AlertOverlay from './src/components/AlertOverlay';
 import OfflineBanner from './src/components/OfflineBanner';
 import { verifySession } from './src/services/auth';
+import { loadServer } from './src/config/config';
 import { registerBackgroundTask } from './src/tasks/backgroundTask';
 import { useWebSocket } from './src/hooks/useWebSocket';
 
 // ── Notification handler ─────────────────────
 Notifications.setNotificationHandler({
-  handleNotification: async () => ({
-    shouldShowAlert: true,
-    shouldPlaySound: true,
-    shouldSetBadge: false,
-  }),
+  handleNotification: async (notification) => {
+    // Only real alerts may make a sound; the "monitoring active" status notice is always silent.
+    const type = notification?.request?.content?.data?.type;
+    const quiet = type === 'background_service';
+    return {
+      shouldShowAlert: true,
+      shouldPlaySound: !quiet,
+      shouldSetBadge: false,
+    };
+  },
 });
 
 const Stack = createNativeStackNavigator();
@@ -115,7 +121,8 @@ export default function App() {
   // ── On mount: check session + request permissions ──
   useEffect(() => {
     const init = async () => {
-      // 1. Check existing session
+      // 1. Which server was this phone set up for? Then check the saved sign-in against it.
+      await loadServer();
       const isLoggedIn = await verifySession();
       setInitialRoute(isLoggedIn ? 'Main' : 'Login');
 
@@ -133,6 +140,14 @@ export default function App() {
       // Channel settings are user-owned after first creation; this is a no-op on re-runs
       // unless the channel was deleted.
       if (Platform.OS === 'android') {
+        // Silent channel for the background "monitoring active" status notice (no sound, no vibration)
+        await Notifications.setNotificationChannelAsync('monitoring', {
+          name: 'Monitoring status (silent)',
+          importance: Notifications.AndroidImportance.LOW,
+          sound: null,
+          enableVibrate: false,
+          showBadge: false,
+        });
         await Notifications.setNotificationChannelAsync('critical-alerts', {
           name: 'Critical Alerts',
           importance: Notifications.AndroidImportance.MAX,

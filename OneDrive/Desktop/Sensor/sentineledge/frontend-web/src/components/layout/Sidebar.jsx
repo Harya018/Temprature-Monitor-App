@@ -6,7 +6,7 @@ import { NavLink, useNavigate } from 'react-router-dom'
 import {
   LayoutDashboard, Bell, TrendingUp, Terminal, BarChart2,
   History, Receipt,
-  Users, Activity, ClipboardList, CheckCheck, UserCircle2,
+  Users, Activity, ClipboardList, CheckCheck, UserCircle2, ShieldCheck,
   Settings, Thermometer, LogOut, ChevronLeft, ChevronRight,
 } from 'lucide-react'
 
@@ -22,7 +22,8 @@ const NAV = [
   { to: '/health',      icon: Activity,        label: 'Health'       },
   { to: '/events',      icon: ClipboardList,   label: 'Audit Trail'  },
   { to: '/ack-log',     icon: CheckCheck,      label: 'Ack Log'      },
-  { to: '/profile',     icon: UserCircle2,     label: 'Admin Profile'},
+  { to: '/manage-admins', icon: ShieldCheck,   label: 'Admins'       },
+  { to: '/profile',     icon: UserCircle2,     label: 'My Account'},
   { to: '/settings',    icon: Settings,        label: 'Settings'     },
 ]
 
@@ -30,6 +31,9 @@ export default function Sidebar({ unreadCount, collapsed, onToggle }) {
   const navigate = useNavigate()
 
   const handleLogout = () => {
+    // end the sign-in on the server too, so the token cannot be reused on a shared PC
+    const tok = sessionStorage.getItem('admin_token')
+    if (tok) fetch('/api/admin/logout', { method: 'POST', headers: { Authorization: `Bearer ${tok}` } }).catch(() => {})
     sessionStorage.clear()
     navigate('/', { replace: true })
   }

@@ -4,11 +4,13 @@
  * how many seconds elapsed between the alert firing and acknowledgement.
  * Updates in real time via WebSocket when a new acknowledgement arrives.
  */
+import { fmtAlertNumber } from '../utils/alertFormat.js'
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { RefreshCw, CheckCircle2, Clock, User } from 'lucide-react'
 import { fetchAckLog } from '../services/api.js'
 import { SkeletonTable } from '../components/Skeleton'
 import ErrorState from '../components/ErrorState'
+import TimeAgo from '../components/shared/TimeAgo.jsx'
 
 // ── Time helpers ──────────────────────────────────────────────────────────────
 const IST_OFFSET_MS = 5.5 * 60 * 60 * 1000
@@ -103,7 +105,7 @@ export default function AckLogPage({ wsData }) {
         <div className="flex items-center gap-3">
           {lastUpdate && (
             <span className="text-xs text-gray-400">
-              Updated {timeAgo(lastUpdate.toISOString())}
+              Updated <TimeAgo ts={lastUpdate.toISOString()} />
             </span>
           )}
           <button
@@ -191,9 +193,9 @@ export default function AckLogPage({ wsData }) {
                     </td>
                     <td className="px-4 py-3">
                       <span className="font-bold" style={{ color: severityColor(row.direction) }}>
-                        {Number(row.value).toFixed(1)}°C
+                        {fmtAlertNumber(row.parameter, row.value)}
                       </span>
-                      <span className="text-xs text-gray-400 ml-1">/ {row.threshold}°C</span>
+                      <span className="text-xs text-gray-400 ml-1">/ {fmtAlertNumber(row.parameter, row.threshold)}</span>
                     </td>
                     <td className="px-4 py-3">
                       <p className="text-xs text-gray-700">{toIST(row.timestamp)}</p>

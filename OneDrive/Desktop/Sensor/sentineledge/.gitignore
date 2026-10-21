@@ -30,3 +30,18 @@ backend/secrets/
 *.crt
 firebase-service-account.json
 *firebase-service-account*.json
+# Daily CSV tables of live readings (generated at runtime)
+data/readings_csv/
+
+# ── Fresh-laptop install from GitHub ─────────────────────────────────────────
+# FIRST_TIME_SETUP needs these two templates (no secrets in them) - keep them in git
+!.env.template
+!.env.example
+# per-PC files written at runtime / by setup - never in git
+/data/
+/logs/
+*.pid
+python_path.txt
+venv32/
+# public download (install_python32.bat says where to get it)
+collector/python-*.exe

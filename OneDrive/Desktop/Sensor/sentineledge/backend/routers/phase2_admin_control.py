@@ -1,5 +1,5 @@
-"""
-routers/phase2_admin_control.py — Phase 2: Absolute Control Over Admins.
+﻿"""
+routers/phase2_admin_control.py â€” Phase 2: Absolute Control Over Admins.
 
 All routes protected by require_super_admin (imported from super_admin.py).
 
@@ -26,7 +26,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
 
 from database.connection import execute_read, execute_write
-from routers.super_admin import require_super_admin
+from routers.super_admin_v2 import require_super_admin
 from utils.activity_logger import log_activity
 from utils.logger import get_logger
 
@@ -37,7 +37,7 @@ router = APIRouter(prefix="/api/super-admin/admin-control", tags=["Super Admin C
 _PROTECTED_ROLES = ("super_admin",)
 
 
-# ─── Pydantic bodies ──────────────────────────────────────────────────────────
+# â”€â”€â”€ Pydantic bodies â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 class _LockIn(BaseModel):
     reason: str = Field(min_length=1, max_length=500)
@@ -61,14 +61,14 @@ class _NoteIn(BaseModel):
         return v.strip() if isinstance(v, str) else v
 
 
-# ─── Helpers ─────────────────────────────────────────────────────────────────
+# â”€â”€â”€ Helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def _get_admin_or_404(admin_id: int) -> dict:
     rows = execute_read("SELECT id, name, role, is_active FROM admins WHERE id = %s", (admin_id,))
     return rows[0] if rows else None
 
 
-# ─── Lock / Unlock ────────────────────────────────────────────────────────────
+# â”€â”€â”€ Lock / Unlock â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @router.post("/{admin_id}/lock", summary="Lock an admin account")
 async def lock_admin(
@@ -96,7 +96,7 @@ async def lock_admin(
         None,
     )
     logger.info(
-        "Admin %d (%s) locked by super_admin %d — reason: %r — %d session(s) invalidated",
+        "Admin %d (%s) locked by super_admin %d â€” reason: %r â€” %d session(s) invalidated",
         admin_id, admin["name"], sa["id"], body.reason, invalidated,
     )
     return {"admin_id": admin_id, "locked": True, "sessions_invalidated": invalidated}
@@ -122,7 +122,7 @@ async def unlock_admin(
     return {"admin_id": admin_id, "locked": False}
 
 
-# ─── Require-approval toggle ──────────────────────────────────────────────────
+# â”€â”€â”€ Require-approval toggle â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @router.post("/{admin_id}/require-approval", summary="Toggle approval requirement for an admin")
 async def set_require_approval(
@@ -147,7 +147,7 @@ async def set_require_approval(
     return {"admin_id": admin_id, "requires_approval": body.enabled}
 
 
-# ─── Impersonation ────────────────────────────────────────────────────────────
+# â”€â”€â”€ Impersonation â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @router.post("/{admin_id}/impersonate", summary="Start impersonation session for an admin")
 async def start_impersonation(
@@ -168,6 +168,11 @@ async def start_impersonation(
         "INSERT INTO admin_sessions (token, expires_at, admin_id) VALUES (%s, %s, %s)",
         (token, expires_at, admin_id),
     )
+    try:   # whatever is done in this session is recorded as the Super Admin, not as the company admin
+        execute_write("UPDATE admin_sessions SET login_name = %s WHERE token = %s",
+                      (f"Super Admin (as {admin['name']})", token))
+    except Exception as exc:
+        logger.warning("impersonation: could not label the session: %s", exc)
 
     # Store a one-time code in impersonation_codes; the browser tab redeems this
     # code via POST /redeem-impersonation to get the actual session token.
@@ -177,7 +182,7 @@ async def start_impersonation(
     execute_write(
         """
         INSERT INTO impersonation_codes (code, token, admin_id, expires_at, used)
-        VALUES (%s, %s, %s, %s, FALSE)
+        VALUES (%s, %s, %s, %s, 0)
         """,
         (code, token, admin_id, code_exp),
     )
@@ -199,7 +204,7 @@ async def start_impersonation(
         None,
     )
     logger.info(
-        "Super admin %d started impersonation of admin %d (%s) — expires %s",
+        "Super admin %d started impersonation of admin %d (%s) â€” expires %s",
         sa["id"], admin_id, admin["name"], expires_at.isoformat(),
     )
     return {
@@ -215,7 +220,7 @@ async def redeem_impersonation(body: dict):
     """
     Called by the new browser tab immediately after opening.
     Validates the short-lived code and returns the actual session token exactly once.
-    No auth required — the code itself is the credential.
+    No auth required â€” the code itself is the credential.
     """
     code = (body.get("code") or "").strip()
     if not code:
@@ -241,10 +246,13 @@ async def redeem_impersonation(body: dict):
     if datetime.now(timezone.utc) > exp:
         return JSONResponse(status_code=410, content={"error": "Code has expired"})
 
-    execute_write(
-        "UPDATE impersonation_codes SET used = TRUE WHERE code = %s",
+    # Atomic claim: only one concurrent request can flip used 0 -> 1
+    claimed = execute_write(
+        "UPDATE impersonation_codes SET used = 1 WHERE code = %s AND used = 0",
         (code,),
     )
+    if claimed.rowcount != 1:
+        return JSONResponse(status_code=410, content={"error": "Code already used"})
 
     logger.info("Impersonation code redeemed for admin_id %d", row["admin_id"])
     return {"token": row["token"], "admin_id": row["admin_id"]}
@@ -264,16 +272,20 @@ async def end_impersonation(
         "UPDATE admins SET impersonated_by = NULL, impersonation_expires_at = NULL WHERE id = %s",
         (admin_id,),
     )
+    # ...and end the impersonation sign-in itself (it stayed valid for up to an hour before)
+    ended = execute_write(
+        "DELETE FROM admin_sessions WHERE admin_id = %s AND token IN "
+        "(SELECT token FROM impersonation_codes WHERE admin_id = %s)", (admin_id, admin_id)).rowcount
 
     log_activity(
         sa["id"], "impersonate_end", "admin",
         f"superadmin ended impersonation of admin_id:{admin_id} name:{admin['name']}",
         None,
     )
-    return {"admin_id": admin_id, "impersonation_ended": True}
+    return {"admin_id": admin_id, "impersonation_ended": True, "sessions_ended": ended}
 
 
-# ─── Approval queue ───────────────────────────────────────────────────────────
+# â”€â”€â”€ Approval queue â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @router.get("/approvals/pending", summary="List pending approvals")
 async def list_pending_approvals(_: dict = Depends(require_super_admin)):
@@ -357,28 +369,41 @@ async def approve_approval(
     if rows[0]["status"] != "pending":
         return JSONResponse(status_code=409, content={"error": f"Approval is already {rows[0]['status']}"})
 
-    execute_write(
+    # Claim atomically: only one reviewer can move it out of 'pending', even if
+    # two approve clicks arrive together (otherwise the action ran twice).
+    claimed = execute_write(
         """
         UPDATE pending_approvals
            SET status      = 'approved',
                reviewed_by = %s,
                review_note = %s,
                reviewed_at = NOW()
-         WHERE id = %s
+         WHERE id = %s AND status = 'pending'
         """,
         (sa["id"], body.note, approval_id),
     )
+    if claimed.rowcount != 1:
+        return JSONResponse(status_code=409, content={"error": "Approval was already reviewed"})
 
-    log_activity(
-        sa["id"], "approval_approved", "pending_approvals",
-        f"approval_id:{approval_id} action:{rows[0]['action_type']} note:{body.note}",
-        None,
-    )
-    logger.info("Approval %d approved by super_admin %d", approval_id, sa["id"])
-
-    # ── Execute the approved action ───────────────────────────────────────────
+    # â”€â”€ Execute the approved action â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     action_type = rows[0]["action_type"]
     payload     = rows[0].get("payload") or {}
+    if isinstance(payload, str):
+        import json as _json
+        payload = _json.loads(payload or "{}")
+
+    def _undo_claim(exc: Exception):
+        """The action failed — put the request back to pending and say why."""
+        execute_write(
+            "UPDATE pending_approvals SET status = 'pending', reviewed_by = NULL, "
+            "review_note = NULL, reviewed_at = NULL WHERE id = %s",
+            (approval_id,),
+        )
+        logger.error("Approval %d: %s failed, left pending: %s", approval_id, action_type, exc)
+        return JSONResponse(
+            status_code=500,
+            content={"error": f"Could not apply '{action_type}': {exc}. The request is still pending."},
+        )
 
     if action_type == "add_parameter":
         try:
@@ -405,6 +430,9 @@ async def approve_approval(
                 "Approval %d executed: add_parameter '%s' for company %s",
                 approval_id, payload.get("name"), payload.get("company_id"),
             )
+            from routers.phase3_config import _sync_sensor_temperature
+            _sync_sensor_temperature(payload.get("company_id"), payload.get("name"),
+                                     payload.get("min_value"), payload.get("max_value"))
             try:
                 from modules.inapp.manager import broadcast as _broadcast
                 import asyncio
@@ -417,13 +445,11 @@ async def approve_approval(
                         "min_value": payload.get("min_value"),
                         "max_value": payload.get("max_value"),
                     },
-                }))
+                }, company_id=payload.get("company_id")))
             except Exception as _bcast_exc:
                 logger.warning("parameter_added broadcast failed: %s", _bcast_exc)
         except Exception as _exec_exc:
-            logger.error(
-                "Approval %d: add_parameter execution failed: %s", approval_id, _exec_exc
-            )
+            return _undo_claim(_exec_exc)
     elif action_type == "delete_parameter":
         try:
             execute_write(
@@ -442,18 +468,28 @@ async def approve_approval(
                     "company_id":   payload.get("company_id"),
                     "parameter_id": payload.get("parameter_id"),
                     "name":         payload.get("name"),
-                }))
+                }, company_id=payload.get("company_id")))
             except Exception as _bcast_exc:
                 logger.warning("parameter_deleted broadcast failed: %s", _bcast_exc)
         except Exception as _exec_exc:
-            logger.error(
-                "Approval %d: delete_parameter execution failed: %s", approval_id, _exec_exc
-            )
+            return _undo_claim(_exec_exc)
     else:
         logger.warning(
-            "Approval %d approved but action_type '%s' has no executor — skipped",
+            "Approval %d approved but action_type '%s' has no executor â€” skipped",
             approval_id, action_type,
         )
+
+    try:
+        from services import company_log as _clog
+        _clog.log(payload.get("company_id"), f"Super Admin APPROVED {action_type.replace('_', ' ')}: {payload.get('name')}")
+    except Exception:
+        pass
+    log_activity(
+        sa["id"], "approval_approved", "pending_approvals",
+        f"approval_id:{approval_id} action:{action_type} note:{body.note}",
+        None,
+    )
+    logger.info("Approval %d approved by super_admin %d", approval_id, sa["id"])
 
     return {
         "approval_id": approval_id,
@@ -479,18 +515,30 @@ async def reject_approval(
     if rows[0]["status"] != "pending":
         return JSONResponse(status_code=409, content={"error": f"Approval is already {rows[0]['status']}"})
 
-    execute_write(
+    claimed = execute_write(
         """
         UPDATE pending_approvals
            SET status      = 'rejected',
                reviewed_by = %s,
                review_note = %s,
                reviewed_at = NOW()
-         WHERE id = %s
+         WHERE id = %s AND status = 'pending'
         """,
         (sa["id"], body.note, approval_id),
     )
+    if claimed.rowcount != 1:
+        return JSONResponse(status_code=409, content={"error": "Approval was already reviewed"})
 
+    try:
+        import json as _json
+        from database.connection import execute_read as _er
+        _r = _er("SELECT payload FROM pending_approvals WHERE id = %s", (approval_id,))
+        _p = _r[0]["payload"] if _r else {}
+        _p = _json.loads(_p) if isinstance(_p, str) else (_p or {})
+        from services import company_log as _clog
+        _clog.log(_p.get("company_id"), f"Super Admin REJECTED request for {_p.get('name')}")
+    except Exception:
+        pass
     log_activity(
         sa["id"], "approval_rejected", "pending_approvals",
         f"approval_id:{approval_id} action:{rows[0]['action_type']} note:{body.note}",
@@ -503,3 +551,4 @@ async def reject_approval(
         "reviewed_by": sa["id"],
         "note":        body.note,
     }
+

@@ -39,6 +39,12 @@ export default function useAudioAlarm() {
     osc.stop(startAt + duration)
   }
 
+  /** Call from a click / key press so the browser allows sound later. */
+  const unlock = useCallback(() => {
+    const ctx = getCtx()
+    if (ctx.state === 'suspended') ctx.resume()
+  }, [])
+
   const stopAlarm = useCallback(() => {
     clearInterval(intervalRef.current)
     intervalRef.current = null
@@ -58,7 +64,10 @@ export default function useAudioAlarm() {
       const s = severity?.toUpperCase()
 
       if (s === 'WARNING') {
-        beep(440, 0.4, ctx.currentTime, ctx)
+        // three short beeps: a single one is easy to miss
+        beep(440, 0.25, ctx.currentTime,       ctx)
+        beep(440, 0.25, ctx.currentTime + 0.4, ctx)
+        beep(440, 0.25, ctx.currentTime + 0.8, ctx)
       } else if (s === 'CRITICAL') {
         beep(440, 0.3, ctx.currentTime,       ctx)
         beep(880, 0.3, ctx.currentTime + 0.4, ctx)
@@ -75,5 +84,5 @@ export default function useAudioAlarm() {
     }
   }, [stopAlarm])
 
-  return { playAlarm, stopAlarm, isPlaying, currentSeverity }
+  return { playAlarm, stopAlarm, unlock, isPlaying, currentSeverity }
 }

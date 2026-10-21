@@ -20,6 +20,7 @@ import {
 import { Audio } from 'expo-av';
 import * as Haptics from 'expo-haptics';
 import { acknowledgeAlert } from '../services/api';
+import { unitFor, formatValue } from '../services/appConfig';
 
 const VIBRATION_PATTERN = [0, 500, 1000]; // on 500ms, off 1000ms, loop
 
@@ -162,8 +163,14 @@ const AlertOverlay = ({ visible, alertData, onDismiss }) => {
 
   if (!visible) return null;
 
-  const alertMessage = alertData?.message || 'TEMPERATURE ALERT DETECTED';
-  const alertTemp = alertData?.temperature != null ? `${alertData.temperature}°C` : '--';
+  const paramName = alertData?.parameter ? String(alertData.parameter) : 'Value';
+  const unit = unitFor(alertData?.parameter);
+  const dirWord = String(alertData?.direction || '').toLowerCase() === 'low' ? 'below' : 'above';
+  const alertMessage = alertData?.message
+    || (alertData?.threshold != null
+      ? `${paramName.toUpperCase()} is ${dirWord} the limit of ${formatValue(alertData.threshold)} ${unit}`.trim()
+      : `${paramName.toUpperCase()} ALERT DETECTED`);
+  const alertTemp = alertData?.value != null ? `${formatValue(alertData.value)} ${unit}`.trim() : '--';
   const alertTime = alertData?.timestamp
     ? new Date(alertData.timestamp).toLocaleString()
     : new Date().toLocaleString();
@@ -188,11 +195,11 @@ const AlertOverlay = ({ visible, alertData, onDismiss }) => {
           <Text style={styles.alertIcon}>🚨</Text>
 
           {/* Alert Title */}
-          <Text style={styles.alertTitle}>ALERT TRIGGERED</Text>
+          <Text style={styles.alertTitle}>{alertData?.test ? 'TEST ALERT' : 'ALERT TRIGGERED'}</Text>
 
           {/* Temperature */}
           <View style={styles.tempContainer}>
-            <Text style={styles.tempLabel}>Temperature</Text>
+            <Text style={styles.tempLabel}>{paramName}</Text>
             <Text style={styles.tempValue}>{alertTemp}</Text>
           </View>
 

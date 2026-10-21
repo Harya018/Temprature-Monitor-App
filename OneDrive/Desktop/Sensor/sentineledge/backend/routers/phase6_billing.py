@@ -1,5 +1,5 @@
-"""
-routers/phase6_billing.py — Phase 6: Billing & Business Layer.
+﻿"""
+routers/phase6_billing.py â€” Phase 6: Billing & Business Layer.
 
 All routes protected by require_super_admin.
 
@@ -8,7 +8,7 @@ Routes:
   GET    /tiers                              List subscription tiers
   POST   /tiers                              Create tier
   DELETE /tiers/{tier_id}                    Delete tier
-  POST   /companies/{company_id}/subscribe   Assign tier → update company quotas
+  POST   /companies/{company_id}/subscribe   Assign tier â†’ update company quotas
   GET    /companies/{company_id}/subscription Current tier + live usage vs quota
   POST   /companies/{company_id}/quota       Manual quota override
   GET    /companies/{company_id}/usage       Monthly snapshot history
@@ -25,7 +25,7 @@ from pydantic import BaseModel, Field, field_validator
 from typing import Optional
 
 from database.connection import execute_read, execute_write
-from routers.super_admin import require_super_admin
+from routers.super_admin_v2 import require_super_admin
 from utils.activity_logger import log_activity
 from utils.logger import get_logger
 
@@ -34,7 +34,7 @@ logger = get_logger(__name__)
 router = APIRouter(prefix="/api/super-admin/billing", tags=["Super Admin Billing"])
 
 
-# ─── Pydantic bodies ──────────────────────────────────────────────────────────
+# â”€â”€â”€ Pydantic bodies â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 class _TierIn(BaseModel):
     name:             str   = Field(min_length=1, max_length=100)
@@ -65,7 +65,7 @@ class _QuotaIn(BaseModel):
         return v.strip() if isinstance(v, str) else v
 
 
-# ─── Helper: live usage for a company ────────────────────────────────────────
+# â”€â”€â”€ Helper: live usage for a company â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def _live_usage(company_id: int) -> dict:
     subscribers = execute_read(
@@ -121,7 +121,7 @@ def _current_tier(company_id: int) -> Optional[dict]:
     return rows[0] if rows else None
 
 
-# ─── Subscription tiers ───────────────────────────────────────────────────────
+# â”€â”€â”€ Subscription tiers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @router.get("/tiers", summary="List all subscription tiers")
 async def list_tiers(_: dict = Depends(require_super_admin)):
@@ -172,7 +172,7 @@ async def delete_tier(tier_id: int, sa: dict = Depends(require_super_admin)):
     if in_use and in_use[0]["cnt"] > 0:
         return JSONResponse(
             status_code=409,
-            content={"error": f"Tier is assigned to {in_use[0]['cnt']} active company/companies — reassign first"},
+            content={"error": f"Tier is assigned to {in_use[0]['cnt']} active company/companies â€” reassign first"},
         )
 
     execute_write("DELETE FROM subscription_tiers WHERE id = %s", (tier_id,))
@@ -180,7 +180,7 @@ async def delete_tier(tier_id: int, sa: dict = Depends(require_super_admin)):
     return {"deleted": True, "tier_id": tier_id}
 
 
-# ─── Company subscription ─────────────────────────────────────────────────────
+# â”€â”€â”€ Company subscription â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @router.post("/companies/{company_id}/subscribe", summary="Assign a tier to a company")
 async def subscribe_company(
@@ -304,7 +304,7 @@ async def set_quota(
     return {"company_id": company_id, "updated": True}
 
 
-# ─── Usage snapshots ──────────────────────────────────────────────────────────
+# â”€â”€â”€ Usage snapshots â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def _capture_snapshot(company_id: int) -> dict:
     """Capture a usage snapshot for the current month. Upserts on conflict."""
@@ -363,7 +363,7 @@ async def capture_snapshot(company_id: int, sa: dict = Depends(require_super_adm
     return {"captured": True, "company_id": company_id, **result}
 
 
-# ─── Monthly report ───────────────────────────────────────────────────────────
+# â”€â”€â”€ Monthly report â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @router.get("/report/{company_id}", summary="Monthly breakdown report for a company")
 async def get_report(company_id: int, _: dict = Depends(require_super_admin)):
@@ -427,7 +427,7 @@ async def get_report(company_id: int, _: dict = Depends(require_super_admin)):
     }
 
 
-# ─── Overview ─────────────────────────────────────────────────────────────────
+# â”€â”€â”€ Overview â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @router.get("/overview", summary="All companies: tier, quota, live usage")
 async def get_overview(_: dict = Depends(require_super_admin)):
@@ -453,3 +453,4 @@ async def get_overview(_: dict = Depends(require_super_admin)):
             "open_alerts":          usage["open_alerts"],
         })
     return result
+

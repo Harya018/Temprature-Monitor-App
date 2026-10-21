@@ -27,8 +27,10 @@ def verify_admin_password(name: str, plain: str) -> Optional[dict]:
             "SELECT * FROM admins WHERE name = %s",
             (name,),
         )
-        if not rows:
-            return None
+        if not rows:   # sign-in names are not case-sensitive ("Ravi" = "ravi") when that is unambiguous
+            rows = execute_read("SELECT * FROM admins WHERE LOWER(name) = LOWER(%s)", (name,))
+            if len(rows or []) != 1:
+                return None
         admin = rows[0]
         if not verify_pin(plain, admin["password_hash"]):
             return None
@@ -38,11 +40,12 @@ def verify_admin_password(name: str, plain: str) -> Optional[dict]:
         return None
 
 
-def create_admin(name: str, plain_password: str, role: str = "sub") -> Optional[int]:
+def create_admin(name: str, plain_password: str, role: str = "sub",
+                 company_id: Optional[int] = None) -> Optional[int]:
     """
     Create a new admin account. Returns the new row id, or None if the name
     already exists (UniqueViolation) or on any other database error.
-    role must be 'main' or 'sub'.
+    role must be 'main' or 'sub'. company_id ties the admin to a company.
     Password is stored as a bcrypt hash.
     """
     try:
@@ -50,9 +53,9 @@ def create_admin(name: str, plain_password: str, role: str = "sub") -> Optional[
         # execute_write() captures the RETURNING id into _WriteResult.lastrowid.
         # Do NOT call .fetchone() — _WriteResult is not a cursor.
         result = execute_write(
-            "INSERT INTO admins (name, password_hash, role, created_at) "
-            "VALUES (%s, %s, %s, %s) RETURNING id",
-            (name, hash_pin(plain_password), role, ts),
+            "INSERT INTO admins (name, password_hash, role, company_id, created_at) "
+            "VALUES (%s, %s, %s, %s, %s) RETURNING id",
+            (name, hash_pin(plain_password), role, company_id, ts),
         )
         return result.lastrowid
     except Exception as exc:
@@ -86,11 +89,19 @@ def update_admin_password(admin_id: int, new_plain: str) -> bool:
         return False
 
 
-def get_all_admins() -> list:
-    """Return all admin accounts (password_hash excluded from result)."""
+def get_all_admins(company_id: Optional[int] = None) -> list:
+    """Return admin accounts (password_hash excluded) — one company's when given."""
     try:
+        if company_id is not None:
+            return execute_read(
+                "SELECT id, name, role, company_id, created_at, COALESCE(is_active, 1) AS is_active, "
+                "last_login_at::TEXT AS last_login_at FROM admins "
+                "WHERE company_id = %s ORDER BY role ASC, id ASC",
+                (company_id,),
+            )
         return execute_read(
-            "SELECT id, name, role, created_at FROM admins ORDER BY role DESC, id ASC"
+            "SELECT id, name, role, company_id, created_at, COALESCE(is_active, 1) AS is_active, "
+            "last_login_at::TEXT AS last_login_at FROM admins ORDER BY role DESC, id ASC"
         )
     except Exception as exc:
         logger.error("get_all_admins failed: %s", exc)
@@ -100,8 +111,9 @@ def get_all_admins() -> list:
 def get_admin_by_id(admin_id: int) -> Optional[dict]:
     """Return a single admin by id (no password_hash)."""
     try:
+        # company_id is needed by the admin-management guards (company scoping)
         rows = execute_read(
-            "SELECT id, name, role, created_at FROM admins WHERE id = %s",
+            "SELECT id, name, role, company_id, created_at FROM admins WHERE id = %s",
             (admin_id,),
         )
         return rows[0] if rows else None

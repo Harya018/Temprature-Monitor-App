@@ -82,6 +82,30 @@ last_breach_direction: dict[str, str | None] = {
 }
 
 
+# ─── Excursion latch ──────────────────────────────────────────────────────────
+# One alert per excursion: fire when a value goes out of range, then stay quiet
+# while it remains out (unacknowledged alerts are re-sent by the escalation
+# chain). Without this a persistent breach created a new alert every
+# ALERT_COOLDOWN_SECONDS, so phones rang again right after being acknowledged.
+# Re-arms once the value is back in range; the cooldown still applies to
+# suppress a value flickering across the threshold.
+_latched: dict[str, bool] = {}
+
+
+def _should_fire(key: str, breached: bool, now: datetime, cooldown_delta: timedelta) -> bool:
+    if not breached:
+        _latched[key] = False
+        return False
+    if _latched.get(key):
+        return False
+    last_trigger = cooldown_tracker.get(key)
+    if last_trigger is not None and (now - last_trigger) < cooldown_delta:
+        return False
+    _latched[key] = True
+    cooldown_tracker[key] = now
+    return True
+
+
 def check_threshold(reading: dict) -> list[BreachEvent]:
     """
     Compare a reading against current RUNTIME_THRESHOLDS (temperature only).
@@ -115,22 +139,17 @@ def check_threshold(reading: dict) -> list[BreachEvent]:
             ("temperature", temp, t_high, "high"),
             ("temperature", temp, t_low,  "low"),
         ]:
-            if direction == "high" and value <= threshold:
-                continue
-            if direction == "low"  and value >= threshold:
-                continue
+            breached = value > threshold if direction == "high" else value < threshold
+            key = f"{parameter}_{direction}"
 
             # Suppress duplicate LOW alert within the same cooling run
-            if direction == "low" and last_breach_direction.get(parameter) == "low":
+            if breached and direction == "low" and last_breach_direction.get(parameter) == "low":
                 continue
 
-            key = f"{parameter}_{direction}"
-            last_trigger = cooldown_tracker.get(key)
-            if last_trigger is not None and (now - last_trigger) < cooldown_delta:
+            if not _should_fire(key, breached, now, cooldown_delta):
                 continue
 
             severity = _get_severity(value, threshold, direction)
-            cooldown_tracker[key] = now
             last_breach_direction[parameter] = direction
             breaches.append(BreachEvent(
                 parameter=parameter, value=value,
@@ -151,32 +170,17 @@ def check_threshold(reading: dict) -> list[BreachEvent]:
                 ph_max = float(RUNTIME_THRESHOLDS.get("ph_threshold_max", 7.0))
                 ph_min = float(RUNTIME_THRESHOLDS.get("ph_threshold_min", 5.5))
 
-                # HIGH breach: pH above maximum threshold
-                if ph_val > ph_max:
-                    key = "ph_high"
-                    last_trigger = cooldown_tracker.get(key)
-                    if last_trigger is None or (now - last_trigger) >= cooldown_delta:
-                        cooldown_tracker[key] = now
+                for key, breached, threshold, direction in [
+                    ("ph_high", ph_val > ph_max, ph_max, "high"),
+                    ("ph_low",  ph_val < ph_min, ph_min, "low"),
+                ]:
+                    if _should_fire(key, breached, now, cooldown_delta):
                         breaches.append(BreachEvent(
                             parameter="ph",
                             value=ph_val,
-                            threshold=ph_max,
-                            direction="high",
-                            severity=_get_severity(ph_val, ph_max, "high"),
-                        ))
-
-                # LOW breach: pH below minimum threshold
-                if ph_val < ph_min:
-                    key = "ph_low"
-                    last_trigger = cooldown_tracker.get(key)
-                    if last_trigger is None or (now - last_trigger) >= cooldown_delta:
-                        cooldown_tracker[key] = now
-                        breaches.append(BreachEvent(
-                            parameter="ph",
-                            value=ph_val,
-                            threshold=ph_min,
-                            direction="low",
-                            severity=_get_severity(ph_val, ph_min, "low"),
+                            threshold=threshold,
+                            direction=direction,
+                            severity=_get_severity(ph_val, threshold, direction),
                         ))
 
     # Update module status once we've processed at least one reading
@@ -221,7 +225,7 @@ def auto_register_extra_params(ep: dict, company_id: int) -> None:
             pass
 
 
-def check_extra_param_thresholds(extra_params: dict, breach_dicts: list) -> None:
+def check_extra_param_thresholds(extra_params: dict, breach_dicts: list, company_id=None) -> None:
     """Check custom-parameter readings against company_parameters min/max.
 
     Fetches configured ranges from company_parameters, inserts an alert row
@@ -236,15 +240,19 @@ def check_extra_param_thresholds(extra_params: dict, breach_dicts: list) -> None
         from database.connection import execute_read
         params = execute_read(
             "SELECT name, unit, min_value, max_value, company_id "
-            "FROM company_parameters WHERE is_active = TRUE"
+            "FROM company_parameters WHERE is_active = TRUE "
+            "AND (%s::int IS NULL OR company_id = %s::int)",
+            (company_id, company_id),
         )
     except Exception:
         return
 
-    param_map = {p["name"]: p for p in (params or [])}
+    # This company's own limits only, matched ignoring case (the file says "ph", the company's
+    # approved parameter may be "pH")
+    param_map = {str(p["name"]).lower(): p for p in (params or [])}
 
     for name, value in extra_params.items():
-        cfg = param_map.get(name)
+        cfg = param_map.get(str(name).lower())
         if cfg is None:
             continue
 
@@ -261,7 +269,8 @@ def check_extra_param_thresholds(extra_params: dict, breach_dicts: list) -> None
         if mn_f <= value <= mx_f:
             continue  # within range
 
-        last_fired = _extra_param_cooldowns.get(name, 0)
+        cd_key = (cfg.get("company_id"), str(name).lower())
+        last_fired = _extra_param_cooldowns.get(cd_key, 0)
         if now - last_fired < _EXTRA_PARAM_COOLDOWN:
             continue
 
@@ -281,7 +290,7 @@ def check_extra_param_thresholds(extra_params: dict, breach_dicts: list) -> None
                 severity="WARNING",
                 company_id=cfg.get("company_id"),
             )
-            _extra_param_cooldowns[name] = now
+            _extra_param_cooldowns[cd_key] = now
             _logger.info(
                 "Custom param alert: %s=%.3f %s threshold %.3f (alert_id=%s)",
                 name, value, direction, threshold_val, alert_id,

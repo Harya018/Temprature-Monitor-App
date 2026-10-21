@@ -163,6 +163,7 @@ async def _notify_subscriber(
             meta = alert_meta or {}
             payload = {
                 "type":      "critical",
+                "parameter": meta.get("parameter"),
                 "value":     meta.get("value"),
                 "threshold": meta.get("threshold"),
                 "message":   message,
@@ -222,7 +223,7 @@ async def _notify_all_subscribers(
     # Second gate: if the parameter was disabled between breach detection and
     # notification dispatch (e.g. admin disabled during cooldown window),
     # skip ALL channels so no email, SMS, or push reaches subscribers.
-    if not is_alert_enabled(parameter):
+    if parameter == "temperature" and not is_alert_enabled("temperature"):   # others: per company, checked earlier
         logger.info(
             "Alert %d skipped — %s alerts are disabled", alert_id, parameter
         )
@@ -234,7 +235,8 @@ async def _notify_all_subscribers(
     company_id = alert_meta.get("company_id")
     routing    = get_routing(company_id, severity)
 
-    subscribers = database.get_subscribers_ordered()
+    # Only the alerting company's own people are notified — never another company's
+    subscribers = database.get_subscribers_ordered(company_id) if company_id is not None else []
     active_subs = [s for s in subscribers if s.get("is_active", s.get("active", True))]
 
     if not active_subs:
@@ -249,6 +251,25 @@ async def _notify_all_subscribers(
         len(active_subs), alert_id,
     )
 
+    # The company's own wording for this parameter (empty = the standard message)
+    tpl, ctx_base = {"sms": "", "email_subject": "", "email_body": ""}, {}
+    try:
+        from services import message_templates as _mt
+        tpl = _mt.get_templates(company_id, parameter)
+        if tpl.get("sms") or tpl.get("email_subject") or tpl.get("email_body"):
+            co = database.execute_read("SELECT name FROM companies WHERE id = %s", (company_id,))
+            ctx_base = _mt.build_context(
+                company=co[0]["name"] if co else "", parameter=tpl.get("name") or parameter, unit=tpl.get("unit", ""),
+                value=value, limit=threshold, direction=direction, severity=severity,
+                timestamp_utc=timestamp_utc, min_value=tpl.get("min"), max_value=tpl.get("max"))
+    except Exception as exc:
+        logger.warning("custom message wording unavailable for alert %d (standard wording used): %s", alert_id, exc)
+        tpl = {"sms": "", "email_subject": "", "email_body": ""}
+    custom_email = ({"subject": tpl["email_subject"], "body": tpl["email_body"], "ctx": ctx_base}
+                    if (tpl.get("email_subject") or tpl.get("email_body")) else None)
+    from services import company_email as _ce
+    company_smtp = _ce.get_company_smtp(company_id)      # the company's own mailbox (None = platform mailbox)
+
     # ── Channel 1 (Batch): HTML Email to ALL subscribers simultaneously ────────
     async def _email_batch() -> None:
         try:
@@ -260,7 +281,12 @@ async def _notify_all_subscribers(
                 severity=severity,
                 timestamp_utc=timestamp_utc,
                 parameter=parameter,
+                custom=custom_email,
+                smtp=company_smtp,
             )
+            if results:
+                bad = [r for r in results if r.get("status") != "sent"]
+                _ce.record_result(company_id, not bad, (bad[0].get("error") if bad else None))
             # Log receipts for each subscriber
             for sub, res in zip(active_subs, results):
                 ok  = res.get("status") == "sent"
@@ -313,6 +339,8 @@ async def _notify_all_subscribers(
                 direction=direction,
                 timestamp_utc=timestamp_utc,
                 parameter=parameter,
+                sms_template=tpl.get("sms") or None,
+                sms_ctx=ctx_base,
             )
 
             # Log receipts for targeted subscribers
@@ -380,6 +408,7 @@ async def _notify_all_subscribers(
             return
         payload = {
             "type":      "critical",
+            "parameter": parameter,
             "value":     value,
             "threshold": threshold,
             "message":   message,
@@ -432,7 +461,7 @@ async def _notify_all_subscribers(
 
 # ─── Public API ───────────────────────────────────────────────────────────────
 
-async def trigger_alert(reading: dict, breaches: list) -> list:
+async def trigger_alert(reading: dict, breaches: list, company_id=None) -> list:
     """
     Process all breach events from a single sensor reading.
 
@@ -454,7 +483,9 @@ async def trigger_alert(reading: dict, breaches: list) -> list:
     for breach in breaches:
         # Gate: if this parameter's alerts were disabled between sensor read and
         # here, skip entirely — no DB insert, no notification on any channel.
-        if not is_alert_enabled(breach.parameter):
+        # Temperature keeps the server-wide on/off switch; every other parameter's on/off is
+        # per company and was already applied before the breach was created.
+        if breach.parameter == "temperature" and not is_alert_enabled("temperature"):
             logger.info(
                 "Alert suppressed (gate 1) — %s alerts are disabled", breach.parameter
             )
@@ -465,7 +496,9 @@ async def trigger_alert(reading: dict, breaches: list) -> list:
 
         # For temperature use RUNTIME_THRESHOLDS so live edits are reflected;
         # for other parameters (pH, etc.) use the threshold from the breach itself.
-        if breach.parameter == "temperature":
+        from services.sensor_company import get_sensor_company_id as _gsc
+        if breach.parameter == "temperature" and (company_id is None or company_id == _gsc()):
+            # the PC's main company: its live-editable server temperature limits
             rt = RUNTIME_THRESHOLDS.get("temperature", {})
             if breach.direction == "high":
                 live_threshold = rt.get("high", breach.threshold)
@@ -481,6 +514,7 @@ async def trigger_alert(reading: dict, breaches: list) -> list:
             direction=breach.direction,
             cooldown_until=cooldown_until,
             severity=severity,
+            company_id=company_id,          # the company whose plant produced the reading
         )
         if alert_id == -1:
             logger.error("Failed to insert alert for breach: %s", breach)
@@ -560,7 +594,7 @@ async def acknowledge(alert_id: int, acknowledged_by: str) -> bool:
                 "alert_timestamp":     alert.get("timestamp") if alert else None,
                 "alert_value":         alert.get("value") if alert else None,
                 "response_time_seconds": response_time,
-            })
+            }, company_id=(alert or {}).get("company_id"))
         except Exception as exc:
             logger.warning("Ack broadcast failed: %s", exc)
     else:

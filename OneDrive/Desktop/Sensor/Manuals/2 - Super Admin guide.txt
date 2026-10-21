@@ -1,0 +1,107 @@
+=====================================================================
+  SUPER ADMIN GUIDE
+  http://localhost:5000/super-admin/login
+=====================================================================
+
+Super Admin manages companies, their admins and parameters. Company
+admins see only their own company; Super Admin sees all of them.
+
+
+COMPANIES
+---------
+  + New Company        Wizard: details > admin & password > parameters
+                       > first subscriber > Review & Enable.
+                       A company cannot sign in until it is enabled.
+  Open a company       Profile, admins, subscribers, parameters,
+                       stats, sessions; Edit / Disable / Delete.
+  Disable              The company's admins cannot sign in; data kept.
+  Delete (offboard)    Removes the company and ALL its data. Cannot be
+                       undone.
+
+
+PARAMETERS AND APPROVALS
+------------------------
+  * Each company has its own list (e.g. only pH; temperature and pH).
+    Its dashboard, settings, alerts and reports follow that list.
+  * Company admins REQUEST new parameters (or removals). They appear
+    under Approvals. Approve or reject; the company sees the result.
+  * You can add a parameter directly: Config > Parameters.
+  * Only approved parameters are recorded from the Excel file or
+    collector; other columns are ignored.
+
+
+ADMINS
+------
+  Only Super Admin creates admins, resets passwords, locks / unlocks
+  and deactivates them (Admins). Company admins cannot.
+
+
+LIVE SOURCES ON THIS PC   (Config > Live sources on this PC)
+-----------------------------------------------------------
+  * Excel reader: belongs to the company whose admin switched it on.
+  * Pro-Server live collector (Pro-face): only on the PC where it is
+    installed, and only for the company it is set up for.
+  * Each source sends its readings ONLY to its company. You can
+    reassign a source here. A company cannot switch off or take over a
+    source another company is using.
+
+
+ALERTS AND PEOPLE
+-----------------
+  * Alerts use each company's own limits and notify ONLY that
+    company's subscribers (SMS / e-mail / app).
+  * Each company has its own 1st / 2nd / 3rd contact.
+  * Each company receives its own daily report e-mail.
+
+
+COMMUNICATION
+-------------
+  Broadcast to all companies, direct messages to one company,
+  maintenance mode (shown on that company's dashboard).
+
+
+COMPANY SERVERS (optional - companies on their own laptops)
+-----------------------------------------------------------
+  Open a company > Company server > Generate pairing code. On the
+  company's laptop (started with SERVER_ROLE=node) open
+  http://localhost:5000/node-setup and enter the hub address and code.
+  You then see that company's hourly summaries and alerts, can set a
+  licence (on/off, expiry, offline grace), and Disconnect it.
+=====================================================================
+
+ADMIN ACCOUNTS, THE MAIN COMPANY AND YOUR PASSWORD
+--------------------------------------------------
+  * Company admin accounts are created only here. Roles:
+      Company Admin  signs in (web and phone app) and can change that
+                     company's settings, subscribers and limits.
+      Sub Admin      signs in (web and phone app) but is READ-ONLY: can
+                     view everything of the company and acknowledge
+                     alerts, nothing else. The screens show "Read-only".
+    Every admin must belong to a company.
+  * Sign-in names are unique however they are typed ("Ravi" = "ravi"),
+    and "admin" / "superadmin" are reserved. Give every person their own
+    account.
+  * Switching an admin off, resetting the password or moving the admin
+    to another company signs that admin out everywhere within ~15 s,
+    including open dashboards and the company's own server. A move is
+    recorded in the audit log.
+  * "Act as admin" (Admin Control): everything done in that session is
+    recorded as "Super Admin (as <name>)". Ending it ends that session.
+  * Company admins change their OWN password in My Account (their other
+    sign-ins end, nobody else is affected). On a company server the
+    password is managed here on the main server.
+  * Config > Live sources on this PC > "Main company of this PC": the
+    company that owns the temperature engine, the backup button, the
+    imported CSV history and the server's own e-mail account (.env). By
+    default it is the oldest company. When you change it, the old main
+    company keeps its e-mail account (moved into its own encrypted
+    settings) and the new one's account moves into the settings file.
+  * Config > Super Admin password: change your own password (needs the
+    current one; 10+ characters with capital, small letter, number and
+    symbol). Your other sign-ins are signed out.
+    Every SentinelEdge PC uses the SAME standard Super Admin password
+    (FIRST_TIME_SETUP sets it; a database made without setup - e.g. a
+    PostgreSQL configured by hand - gets it too on the first start).
+    If you change it here, it changes on this PC only. To put the
+    standard one back on any PC: sentineledge\tools\
+    RESET_SUPERADMIN_PASSWORD.bat (company admins are not changed).

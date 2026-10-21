@@ -18,6 +18,15 @@ from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
+# The Super Admin password is the same on every SentinelEdge PC. Only its bcrypt hash is kept
+# (here and in sentineledge\setup_secrets.ps1) - the password itself is not written anywhere.
+STANDARD_SUPER_ADMIN_HASH = "$2b$12$NWQahEeIQgOFbYrDSSDc1eZc8JJwHJyMgxLCdrAwt/VgN.mVoKIJO"
+
+
+def is_bcrypt_hash(value: str) -> bool:
+    import re
+    return bool(re.fullmatch(r"\$2[aby]\$\d\d\$[./A-Za-z0-9]{53}", value or ""))
+
 
 def hash_pin(plain_pin: str) -> str:
     """Hash a PIN (or password) using bcrypt.

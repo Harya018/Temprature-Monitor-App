@@ -16,7 +16,8 @@ const MAX_LINES = 1000
 function getLogWsUrl() {
   const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
   const host     = window.location.host   // includes port if non-standard
-  return `${protocol}//${host}/ws/logs`
+  const token    = sessionStorage.getItem('admin_token') || ''
+  return `${protocol}//${host}/ws/logs?token=${encodeURIComponent(token)}`
 }
 
 export default function useLogStream() {
@@ -53,8 +54,9 @@ export default function useLogStream() {
       }
 
       ws.onclose = () => {
-        if (!mountedRef.current) return
+        if (!mountedRef.current || wsRef.current !== ws) return
         setIsConnected(false)
+        clearTimeout(retryTimer.current)
         retryTimer.current = setTimeout(connect, 3000)
       }
 
@@ -65,8 +67,25 @@ export default function useLogStream() {
   useEffect(() => {
     mountedRef.current = true
     connect()
+
+    // Back on the tab / network returned: reconnect now rather than waiting
+    // for the (throttled) background retry timer.
+    const resume = () => {
+      if (document.visibilityState === 'hidden') return
+      const ws = wsRef.current
+      if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return
+      clearTimeout(retryTimer.current)
+      connect()
+    }
+    document.addEventListener('visibilitychange', resume)
+    window.addEventListener('focus', resume)
+    window.addEventListener('online', resume)
+
     return () => {
       mountedRef.current = false
+      document.removeEventListener('visibilitychange', resume)
+      window.removeEventListener('focus', resume)
+      window.removeEventListener('online', resume)
       clearTimeout(retryTimer.current)
       wsRef.current?.close()
     }

@@ -42,24 +42,29 @@ export const adminLogin              = (username, pin)   => req('POST', '/api/ad
 // ── Core ──────────────────────────────────────────────────────────────────────
 export const fetchHealth             = ()             => req('GET',  '/api/health')
 export const fetchAlerts             = (limit = 50)   => req('GET',  `/api/alerts?limit=${limit}`,    undefined, adminHeaders())
-export const acknowledgeAlert        = (id, name)     => req('POST', `/api/alerts/${id}/acknowledge`, { acknowledged_by: name })
+// The server records the signed-in admin's own name. 409 = another admin acknowledged it first.
+export const acknowledgeAlert        = (id, name)     => req('POST', `/api/alerts/${id}/acknowledge`, { acknowledged_by: name || sessionStorage.getItem('admin_username') || 'admin' })
+  .catch(e => {
+    if (!String(e.message).startsWith('HTTP 409')) throw e
+    try { return { already: true, ...JSON.parse(e.message.slice(10)) } } catch { return { already: true } }
+  })
 export const fetchSubscribers        = ()             => req('GET',  '/api/subscribers',              undefined, adminHeaders())
 export const addSubscriber           = (data, pwd)    => req('POST', '/api/subscribers',              data, adminHeaders(pwd))
 export const deleteSubscriber        = (id, pwd)      => req('DELETE',`/api/subscribers/${id}`,      undefined, adminHeaders(pwd))
 export const disableSubscriber       = (id, pwd)      => req('PATCH', `/api/subscribers/${id}/disable`, undefined, adminHeaders(pwd))
 export const enableSubscriber        = (id, pwd)      => req('PATCH', `/api/subscribers/${id}/enable`,  undefined, adminHeaders(pwd))
 export const setSubscriberPin        = (id, pin)      => req('POST', `/api/subscribers/${id}/set-pin`,{ subscriber_id: id, pin })
-export const fetchThresholds         = ()             => req('GET',  '/api/config/thresholds',        undefined, jsonHeaders())
+export const fetchThresholds         = ()             => req('GET',  '/api/config/thresholds',        undefined, adminHeaders())
 export const updateThresholds        = (data, pwd)    => req('POST', '/api/config/thresholds',        data, adminHeaders(pwd))
 export const resetThresholds         = (pwd)          => req('POST', '/api/config/thresholds/reset',  undefined, adminHeaders(pwd))
-export const fetchAlertSettings      = ()             => req('GET',  '/api/config/alert-settings',    undefined, jsonHeaders())
+export const fetchAlertSettings      = ()             => req('GET',  '/api/config/alert-settings',    undefined, adminHeaders())
 export const updateAlertSettings     = (data)         => req('POST', '/api/config/alert-settings',    data)
 export const fetchOpcSettings        = ()             => req('GET',  '/api/admin/opc/settings')
 export const saveOpcSettings         = (data)         => req('POST', '/api/admin/opc/settings',        data)
 export const fetchOpcStatus          = ()             => req('GET',  '/api/admin/opc/status')
 export const simulateBreach          = ()             => req('POST', '/api/simulate/breach',          undefined)
 export const simulatePhBreach        = ()             => req('POST', '/api/simulate/ph-breach',       undefined)
-export const fetchRecentReadings     = ()             => req('GET',  '/api/readings/recent',          undefined, jsonHeaders())
+export const fetchRecentReadings     = ()             => req('GET',  '/api/readings/recent')
 export const fetchAdminConfigChanges = ()             => req('GET',  '/api/admin/config-changes')
 export const fetchDatabaseStats      = ()             => req('GET',  '/api/admin/database/stats')
 export const createBackup            = ()             => req('POST', '/api/admin/backup')

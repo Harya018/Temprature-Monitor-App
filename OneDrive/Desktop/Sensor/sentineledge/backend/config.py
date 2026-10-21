@@ -39,6 +39,7 @@ SMTP_HOST: str = os.getenv("SMTP_HOST", "smtp.gmail.com")
 SMTP_PORT: int = int(os.getenv("SMTP_PORT", "587"))
 SMTP_USER: str = os.getenv("SMTP_USER", "")
 SMTP_PASSWORD: str = os.getenv("SMTP_PASSWORD", "")
+SMTP_FROM_NAME: str = os.getenv("SMTP_FROM_NAME", "")
 
 # ── Android SMS Gateway ───────────────────────────────────────────────────────
 SMS_GATEWAY_URL: str = os.getenv("SMS_GATEWAY_URL", "http://192.168.1.100:8080")
@@ -86,6 +87,15 @@ FCM_SERVICE_ACCOUNT_PATH: str = os.getenv(
 SERVER_HOST: str = os.getenv("SERVER_HOST", "0.0.0.0")
 SERVER_PORT: int = int(os.getenv("SERVER_PORT", "5000"))
 
+# ── Deployment role ───────────────────────────────────────────────────────────
+#   hub  — the central server: Super Admin, company registry, summaries of every
+#          company. The default, and what this installation has always been.
+#   node — one company's own server with its own database. It pairs with the hub
+#          (HUB_URL + a pairing code from Super Admin) and syncs over HTTP.
+SERVER_ROLE: str = os.getenv("SERVER_ROLE", "hub").strip().lower()
+if SERVER_ROLE not in ("hub", "node"):
+    SERVER_ROLE = "hub"
+
 # ── Demo mode ─────────────────────────────────────────────────────────────────
 DEMO_MODE: bool = os.getenv("DEMO_MODE", "false").lower() in ("1", "true", "yes")
 
@@ -119,7 +129,7 @@ EXCEL_POLL_INTERVAL : float = float(os.getenv("EXCEL_POLL_INTERVAL", "1.0"))
 EXCEL_ENCODING      : str   = os.getenv("EXCEL_ENCODING",      "")   # auto-detect if blank
 
 # ── Admin credentials ─────────────────────────────────────────────────────────
-ADMIN_PASSWORD: str = os.getenv("ADMIN_PASSWORD", "sentineledge-admin")
+ADMIN_PASSWORD: str = os.getenv("ADMIN_PASSWORD", "")   # empty = the plain "admin" dashboard login is off
 ADMIN_USERNAME: str = os.getenv("ADMIN_USERNAME", "admin")
 
 # ── Runtime-mutable thresholds ────────────────────────────────────────────────

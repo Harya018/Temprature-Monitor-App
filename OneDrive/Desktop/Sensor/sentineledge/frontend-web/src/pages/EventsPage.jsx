@@ -8,6 +8,7 @@ import { utcToIST, timeAgo } from '../utils/time.js'
 import { SkeletonTable } from '../components/Skeleton'
 import ErrorState from '../components/ErrorState'
 import EmptyState from '../components/EmptyState'
+import TimeAgo from '../components/shared/TimeAgo.jsx'
 
 const TYPE_CONFIG = {
   config:   { dot: '#7C3AED', icon: '🔵', label: 'Config Change' },
@@ -118,7 +119,7 @@ export default function EventsPage() {
                           )}
                         </div>
                         <div className="text-right flex-shrink-0">
-                          <p className="text-xs text-gray-400">{timeAgo(evt.timestamp)}</p>
+                          <p className="text-xs text-gray-400"><TimeAgo ts={evt.timestamp} /></p>
                           <p className="text-xs text-gray-300">{utcToIST(evt.timestamp)}</p>
                         </div>
                       </div>

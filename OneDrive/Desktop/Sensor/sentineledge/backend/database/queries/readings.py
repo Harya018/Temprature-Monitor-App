@@ -33,12 +33,19 @@ def insert_reading(
         return -1
 
 
-def get_recent_readings(limit: int = 60) -> list:
-    """Return the most recent `limit` readings, oldest first."""
+def get_recent_readings(limit: int = 60, company_id: int | None = None) -> list:
+    """Return the most recent `limit` readings, oldest first (one company's
+    when company_id is given)."""
     try:
-        rows = execute_read(
-            "SELECT * FROM readings ORDER BY id DESC LIMIT %s", (limit,)
-        )
+        if company_id is not None:
+            rows = execute_read(
+                "SELECT * FROM readings WHERE company_id = %s ORDER BY timestamp DESC LIMIT %s",
+                (company_id, limit),
+            )
+        else:
+            rows = execute_read(
+                "SELECT * FROM readings ORDER BY id DESC LIMIT %s", (limit,)
+            )
         return list(reversed(rows))
     except Exception as exc:
         logger.error("get_recent_readings failed: %s", exc)

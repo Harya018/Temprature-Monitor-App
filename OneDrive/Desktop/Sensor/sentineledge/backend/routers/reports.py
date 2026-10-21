@@ -24,10 +24,11 @@ logger = get_logger(__name__)
 router = APIRouter(prefix="/api/reports", tags=["Reports"])
 
 
-@router.get("/daily", dependencies=[Depends(require_admin)])
-async def daily_reports(days: int = Query(30, ge=1, le=90)):
+@router.get("/daily")
+async def daily_reports(days: int = Query(30, ge=1, le=90), admin: dict = Depends(require_admin)):
     """
-    Return one summary object per calendar day for the last N days.
+    Return one summary object per calendar day for the last N days
+    (the caller's company only).
 
     Each day: date, total_readings, total_alerts, avg_temp, peak_temp,
     min_temp, email_sent, email_failed, sms_sent, sms_failed.
@@ -41,21 +42,29 @@ async def daily_reports(days: int = Query(30, ge=1, le=90)):
     # timestamp of the peak-temperature row (PostgreSQL extension not available
     # via simple GROUP BY, so peak_temp_time is omitted — add a window function
     # if it is strictly required later).
+    cid = admin.get("company_id")
+    cf  = "AND company_id = %s" if cid is not None else ""
+    acf = "AND a.company_id = %s" if cid is not None else ""
+    cp  = (cid,) if cid is not None else ()
     try:
         readings_rows = execute_read(
-            """
+            f"""
             SELECT
-                DATE_TRUNC('day', timestamp::timestamptz AT TIME ZONE 'UTC') AS day,
+                LEFT(timestamp, 10)         AS day,
                 COUNT(*)                    AS reading_count,
                 ROUND(AVG(temperature)::numeric, 2) AS avg_temp,
                 MIN(temperature)            AS min_temp,
                 MAX(temperature)            AS peak_temp
             FROM readings
-            WHERE timestamp::timestamptz >= NOW() - (%s || ' days')::INTERVAL
-            GROUP BY DATE_TRUNC('day', timestamp::timestamptz AT TIME ZONE 'UTC')
+            -- timestamp is ISO text: compare as text so the index is used
+            -- (casting the column scanned all ~8M rows)
+            WHERE timestamp >= to_char((NOW() - (%s || ' days')::INTERVAL) AT TIME ZONE 'UTC',
+                                       'YYYY-MM-DD"T"HH24:MI:SS')
+              {cf}
+            GROUP BY LEFT(timestamp, 10)
             ORDER BY day DESC
             """,
-            (str(days),),
+            (str(days), *cp),
         )
     except Exception as exc:
         logger.error("daily_reports: readings query failed: %s", exc)
@@ -64,16 +73,17 @@ async def daily_reports(days: int = Query(30, ge=1, le=90)):
     # ── 2. Alerts — one query for all days ───────────────────────────────────
     try:
         alerts_rows = execute_read(
-            """
+            f"""
             SELECT
                 DATE_TRUNC('day', timestamp::timestamptz AT TIME ZONE 'UTC') AS day,
                 COUNT(*) AS alert_count
             FROM alerts
             WHERE timestamp::timestamptz >= NOW() - (%s || ' days')::INTERVAL
+              {cf}
             GROUP BY DATE_TRUNC('day', timestamp::timestamptz AT TIME ZONE 'UTC')
             ORDER BY day DESC
             """,
-            (str(days),),
+            (str(days), *cp),
         )
     except Exception as exc:
         logger.error("daily_reports: alerts query failed: %s", exc)
@@ -82,20 +92,22 @@ async def daily_reports(days: int = Query(30, ge=1, le=90)):
     # ── 3. Delivery receipts — one query for all days ─────────────────────────
     try:
         receipts_rows = execute_read(
-            """
+            f"""
             SELECT
-                DATE_TRUNC('day', sent_at::timestamptz AT TIME ZONE 'UTC') AS day,
-                channel,
-                success,
+                DATE_TRUNC('day', dr.sent_at::timestamptz AT TIME ZONE 'UTC') AS day,
+                dr.channel,
+                dr.success,
                 COUNT(*) AS cnt
-            FROM delivery_receipts
-            WHERE sent_at::timestamptz >= NOW() - (%s || ' days')::INTERVAL
+            FROM delivery_receipts dr
+            LEFT JOIN alerts a ON a.id = dr.alert_id
+            WHERE dr.sent_at::timestamptz >= NOW() - (%s || ' days')::INTERVAL
+              {acf}
             GROUP BY
-                DATE_TRUNC('day', sent_at::timestamptz AT TIME ZONE 'UTC'),
-                channel, success
+                DATE_TRUNC('day', dr.sent_at::timestamptz AT TIME ZONE 'UTC'),
+                dr.channel, dr.success
             ORDER BY day DESC
             """,
-            (str(days),),
+            (str(days), *cp),
         )
     except Exception as exc:
         logger.error("daily_reports: receipts query failed: %s", exc)
@@ -154,89 +166,89 @@ async def daily_reports(days: int = Query(30, ge=1, le=90)):
     return results
 
 
-@router.get("/readings-export", dependencies=[Depends(require_admin)])
-async def readings_export(
-    from_date: str  = Query(..., description="YYYY-MM-DD"),
-    to_date:   str  = Query(..., description="YYYY-MM-DD"),
-    fmt:       str  = Query("csv", alias="format", regex="^(csv|json)$"),
-):
-    """
-    Export all stored readings (including extra_params) for a date range.
-    Returns CSV or JSON. Intended for the Reports page download feature.
-    """
-    ts_start = f"{from_date}T00:00:00+00:00"
-    ts_end   = f"{to_date}T23:59:59+00:00"
+_DATE_RE = r"^\d{4}-\d{2}-\d{2}$"
+_EXPORT_BATCH = 20000
+_CHUNK_ROWS   = 2000
 
-    try:
-        rows = execute_read(
-            """
-            SELECT id, temperature, timestamp, is_valid, extra_params
-            FROM readings
-            WHERE timestamp::timestamptz BETWEEN %s AND %s
-            ORDER BY id ASC
-            LIMIT 100000
-            """,
-            (ts_start, ts_end),
-        )
-    except Exception as exc:
-        logger.error("readings_export query failed: %s", exc)
-        rows = []
 
-    # Collect all extra_params keys seen across all rows
-    all_extra_keys: list[str] = []
-    seen_keys: set[str] = set()
-    for r in rows:
+def _export_keys(cf: str, params: tuple) -> list:
+    """Every parameter name stored in the range (CSV columns) — one pass over the range."""
+    rows = execute_read(
+        f"SELECT DISTINCT k AS k FROM readings, jsonb_object_keys(extra_params) AS k "
+        f"WHERE timestamp >= %s AND timestamp <= %s {cf} AND jsonb_typeof(extra_params) = 'object'",
+        params,
+    )
+    return sorted(r["k"] for r in rows)
+
+
+def _iter_readings(cf: str, lo: str, hi: str, cparams: tuple):
+    """Yield the range's readings in time order, batch by batch (no row cap, constant memory)."""
+    sql = (f"SELECT id, temperature, timestamp, is_valid, extra_params FROM readings "
+           f"WHERE {{lower}} AND timestamp <= %s {cf} ORDER BY timestamp, id LIMIT {_EXPORT_BATCH}")
+    rows = execute_read(sql.format(lower="timestamp >= %s"), (lo, hi, *cparams))
+    while rows:
+        yield from rows
+        if len(rows) < _EXPORT_BATCH:
+            return
+        last = rows[-1]
+        rows = execute_read(sql.format(lower="(timestamp, id) > (%s, %s)"),
+                            (last["timestamp"], last["id"], hi, *cparams))
+
+
+def stream_readings(admin: dict, start: str, end: str, fmt: str = "csv"):
+    """Streaming download of ALL of the caller's readings between two dates (inclusive)."""
+    cid = admin.get("company_id")
+    cf  = "AND company_id = %s" if cid is not None else ""
+    cparams = (cid,) if cid is not None else ()
+    lo, hi = f"{start}T00:00:00", f"{end}T23:59:59~"      # ISO text bounds keep the index in use
+    keys = _export_keys(cf, (lo, hi, *cparams))
+
+    def _ep(r):
         ep = r.get("extra_params") or {}
         if isinstance(ep, str):
             try: ep = json.loads(ep)
             except Exception: ep = {}
-        for k in ep:
-            if k not in seen_keys:
-                seen_keys.add(k)
-                all_extra_keys.append(k)
+        return ep
+
+    def csv_gen():
+        buf = io.StringIO()
+        w = csv.writer(buf)
+        w.writerow(["id", "timestamp", "temperature", "is_valid", *keys])
+        n = 0
+        for r in _iter_readings(cf, lo, hi, cparams):
+            ep = _ep(r)
+            w.writerow([r["id"], r["timestamp"], r["temperature"], int(r["is_valid"]), *[ep.get(k, "") for k in keys]])
+            n += 1
+            if n % _CHUNK_ROWS == 0:           # few large chunks stream far faster than one per row
+                yield buf.getvalue(); buf.seek(0); buf.truncate()
+        yield buf.getvalue()
+
+    def json_gen():
+        parts, sep = ["["], ""
+        for r in _iter_readings(cf, lo, hi, cparams):
+            ep = _ep(r)
+            parts.append(sep + json.dumps({"id": r["id"], "temperature": r["temperature"], "timestamp": str(r["timestamp"]),
+                                           "is_valid": bool(r["is_valid"]), **{k: ep.get(k) for k in keys}}))
+            sep = ","
+            if len(parts) >= _CHUNK_ROWS:
+                yield "".join(parts); parts = []
+        parts.append("]")
+        yield "".join(parts)
 
     if fmt == "json":
-        result = []
-        for r in rows:
-            ep = r.get("extra_params") or {}
-            if isinstance(ep, str):
-                try: ep = json.loads(ep)
-                except Exception: ep = {}
-            result.append({
-                "id":          r["id"],
-                "temperature": r["temperature"],
-                "timestamp":   str(r["timestamp"]),
-                "is_valid":    bool(r["is_valid"]),
-                **{k: ep.get(k) for k in all_extra_keys},
-            })
-        content = json.dumps(result)
-        return StreamingResponse(
-            iter([content]),
-            media_type="application/json",
-            headers={"Content-Disposition": f'attachment; filename="readings_{from_date}_{to_date}.json"'},
-        )
+        return StreamingResponse(json_gen(), media_type="application/json",
+                                 headers={"Content-Disposition": f'attachment; filename="readings_{start}_{end}.json"'})
+    return StreamingResponse(csv_gen(), media_type="text/csv",
+                             headers={"Content-Disposition": f'attachment; filename="readings_{start}_{end}.csv"'})
 
-    # CSV
-    output = io.StringIO()
-    base_fields = ["id", "timestamp", "temperature", "is_valid"] + all_extra_keys
-    writer = csv.DictWriter(output, fieldnames=base_fields, extrasaction="ignore")
-    writer.writeheader()
-    for r in rows:
-        ep = r.get("extra_params") or {}
-        if isinstance(ep, str):
-            try: ep = json.loads(ep)
-            except Exception: ep = {}
-        writer.writerow({
-            "id":          r["id"],
-            "timestamp":   str(r["timestamp"]),
-            "temperature": r["temperature"],
-            "is_valid":    int(r["is_valid"]),
-            **{k: ep.get(k, "") for k in all_extra_keys},
-        })
 
-    csv_content = output.getvalue()
-    return StreamingResponse(
-        iter([csv_content]),
-        media_type="text/csv",
-        headers={"Content-Disposition": f'attachment; filename="readings_{from_date}_{to_date}.csv"'},
-    )
+@router.get("/readings-export")
+async def readings_export(
+    from_date: str  = Query(..., pattern=_DATE_RE, description="YYYY-MM-DD"),
+    to_date:   str  = Query(..., pattern=_DATE_RE, description="YYYY-MM-DD"),
+    fmt:       str  = Query("csv", alias="format", pattern="^(csv|json)$"),
+    admin:     dict = Depends(require_admin),
+):
+    """Export every stored reading of the caller's company (all parameters) between two
+    dates, inclusive. Streamed, so any date range works — there is no row limit."""
+    return stream_readings(admin, from_date, to_date, fmt)

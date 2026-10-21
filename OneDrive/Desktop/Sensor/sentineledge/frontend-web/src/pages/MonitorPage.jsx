@@ -2,6 +2,7 @@
  * src/pages/MonitorPage.jsx
  * Full-screen wall display. No sidebar/header. Press Escape to exit.
  */
+import useCompanyParameters from '../hooks/useCompanyParameters.js'
 import { useState, useEffect, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { X } from 'lucide-react'
@@ -37,8 +38,26 @@ function nowIST() {
   return new Date().toLocaleTimeString('en-IN', { timeZone: 'Asia/Kolkata', hour12: false })
 }
 
-export default function MonitorPage({ wsData, thresholds }) {
-  const { lastReading, readings, isConnected } = wsData || {}
+/* Monitor mode is the full-screen temperature display — shown only to
+   companies that have a temperature parameter. */
+export default function MonitorPage(props) {
+  const { has, loading } = useCompanyParameters()
+  if (!loading && !has('temperature')) {
+    return (
+      <div style={{ minHeight: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center',
+                    background: '#111827', color: '#9CA3AF', textAlign: 'center', padding: 24 }}>
+        <div>
+          <p style={{ fontSize: 18, fontWeight: 700, color: '#F9FAFB' }}>Monitor mode shows temperature</p>
+          <p style={{ fontSize: 13, marginTop: 6 }}>Your company has no temperature parameter. Use the Dashboard for your parameters.</p>
+        </div>
+      </div>
+    )
+  }
+  return <MonitorScreen {...props} />
+}
+
+function MonitorScreen({ wsData, thresholds }) {
+  const { lastReading, lastCollectorReading, readings, isConnected } = wsData || {}
   const navigate = useNavigate()
   const [time,   setTime]   = useState(nowIST())
   const [breach, setBreach] = useState(false)
@@ -49,7 +68,10 @@ export default function MonitorPage({ wsData, thresholds }) {
     return () => clearInterval(t)
   }, [])
 
-  const temp     = lastReading?.temperature
+  // Collector reading is authoritative while the collector is active, so the
+  // display holds its value between the collector's ~4 s samples.
+  const displayReading = lastCollectorReading ?? lastReading
+  const temp     = displayReading?.temperature
   const severity = getSeverity(temp, thresholds)
   const cfg      = SEV_CONFIG[severity]
 

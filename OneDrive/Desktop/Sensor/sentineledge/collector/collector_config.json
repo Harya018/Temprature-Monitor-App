@@ -1,0 +1,22 @@
+{
+  "_comment": "SentinelEdge Live Collector — Pro-Server EX on the same machine as FastAPI",
+
+  "backend_url": "http://localhost:5000/api/collector/reading",
+  "api_key": "proserver-live-2024",
+
+  "dll_path": "C:\\Program Files (x86)\\Pro-face\\Pro-Server EX\\PRO-SDK\\DotNet40\\bin\\ProEasyDotNet.dll",
+
+  "poll_interval_seconds": 5,
+
+  "node":   "GP4000_1",
+  "device": "PLC1",
+
+  "readings": {
+    "temperature": { "symbol": "temperature", "address": "D00207", "type": "float" },
+    "pressure":    { "symbol": "pressure",    "address": "D01330", "type": "float" },
+    "ph":          { "symbol": "Ph",          "address": "D02400", "type": "float" }
+  },
+
+  "_note_dll": "If the dll_path above is wrong, find it with: dir /s /b \"C:\\Program Files*\" | findstr ProEasyDotNet",
+  "_note_api": "Backend and collector are on the same machine — localhost is correct."
+}

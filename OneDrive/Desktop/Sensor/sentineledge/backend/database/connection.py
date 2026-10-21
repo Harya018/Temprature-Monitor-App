@@ -369,33 +369,49 @@ def _run_migrations(pool: psycopg2.pool.ThreadedConnectionPool) -> None:
             # migration check is an in-memory set lookup instead of a DB round-trip.
             cur.execute(
                 "SELECT table_name FROM information_schema.tables "
-                "WHERE table_schema = 'public'"
+                "WHERE table_schema = current_schema()"
             )
             _existing_tables: set = {r[0] for r in cur.fetchall()}
 
             cur.execute(
                 "SELECT table_name, column_name FROM information_schema.columns "
-                "WHERE table_schema = 'public'"
+                "WHERE table_schema = current_schema()"
             )
             _existing_cols: set = {(r[0], r[1]) for r in cur.fetchall()}
 
             def table_exists(table: str) -> bool:
-                return table in _existing_tables
+                if table in _existing_tables:
+                    return True
+                # A cache miss may just mean an earlier step of this same run created it.
+                cur.execute("SELECT 1 FROM information_schema.tables "
+                            "WHERE table_schema = current_schema() AND table_name = %s", (table,))
+                if cur.fetchone():
+                    _existing_tables.add(table)
+                    return True
+                return False
 
             def col_exists(table: str, column: str) -> bool:
-                return (table, column) in _existing_cols
+                if (table, column) in _existing_cols:
+                    return True
+                cur.execute("SELECT 1 FROM information_schema.columns "
+                            "WHERE table_schema = current_schema() AND table_name = %s AND column_name = %s",
+                            (table, column))
+                if cur.fetchone():
+                    _existing_cols.add((table, column))
+                    return True
+                return False
 
             def _refresh_schema() -> None:
                 """Call after CREATE TABLE so the caches stay accurate."""
                 cur.execute(
                     "SELECT table_name FROM information_schema.tables "
-                    "WHERE table_schema = 'public'"
+                    "WHERE table_schema = current_schema()"
                 )
                 _existing_tables.clear()
                 _existing_tables.update(r[0] for r in cur.fetchall())
                 cur.execute(
                     "SELECT table_name, column_name FROM information_schema.columns "
-                    "WHERE table_schema = 'public'"
+                    "WHERE table_schema = current_schema()"
                 )
                 _existing_cols.clear()
                 _existing_cols.update((r[0], r[1]) for r in cur.fetchall())
@@ -506,6 +522,7 @@ def _run_migrations(pool: psycopg2.pool.ThreadedConnectionPool) -> None:
                     "CREATE UNIQUE INDEX IF NOT EXISTS idx_companies_slug ON companies(slug)"
                 )
                 logger.info("Migration 12: created companies table")
+                _refresh_schema()
 
             # Migration 13: admins.company_id — which company this admin manages
             if table_exists("admins") and not col_exists("admins", "company_id"):
@@ -533,15 +550,42 @@ def _run_migrations(pool: psycopg2.pool.ThreadedConnectionPool) -> None:
             res = cur.fetchone()
             count = res[0] if res else 0
             if count == 0:
-                from utils.security import hash_pin
+                from utils.security import hash_pin, is_bcrypt_hash, STANDARD_SUPER_ADMIN_HASH
                 from datetime import datetime, timezone
-                hashed = hash_pin("admin123")
+                # The Super Admin gets the STANDARD Super Admin password of every SentinelEdge PC, also
+                # on a database that was created without FIRST_TIME_SETUP (e.g. a PostgreSQL set up by
+                # hand). Only its hash is known here - the password itself is never written anywhere.
+                # FIRST_TIME_SETUP hands the same hash over in a one-time file, deleted once used.
+                _setup_file = os.path.join(os.path.dirname(os.path.dirname(__file__)), "secrets", "super_admin_setup.txt")
+                _from_setup = None
+                try:
+                    if os.path.isfile(_setup_file):
+                        with open(_setup_file, encoding="utf-8-sig") as _sf:
+                            _from_setup = _sf.read().strip() or None
+                except OSError:
+                    _from_setup = None
+                _env_pw = os.getenv("SUPER_ADMIN_INITIAL_PASSWORD")
+                if _from_setup:
+                    hashed = _from_setup if is_bcrypt_hash(_from_setup) else hash_pin(_from_setup)
+                elif _env_pw:
+                    hashed = hash_pin(_env_pw)
+                else:
+                    hashed = STANDARD_SUPER_ADMIN_HASH
                 ts = datetime.now(timezone.utc).isoformat()
                 cur.execute(
                     "INSERT INTO admins (name, password_hash, role, created_at) VALUES (%s, %s, %s, %s)",
                     ("admin", hashed, "super_admin", ts),
                 )
-                logger.info("Migration 16: seeded default super_admin (admin / admin123)")
+                if _from_setup:
+                    try:
+                        os.remove(_setup_file)
+                    except OSError:
+                        logger.warning("Could not delete %s - delete it by hand", _setup_file)
+                    logger.info("Migration 16: seeded super_admin from FIRST_TIME_SETUP (standard Super Admin password)")
+                elif _env_pw:
+                    logger.info("Migration 16: seeded super_admin from SUPER_ADMIN_INITIAL_PASSWORD")
+                else:
+                    logger.info("Migration 16: seeded super_admin with the standard Super Admin password")
 
             # Migration 17: companies extra fields
             _company_extra_cols = [
@@ -879,6 +923,11 @@ def _run_migrations(pool: psycopg2.pool.ThreadedConnectionPool) -> None:
                     [("readings", 30), ("login_attempts", 30), ("admin_activity", 365)],
                 )
                 logger.info("Migration 29c: created retention_policies table with defaults")
+            # Readings are kept forever unless Super Admin explicitly turns the policy on
+            # (an explicit change records set_by, which this leaves alone).
+            if table_exists("retention_policies") and col_exists("retention_policies", "set_by"):
+                cur.execute("UPDATE retention_policies SET enabled = 0 "
+                            "WHERE entity = 'readings' AND set_by IS NULL AND enabled <> 0")
 
             # 29d: incident reports
             if not table_exists("incident_reports"):
@@ -960,8 +1009,16 @@ def _run_migrations(pool: psycopg2.pool.ThreadedConnectionPool) -> None:
             # Migration 31: seed SRM as the default company and assign all
             # existing data to it.  Guarded by slug='srm' so it is fully
             # idempotent — safe to run on every restart.
+            # Only for an OLD single-company install that already holds data — a brand-new
+            # install (e.g. a new company's laptop) must start with no company at all.
             cur.execute("SELECT COUNT(*) FROM companies WHERE slug = 'srm'")
-            if cur.fetchone()[0] == 0:
+            _no_srm = cur.fetchone()[0] == 0
+            cur.execute("""SELECT (SELECT COUNT(*) FROM companies) = 0
+                              AND (EXISTS (SELECT 1 FROM readings LIMIT 1)
+                                   OR EXISTS (SELECT 1 FROM alerts LIMIT 1)
+                                   OR EXISTS (SELECT 1 FROM subscribers LIMIT 1))""")
+            _legacy_data = bool(cur.fetchone()[0])
+            if _no_srm and _legacy_data:
                 cur.execute("""
                     INSERT INTO companies (name, slug, description, is_active)
                     VALUES ('SRM Institute of Science and Technology',
@@ -1612,6 +1669,81 @@ def _run_deferred_migrations(pool: psycopg2.pool.ThreadedConnectionPool) -> None
                     conn = None
 
 
+def migrate_temperature_parameter_once() -> None:
+    """
+    One-time migration: temperature becomes a normal company parameter.
+
+    Before this, temperature was built in for every company. Now every
+    parameter — temperature included — is per company, so a new company starts
+    with none and shows only what it is given (e.g. pH only). Companies that
+    existed before this change keep temperature: each gets a 'temperature' row
+    with the current global limits. The app_settings flag makes it run once, so
+    companies created later are NOT given temperature automatically.
+    """
+    try:
+        done = execute_read(
+            "SELECT 1 FROM app_settings WHERE key = 'migration_temperature_parameter' LIMIT 1"
+        )
+        if done:
+            return
+        try:
+            import config as _cfg
+            t_high = float(_cfg.RUNTIME_THRESHOLDS.get("temp_high", 90.0))
+            t_low  = float(_cfg.RUNTIME_THRESHOLDS.get("temp_low", 38.0))
+        except Exception:
+            t_high, t_low = 90.0, 38.0
+        added = execute_write(
+            """
+            INSERT INTO company_parameters (company_id, name, unit, min_value, max_value, is_active)
+            SELECT c.id, 'temperature', '°C', %s, %s, TRUE
+              FROM companies c
+             WHERE NOT EXISTS (
+                   SELECT 1 FROM company_parameters p
+                    WHERE p.company_id = c.id AND LOWER(p.name) = 'temperature')
+            """,
+            (t_low, t_high),
+        )
+        execute_write(
+            "INSERT INTO app_settings (key, value) VALUES ('migration_temperature_parameter', '1') "
+            "ON CONFLICT (key) DO NOTHING"
+        )
+        logger.info("Migration: temperature added as a company parameter to %d existing company(ies)",
+                    added.rowcount)
+    except Exception as exc:
+        logger.warning("migrate_temperature_parameter_once failed (will retry next start): %s", exc)
+
+
+def migrate_ph_limits_once() -> None:
+    """
+    One-time: pH alerts used to follow the server-wide pH range (app_settings
+    alert_ph_threshold_min / _max, default 5.5 - 7.0). Alerts now follow each company's own
+    parameter limits, and the pH row of an existing company still held the default 0-14, so real
+    pH breaches stopped alerting. Copy the range that was really in force into that pH row, but
+    only where it still has the untouched 0-14 default (a range an admin set is never replaced).
+    """
+    try:
+        if execute_read("SELECT 1 FROM app_settings WHERE key = 'migration_ph_limits' LIMIT 1"):
+            return
+        rows = execute_read("SELECT key, value FROM app_settings "
+                            "WHERE key IN ('alert_ph_threshold_min', 'alert_ph_threshold_max')")
+        v = {r["key"]: r["value"] for r in rows}
+        try:
+            lo = float(v.get("alert_ph_threshold_min", 5.5))
+            hi = float(v.get("alert_ph_threshold_max", 7.0))
+        except ValueError:
+            lo, hi = 5.5, 7.0
+        if lo >= hi:
+            lo, hi = 5.5, 7.0
+        done = execute_write(
+            "UPDATE company_parameters SET min_value = %s, max_value = %s, updated_at = NOW() "
+            "WHERE LOWER(name) = 'ph' AND min_value = 0 AND max_value = 14", (lo, hi))
+        execute_write("INSERT INTO app_settings (key, value) VALUES ('migration_ph_limits', '1') "
+                      "ON CONFLICT (key) DO NOTHING")
+        logger.info("Migration: pH limits set to %s - %s for %d company parameter(s)", lo, hi, done.rowcount)
+    except Exception as exc:
+        logger.warning("migrate_ph_limits_once failed (will retry next start): %s", exc)
+
+
 def _backfill_readings_company_id() -> None:
     """Background thread: set company_id on legacy readings that have NULL.
 
@@ -1665,6 +1797,20 @@ def _backfill_readings_company_id() -> None:
                 )
             conn.commit()
             logger.info("Backfill: idx_readings_company_ts index created.")
+
+            # Covering index so analytics/report aggregates over a date range
+            # are answered from the index alone (no heap reads on millions of
+            # rows). CONCURRENTLY keeps collector inserts flowing while it
+            # builds; it cannot run in a transaction, hence autocommit.
+            conn.autocommit = True
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_readings_company_ts_cover "
+                        "ON readings (company_id, timestamp) INCLUDE (temperature, is_valid)"
+                    )
+            finally:
+                conn.autocommit = False
         finally:
             pool.putconn(conn)
     except Exception as exc:

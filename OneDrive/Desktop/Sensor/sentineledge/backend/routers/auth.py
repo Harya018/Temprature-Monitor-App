@@ -68,8 +68,13 @@ async def login(body: LoginIn, request: Request) -> LoginOut:
     client_ip = request.client.host if request.client else "unknown"
     logger.info(f"Login attempt — name: {body.name}, ip: {client_ip}")
 
+    from utils.rate_limiter import check_rate_limit, record_attempt, clear_failed_attempts
+    lock_key = f"subscriber:{(body.name or '').strip().lower()}"
+    check_rate_limit(lock_key, client_ip)   # 429 if locked out (PIN brute force)
+
     subscriber = database.get_subscriber_by_name_and_pin(body.name, body.pin)
     if subscriber is None:
+        record_attempt(lock_key, client_ip, False)
         logger.warning("Failed login attempt for name=%r", body.name)
         logger.warning(
             f"Login FAILED — name: {body.name}, ip: {client_ip}"
@@ -78,6 +83,8 @@ async def login(body: LoginIn, request: Request) -> LoginOut:
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail={"error": "InvalidCredentials", "message": "Name or PIN is incorrect"},
         )
+
+    clear_failed_attempts(lock_key, client_ip)
 
     token      = secrets.token_hex(32)
     expires_at = datetime.now(timezone.utc) + timedelta(days=_TOKEN_TTL_DAYS)
@@ -156,16 +163,22 @@ class _AdminLoginIn(BaseModel):
 @limiter.limit("10/minute")
 async def admin_login(body: _AdminLoginIn, request: Request):
     """Login for the admin dashboard (main or sub-admin)."""
+    from utils.rate_limiter import check_rate_limit, record_attempt, clear_failed_attempts
+    client_ip = request.client.host if request.client else "unknown"
+    lock_key  = f"admin:{(body.name or '').strip().lower()}"
+    check_rate_limit(lock_key, client_ip)   # 429 if locked out
+
     admin = database.verify_admin_password(body.name, body.password)
     if admin is None:
+        record_attempt(lock_key, client_ip, False)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail={"error": "InvalidCredentials", "message": "Name or password is incorrect"},
         )
 
     # ── TOTP 2FA check ────────────────────────────────────────────────────────
+    _2fa_required = False
     try:
-        from utils.totp_helper import is_2fa_enabled, verify_code
         from database.connection import execute_read as _er
         _totp_row = _er(
             "SELECT secret, enabled, enforced FROM totp_secrets WHERE admin_id = %s",
@@ -175,6 +188,8 @@ async def admin_login(body: _AdminLoginIn, request: Request):
         _2fa_enforced = bool(_totp_row and _totp_row[0]["enforced"])
 
         if _2fa_enabled:
+            _2fa_required = True
+            from utils.totp_helper import verify_code   # imported only when needed
             if not body.totp_code:
                 raise HTTPException(
                     status_code=403,
@@ -185,6 +200,7 @@ async def admin_login(body: _AdminLoginIn, request: Request):
                     },
                 )
             if not verify_code(_totp_row[0]["secret"], body.totp_code):
+                record_attempt(lock_key, client_ip, False)   # stop TOTP code guessing
                 raise HTTPException(
                     status_code=401,
                     detail={
@@ -196,7 +212,17 @@ async def admin_login(body: _AdminLoginIn, request: Request):
     except HTTPException:
         raise
     except Exception as _totp_exc:
+        if _2fa_required:
+            # Fail closed: never let a 2FA-enabled admin in without a verified code
+            logger.error("2FA verification unavailable — login denied: %s", _totp_exc)
+            raise HTTPException(
+                status_code=503,
+                detail={"error": "TotpUnavailable",
+                        "message": "Two-factor verification is unavailable. Contact the administrator."},
+            )
         logger.warning("TOTP check failed (non-fatal): %s", _totp_exc)
+
+    clear_failed_attempts(lock_key, client_ip)
 
     token = secrets.token_hex(32)
     expires_at = datetime.now(timezone.utc) + timedelta(hours=8)
@@ -265,7 +291,7 @@ def _require_bearer(authorization: str | None = Header(default=None)) -> dict:
     rows = execute_read(
         """SELECT a.id, a.name, a.role, a.company_id
              FROM admins a
-             JOIN admin_sessions s ON s.token = %s
+             JOIN admin_sessions s ON s.admin_id = a.id AND s.token = %s
             WHERE s.expires_at > NOW()
             LIMIT 1""",
         (token,),

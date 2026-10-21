@@ -1,0 +1,49 @@
+=====================================================================
+  NEW COMPANY HANDOVER  -  PRIVATE (vendor only, never in a package)
+=====================================================================
+
+BEFORE YOU GO
+-------------
+  [ ] Run  sentineledge\tools\MAKE_NEW_LAPTOP_PACKAGE.bat  -> folder
+      SentinelEdge_NewLaptop (no data, no secrets). Copy it to their PC.
+  [ ] Super Admin on every SentinelEdge PC:
+        username : superadmin
+        password : the standard Super Admin password (the same on every
+                   PC; setup sets it from a hash - it is not written in
+                   any file, keep it in your head / password store)
+        Company : ______________________
+        Date    : ______________________
+
+ON THEIR LAPTOP
+---------------
+  1. Double-click  FIRST_TIME_SETUP.bat  in the main folder, next to
+     START.bat, and click "Yes" (the only click). It installs Python +
+     PostgreSQL + libraries, creates the database with its own random
+     password, sets the standard Super Admin password, opens port 5000,
+     starts SentinelEdge and writes every password of the PC into
+       SentinelEdge PASSWORDS - KEEP PRIVATE.txt   (main folder)
+  2. http://localhost:5000/super-admin/login -> superadmin + the
+     standard password.
+  3. Companies > + New Company: name, company admin name + strong
+     password, only the parameters they measure (with min / max),
+     first subscriber, Enable.
+  4. Sign out of Super Admin. Test with the company admin login:
+     dashboard tile(s) for their parameters, Settings > "Send test
+     alert", Excel Live Reader pointed at their file.
+
+HAND OVER (on paper / separate message - not inside the folder)
+-------------
+  * Company admin username and password  (fill into the "YOUR LOGIN"
+    box of Manuals\Handover\Company Admin Manual.txt)
+  * The Company Admin Manual.
+  * Do NOT give them the Super Admin password. They only need
+    http://localhost:5000 .
+
+AFTER
+-----
+  [ ] Copy the passwords file (with the company admin written in it)
+      to your own safe storage, then DELETE it from their PC - it holds
+      that PC's database passwords.
+  [ ] If they should ever need a new parameter: they Request it, you
+      approve it in Super Admin.
+=====================================================================

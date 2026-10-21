@@ -1,0 +1,64 @@
+=====================================================================
+  EXCEL LIVE READER
+  Settings > Excel Live Reader
+=====================================================================
+
+HOW IT WORKS
+------------
+  Your instrument or logger adds one row to an Excel file at a time
+  and saves the file. SentinelEdge watches the LAST row:
+    * when a NEW row appears it is recorded once, checked against your
+      limits (alerts), shown live on the dashboard, and written to
+      your company's daily CSV table;
+    * rows that were already in the file when the reader started are
+      NOT imported - only new, live rows;
+    * nothing is invented: if no new row arrives, nothing is recorded.
+  Supported files: .xlsx  .xlsm  .xls  .xlsb (with Excel open)  .csv
+
+
+FILE FORMAT
+-----------
+  Row 1 = column names. Every later row = one reading. Example (pH):
+
+    Date       | Time     | Timestamp           | ESP32_millis | Raw_Value | pH
+    16-10-2026 | 10:54:16 | 2026-10-16T10:54:16 | 3033         | 870       | 8.7
+
+  Rules
+    * Time of the reading: either a Date column and a Time column,
+      or one combined Timestamp column.
+      Dates like 16-10-2026, 2026-10-16, 16/10/26 all work.
+    * A column is matched to a parameter by its NAME only, ignoring
+      capital letters, spaces and punctuation, words like Value /
+      Reading / Level, and the unit in brackets:
+        pH, ph, PH, "pH Value", "PH (pH)", "ph_reading"  ->  pH
+        "Pressure (bar)", "PRESSURE_BAR", "Pressure Reading" -> Pressure
+      A column that matches no parameter (Raw_Value, ESP32_millis ...)
+      is ignored. No renaming of the logger's file is needed.
+    * Time columns are found by name too when the settings below do
+      not match: Timestamp / DateTime / "Logged At" (one column), or
+      "Reading Date" + "Reading Time" / DATE/TIME.
+    * Temperature: the column named in "Temperature column", or any
+      column called Temp / Temperature / "Temperature (C)".
+    * Other columns (ESP32_millis, Raw_Value, ...) are ignored unless
+      Super Admin approves a parameter with that name.
+
+
+SETTINGS
+--------
+  File Path            Full path, e.g. C:\Logger\ph_data_live.xlsx
+  Date column          Date        Time column   Time
+  Timestamp column     only if date and time are in ONE column
+  Temperature column   e.g. Temperature (ignored if your company has
+                       no temperature parameter)
+  Save Settings        then switch "Excel reader" ON.
+  Test File            reads the last row now and shows what it found.
+  Diagnose             explains why a file cannot be read.
+
+
+CHECKLIST WHEN NOTHING ARRIVES
+------------------------------
+  1. Excel reader is ON and the file path is correct (Test File).
+  2. The column name is the parameter's name (capitals, spaces, "Value" and the unit in brackets do not matter).
+  3. A NEW row was added and the file was SAVED (old rows are skipped).
+  4. Live Logs shows each recorded reading as it arrives.
+=====================================================================

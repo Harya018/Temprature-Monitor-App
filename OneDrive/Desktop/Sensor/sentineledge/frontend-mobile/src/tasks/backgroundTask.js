@@ -12,16 +12,19 @@ export const BACKGROUND_WEBSOCKET_TASK = 'SENTINELEDGE_BACKGROUND_MONITORING';
 // ── Define the background task ───────────────
 TaskManager.defineTask(BACKGROUND_WEBSOCKET_TASK, async () => {
   try {
-    // Post a persistent sticky notification to keep the app alive
+    // Keep ONE quiet status notification (same identifier = replaced, never stacked). It must
+    // never make a sound or vibrate: only real alerts may ring the phone.
     await Notifications.scheduleNotificationAsync({
+      identifier: 'sentineledge-monitoring',
       content: {
         title: 'SentinelEdge Monitoring Active',
-        body: 'Temperature monitoring is running in the background.',
+        body: 'Monitoring is running in the background.',
         sticky: true,
-        priority: Notifications.AndroidNotificationPriority.HIGH,
+        sound: false,
+        priority: Notifications.AndroidNotificationPriority.LOW,
         data: { type: 'background_service' },
       },
-      trigger: null, // immediate
+      trigger: { channelId: 'monitoring' },   // silent channel, created in App.js
     });
 
     return BackgroundFetch.BackgroundFetchResult.NewData;

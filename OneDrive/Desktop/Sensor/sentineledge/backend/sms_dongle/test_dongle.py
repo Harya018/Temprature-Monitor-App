@@ -8,7 +8,7 @@ Run directly:
     python test_dongle.py
 
 Or with a specific test phone number:
-    python test_dongle.py --phone 6385936224
+    python test_dongle.py --phone 9876543210
 
 Expected behaviour when NO dongle is plugged in:
     Steps 1-4 → FAIL (gracefully, with clear reason)
@@ -40,7 +40,7 @@ from at_commands     import check_sim, check_signal, check_network, get_device_i
 from dongle_sender   import send_sms_via_dongle
 
 # ─── Test configuration ────────────────────────────────────────────────────────
-DEFAULT_TEST_PHONE   = "6385936224"   # ← change to your number for real SMS test
+DEFAULT_TEST_PHONE   = "9876543210"   # ← change to your number for real SMS test
 SKIP_SMS_SEND        = False          # set True to skip actual SMS (dry run)
 
 

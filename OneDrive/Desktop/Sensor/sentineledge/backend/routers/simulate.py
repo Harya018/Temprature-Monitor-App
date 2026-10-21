@@ -21,7 +21,7 @@ import core.sensor as sensor
 import core.threshold as threshold
 import core.escalation as escalation
 import database
-from middleware.auth import require_admin
+from middleware.auth import require_admin, require_platform_admin
 from middleware.rate_limit import limiter
 from modules.inapp.manager import broadcast
 from utils.logger import get_logger
@@ -113,7 +113,7 @@ async def _inject_reading(temperature: float, *, label: str = "", extra_params: 
         "After the configured cooldown, automatically injects a recovery reading. "
         "Requires admin auth. Rate limited to 5/min."
     ),
-    dependencies=[Depends(require_admin)],
+    dependencies=[Depends(require_platform_admin)],
 )
 @limiter.limit("5/minute")
 async def simulate_breach(request: Request):
@@ -148,22 +148,22 @@ async def _schedule_recovery(wait_seconds: int) -> None:
     logger.info("Breach simulation recovery complete.")
 
 
-_PH_TEST_VALUE = 7.5555   # above the 7.0 production threshold
-
-
 @router.post(
     "/simulate/ph-breach",
     summary="Simulate a pH threshold breach",
     description=(
-        "Injects a synthetic pH=7.5555 reading into the alert pipeline. "
-        "Fires threshold check, alert creation, email/SMS/in-app notifications. "
-        "Requires admin auth. Rate limited to 5/min."
+        "Injects a synthetic pH reading 15% above the current max threshold into the "
+        "alert pipeline. Fires threshold check, alert creation, email/SMS/in-app "
+        "notifications. Requires admin auth. Rate limited to 5/min."
     ),
-    dependencies=[Depends(require_admin)],
+    dependencies=[Depends(require_platform_admin)],
 )
 @limiter.limit("5/minute")
 async def simulate_ph_breach(request: Request):
-    # Use current temperature so the reading looks realistic
+    from config import RUNTIME_THRESHOLDS
+    ph_max = float(RUNTIME_THRESHOLDS.get("ph_threshold_max", 8.0))
+    ph_test = round(ph_max * 1.15, 4)   # 15% above current max — guaranteed breach
+
     try:
         import core.excel_sensor as _excel
         temp = _excel.current_temperature or 25.0
@@ -173,17 +173,18 @@ async def simulate_ph_breach(request: Request):
     breaches = await _inject_reading(
         temp,
         label="ph-breach",
-        extra_params={"PH": _PH_TEST_VALUE},
+        extra_params={"PH": ph_test},
     )
     logger.info(
-        "simulate/ph-breach: injected pH=%.4f — %d breach(es) fired",
-        _PH_TEST_VALUE, len(breaches),
+        "simulate/ph-breach: injected pH=%.4f (threshold max=%.1f) — %d breach(es) fired",
+        ph_test, ph_max, len(breaches),
     )
     return {
         "status":         "injected",
-        "ph_value":       _PH_TEST_VALUE,
+        "ph_value":       ph_test,
+        "ph_threshold":   ph_max,
         "breaches_fired": len(breaches),
-        "message":        f"pH {_PH_TEST_VALUE} injected — threshold check fired",
+        "message":        f"pH {ph_test} injected (15% above threshold {ph_max}) — threshold check fired",
     }
 
 
@@ -211,7 +212,7 @@ class DemoSpeedIn(BaseModel):
         "Not available in production (APP_ENV=production). "
         "Requires admin auth. Rate limited to 10/min."
     ),
-    dependencies=[Depends(require_admin)],
+    dependencies=[Depends(require_platform_admin)],
 )
 @limiter.limit("10/minute")
 async def simulate_demo(body: DemoSpeedIn, request: Request):
@@ -230,7 +231,7 @@ async def simulate_demo(body: DemoSpeedIn, request: Request):
         "Not available in production (APP_ENV=production). "
         "Requires admin auth."
     ),
-    dependencies=[Depends(require_admin)],
+    dependencies=[Depends(require_platform_admin)],
 )
 async def simulate_reset():
     _require_non_production()

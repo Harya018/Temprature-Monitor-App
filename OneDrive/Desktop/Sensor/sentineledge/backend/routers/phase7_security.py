@@ -1,5 +1,5 @@
-"""
-routers/phase7_security.py — Phase 7: Security & Compliance.
+﻿"""
+routers/phase7_security.py â€” Phase 7: Security & Compliance.
 
 All routes require super_admin role.
 Login-attempt & audit routes use full require_super_admin (IP whitelist + 2FA).
@@ -24,7 +24,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from database.connection import execute_read, execute_write
 from middleware.rate_limit import limiter
-from routers.super_admin import require_super_admin
+from routers.super_admin_v2 import require_super_admin
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -32,7 +32,7 @@ logger = get_logger(__name__)
 router = APIRouter(prefix="/api/super-admin/security", tags=["Security"])
 
 
-# ─── Light dependency — validates token + super_admin role, SKIPS 2FA check ──
+# â”€â”€â”€ Light dependency â€” validates token + super_admin role, SKIPS 2FA check â”€â”€
 # Used by 2FA routes so the user can complete OTP verification before the flag
 # is set on their session (would otherwise deadlock).
 
@@ -58,7 +58,7 @@ def _require_sa_skip2fa(
                COALESCE(s.two_fa_verified, 0) AS two_fa_verified,
                s.id AS session_id
         FROM admins a
-        JOIN admin_sessions s ON s.token = %s
+        JOIN admin_sessions s ON s.admin_id = a.id AND s.token = %s AND s.expires_at > NOW()
         WHERE a.role = 'super_admin'
         LIMIT 1
         """,
@@ -86,7 +86,7 @@ def _require_sa_skip2fa(
     return rows[0]
 
 
-# ─── Pydantic bodies ──────────────────────────────────────────────────────────
+# â”€â”€â”€ Pydantic bodies â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 class _WhitelistIn(BaseModel):
     ip:   str = Field(min_length=7, max_length=45)
@@ -152,7 +152,7 @@ class _OTPVerifyIn(BaseModel):
     otp: str = Field(min_length=6, max_length=8)
 
 
-# ─── Login Attempts ───────────────────────────────────────────────────────────
+# â”€â”€â”€ Login Attempts â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @router.get("/login-attempts", summary="Login attempt log")
 @limiter.limit("30/minute")
@@ -218,7 +218,7 @@ async def blocked_ips(
         return JSONResponse(status_code=500, content={"error": str(exc)})
 
 
-# ─── IP Whitelist ─────────────────────────────────────────────────────────────
+# â”€â”€â”€ IP Whitelist â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @router.get("/ip-whitelist", summary="List whitelisted IPs")
 @limiter.limit("30/minute")
@@ -287,7 +287,7 @@ async def remove_whitelist(
         return JSONResponse(status_code=500, content={"error": str(exc)})
 
 
-# ─── Audit Log ────────────────────────────────────────────────────────────────
+# â”€â”€â”€ Audit Log â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @router.get("/audit", summary="Admin activity audit log")
 @limiter.limit("30/minute")
@@ -375,7 +375,7 @@ async def audit_export(
         return JSONResponse(status_code=500, content={"error": str(exc)})
 
 
-# ─── Retention Policies ───────────────────────────────────────────────────────
+# â”€â”€â”€ Retention Policies â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @router.get("/retention", summary="List retention policies")
 @limiter.limit("30/minute")
@@ -422,7 +422,7 @@ async def upsert_retention(
         return JSONResponse(status_code=500, content={"error": str(exc)})
 
 
-# ─── Incident Reports ─────────────────────────────────────────────────────────
+# â”€â”€â”€ Incident Reports â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @router.get("/incidents", summary="List incident reports")
 @limiter.limit("30/minute")
@@ -530,7 +530,7 @@ async def update_incident(
         return JSONResponse(status_code=500, content={"error": str(exc)})
 
 
-# ─── 2FA Management ───────────────────────────────────────────────────────────
+# â”€â”€â”€ 2FA Management â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @router.post("/2fa/setup", summary="Configure 2FA for an admin")
 @limiter.limit("10/minute")
@@ -690,3 +690,4 @@ async def twofa_status(
     except Exception as exc:
         logger.error("twofa_status failed: %s", exc)
         return JSONResponse(status_code=500, content={"error": str(exc)})
+

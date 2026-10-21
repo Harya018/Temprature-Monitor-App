@@ -8,6 +8,7 @@ import { fetchAlerts, acknowledgeAlert } from '../../services/api.js'
 import { getSeverityColor, getSeverityLabel, getDirectionLabel } from '../../utils/severity.js'
 import { timeAgo, utcToIST } from '../../utils/time.js'
 import Badge from '../shared/Badge.jsx'
+import TimeAgo from '../shared/TimeAgo.jsx'
 
 const SEV_BADGE = { WARNING:'amber', CRITICAL:'orange', EMERGENCY:'red' }
 
@@ -25,10 +26,8 @@ export default function MiniAlertLog({ limit = 5, onCountChange }) {
   useEffect(() => { load(); const t = setInterval(load, 10000); return () => clearInterval(t) }, [load])
 
   const handleAck = async (alert) => {
-    const name = prompt('Acknowledge as:')
-    if (!name?.trim()) return
     try {
-      await acknowledgeAlert(alert.id, name.trim())
+      await acknowledgeAlert(alert.id)        // recorded under your own sign-in name
       load()
     } catch { /* silent */ }
   }
@@ -58,7 +57,7 @@ export default function MiniAlertLog({ limit = 5, onCountChange }) {
                        label={getSeverityLabel(alert.severity)} small />
               </div>
               <p className="text-xs text-gray-400 mt-0.5">
-                {getDirectionLabel(alert.direction)} · {timeAgo(alert.timestamp)}
+                {getDirectionLabel(alert.direction)} · <TimeAgo ts={alert.timestamp} />
               </p>
             </div>
             {!alert.acknowledged ? (

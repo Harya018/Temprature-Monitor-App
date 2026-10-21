@@ -56,7 +56,7 @@ def _format_phone(phone_number: str) -> str:
     - Anything else           → use as-is (caller's responsibility)
 
     Examples:
-        "6385936224"     → "+916385936224"
+        "9876543210"     → "+919876543210"
         "+919876543210"  → "+919876543210"
         "009876543210"   → "009876543210"
     """
@@ -128,9 +128,9 @@ def send_sms_via_dongle(
         }
 
     Logs (INFO level):
-        "Sending SMS to +916385936224 via COM3..."
-        "SMS sent successfully to +916385936224 via COM3"
-        "SMS failed to +916385936224: <reason>"
+        "Sending SMS to +919876543210 via COM3..."
+        "SMS sent successfully to +919876543210 via COM3"
+        "SMS failed to +919876543210: <reason>"
     """
     if not SERIAL_AVAILABLE:
         msg = "pyserial not installed. Run: pip install pyserial"
@@ -275,7 +275,7 @@ if __name__ == "__main__":
     import sys
     if len(sys.argv) < 3:
         print("Usage: python dongle_sender.py <phone_number> <message>")
-        print('Example: python dongle_sender.py 6385936224 "Hello from SentinelEdge"')
+        print('Example: python dongle_sender.py 9876543210 "Hello from SentinelEdge"')
         sys.exit(1)
 
     phone   = sys.argv[1]

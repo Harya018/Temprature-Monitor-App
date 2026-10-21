@@ -417,9 +417,9 @@ def _format_phone(phone_number: str) -> str:
     - Anything else            → use as-is (caller's responsibility)
 
     Examples:
-        "6385936224"    → "+916385936224"
-        "+916385936224" → "+916385936224"  (unchanged)
-        "916385936224"  → "+916385936224"  (bare 91 prefix, not doubled)
+        "9876543210"    → "+919876543210"
+        "+919876543210" → "+919876543210"  (unchanged)
+        "919876543210"  → "+919876543210"  (bare 91 prefix, not doubled)
         "009876543210"  → "009876543210"   (non-Indian; left as-is)
     """
     phone = phone_number.strip().replace(" ", "").replace("-", "")

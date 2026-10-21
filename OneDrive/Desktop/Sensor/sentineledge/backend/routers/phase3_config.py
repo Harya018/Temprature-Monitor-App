@@ -1,5 +1,5 @@
-"""
-routers/phase3_config.py — Phase 3: Global Configuration Control.
+﻿"""
+routers/phase3_config.py â€” Phase 3: Global Configuration Control.
 
 All routes protected by require_super_admin.
 
@@ -24,7 +24,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
 
 from database.connection import execute_read, execute_write
-from routers.super_admin import require_super_admin
+from routers.super_admin_v2 import require_super_admin
 from utils.activity_logger import log_activity
 from utils.logger import get_logger
 import config as _config
@@ -35,7 +35,18 @@ logger = get_logger(__name__)
 router = APIRouter(prefix="/api/super-admin/config", tags=["Super Admin Config"])
 
 
-# ─── Pydantic bodies ──────────────────────────────────────────────────────────
+def _persist_thresholds(temp_high: float, temp_low: float) -> None:
+    """Persist to the same app_settings keys the admin config route writes and
+    main.py reloads at startup, so super-admin changes survive a restart."""
+    for key, val in (("threshold_temp_high", temp_high), ("threshold_temp_low", temp_low)):
+        execute_write(
+            "INSERT INTO app_settings (key, value, updated_at) VALUES (%s, %s, NOW()) "
+            "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()",
+            (key, str(val)),
+        )
+
+
+# â”€â”€â”€ Pydantic bodies â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 class _ThresholdIn(BaseModel):
     temp_high: float = Field(gt=0)
@@ -70,7 +81,7 @@ class _CompanyConfigIn(BaseModel):
         return v.strip() if isinstance(v, str) else v
 
 
-# ─── Global thresholds ────────────────────────────────────────────────────────
+# â”€â”€â”€ Global thresholds â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @router.get("/thresholds", summary="Get current global thresholds")
 async def get_global_thresholds(_: dict = Depends(require_super_admin)):
@@ -100,6 +111,7 @@ async def set_global_thresholds(
     RUNTIME_THRESHOLDS["temp_low"]  = body.temp_low
     RUNTIME_THRESHOLDS["temperature"]["high"] = body.temp_high
     RUNTIME_THRESHOLDS["temperature"]["low"]  = body.temp_low
+    _persist_thresholds(body.temp_high, body.temp_low)
 
     now_iso = datetime.now(timezone.utc).isoformat()
     _config.RUNTIME_SOURCE       = "super_admin_override"
@@ -135,7 +147,7 @@ async def set_global_thresholds(
     }
 
 
-# ─── Threshold templates ──────────────────────────────────────────────────────
+# â”€â”€â”€ Threshold templates â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @router.get("/templates", summary="List all threshold templates")
 async def list_templates(_: dict = Depends(require_super_admin)):
@@ -231,6 +243,7 @@ async def apply_template(
     RUNTIME_THRESHOLDS["temp_low"]  = t["temp_low"]
     RUNTIME_THRESHOLDS["temperature"]["high"] = t["temp_high"]
     RUNTIME_THRESHOLDS["temperature"]["low"]  = t["temp_low"]
+    _persist_thresholds(t["temp_high"], t["temp_low"])
 
     now_iso = datetime.now(timezone.utc).isoformat()
     _config.RUNTIME_SOURCE       = f"template:{t['name']}"
@@ -269,7 +282,7 @@ async def apply_template(
     }
 
 
-# ─── Company config overrides ─────────────────────────────────────────────────
+# â”€â”€â”€ Company config overrides â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @router.get("/companies/{company_id}/config", summary="List config overrides for a company")
 async def get_company_config(
@@ -353,7 +366,7 @@ async def delete_company_config(
     return {"deleted": True, "company_id": company_id, "field": field}
 
 
-# ─── Company Parameters ───────────────────────────────────────────────────────
+# â”€â”€â”€ Company Parameters â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 class _ParamIn(BaseModel):
     company_id: int
@@ -449,7 +462,7 @@ async def request_parameter(
         body.company_id,
     )
     logger.info(
-        "Super admin %d requested add_parameter '%s' for company %d — approval #%s",
+        "Super admin %d requested add_parameter '%s' for company %d â€” approval #%s",
         sa["id"], body.name, body.company_id, result.lastrowid,
     )
     return {
@@ -458,6 +471,33 @@ async def request_parameter(
         "action_type": "add_parameter",
         "payload":     payload,
     }
+
+
+def _notify_parameter_change(company_id: int, event: dict) -> None:
+    """Push a parameter change to that company's open dashboards so tiles,
+    charts and settings appear / update / disappear without a page reload."""
+    try:
+        import asyncio
+        from modules.inapp.manager import broadcast as _broadcast
+        asyncio.get_running_loop().create_task(_broadcast({**event, "company_id": company_id},
+                                                          company_id=company_id))
+    except Exception as exc:
+        logger.warning("parameter change broadcast failed: %s", exc)
+
+
+def _sync_sensor_temperature(company_id: int, name: str, min_v, max_v) -> None:
+    """Temperature limits of the company that owns the sensor feed ARE the live
+    alert thresholds — keep them in step when Super Admin edits the parameter."""
+    if str(name).lower() != "temperature" or min_v is None or max_v is None or min_v >= max_v:
+        return
+    from services.sensor_company import get_sensor_company_id
+    if company_id != get_sensor_company_id():
+        return
+    RUNTIME_THRESHOLDS["temp_high"] = float(max_v)
+    RUNTIME_THRESHOLDS["temp_low"]  = float(min_v)
+    RUNTIME_THRESHOLDS["temperature"]["high"] = float(max_v)
+    RUNTIME_THRESHOLDS["temperature"]["low"]  = float(min_v)
+    _persist_thresholds(float(max_v), float(min_v))
 
 
 @router.patch("/parameters/{param_id}", summary="Update a company parameter (direct, no approval)")
@@ -495,6 +535,19 @@ async def update_parameter(
         f"param_id:{param_id} name:{rows[0]['name']}",
         rows[0]["company_id"],
     )
+    cur = execute_read(
+        "SELECT id, name, unit, min_value, max_value, is_active FROM company_parameters WHERE id = %s",
+        (param_id,),
+    )
+    if cur:
+        p = cur[0]
+        _sync_sensor_temperature(rows[0]["company_id"], p["name"], p["min_value"], p["max_value"])
+        _notify_parameter_change(rows[0]["company_id"], {
+            "type": "parameter_added" if p["is_active"] else "parameter_deleted",
+            "parameter_id": p["id"], "name": p["name"],
+            "parameter": {"id": p["id"], "name": p["name"], "unit": p["unit"],
+                          "min_value": p["min_value"], "max_value": p["max_value"]},
+        })
     return {"status": "updated", "param_id": param_id}
 
 
@@ -518,10 +571,13 @@ async def delete_parameter(
         f"param_id:{param_id} name:{rows[0]['name']}",
         rows[0]["company_id"],
     )
+    _notify_parameter_change(rows[0]["company_id"], {
+        "type": "parameter_deleted", "parameter_id": param_id, "name": rows[0]["name"],
+    })
     return {"status": "deleted", "param_id": param_id}
 
 
-# ─── Companies + Parameters Overview (Config Page) ────────────────────────────
+# â”€â”€â”€ Companies + Parameters Overview (Config Page) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 class _DirectParamIn(BaseModel):
     name: str = Field(min_length=1, max_length=100)
@@ -562,10 +618,6 @@ async def all_companies_params(_: dict = Depends(require_super_admin)):
         "SELECT id, company_id, name, unit, min_value, max_value "
         "FROM company_parameters WHERE is_active = TRUE ORDER BY company_id, name"
     )
-    temp_cfg = execute_read(
-        "SELECT company_id, field, value FROM company_config "
-        "WHERE field IN ('temp_high', 'temp_low')"
-    )
     params_by_co: dict = defaultdict(list)
     for p in (params or []):
         params_by_co[p["company_id"]].append({
@@ -574,26 +626,17 @@ async def all_companies_params(_: dict = Depends(require_super_admin)):
             "max_value": float(p["max_value"]) if p.get("max_value") is not None else None,
             "builtin": False,
         })
-    temp_by_co: dict = defaultdict(dict)
-    for t in (temp_cfg or []):
-        try:
-            temp_by_co[t["company_id"]][t["field"]] = float(t["value"])
-        except (TypeError, ValueError):
-            pass
-    result = []
-    for co in companies:
-        cid = co["id"]
-        tt = temp_by_co.get(cid, {})
-        result.append({
-            "id": cid, "name": co["name"],
+    # Temperature is a normal per-company parameter (see
+    # migrate_temperature_parameter_once) — no built-in row is added any more,
+    # so a company shows exactly the parameters it has (none for a new company).
+    return [
+        {
+            "id": co["id"], "name": co["name"],
             "sampling_interval_seconds": co["sampling_interval_seconds"],
-            "parameters": [
-                {"id": None, "name": "Temperature", "unit": "°C",
-                 "min_value": tt.get("temp_low"), "max_value": tt.get("temp_high"),
-                 "builtin": True}
-            ] + params_by_co.get(cid, []),
-        })
-    return result
+            "parameters": params_by_co.get(co["id"], []),
+        }
+        for co in companies
+    ]
 
 
 @router.post("/companies/{company_id}/parameters/direct", status_code=201,
@@ -617,6 +660,12 @@ async def add_parameter_direct(
     )
     log_activity(sa["id"], "parameter_added", "company_parameters",
                  f"company_id:{company_id} name:{body.name}", company_id)
+    _sync_sensor_temperature(company_id, body.name, body.min_value, body.max_value)
+    _notify_parameter_change(company_id, {
+        "type": "parameter_added", "parameter_id": result.lastrowid,
+        "parameter": {"id": result.lastrowid, "name": body.name, "unit": body.unit or "",
+                      "min_value": body.min_value, "max_value": body.max_value},
+    })
     return {"status": "created", "param_id": result.lastrowid}
 
 
@@ -660,7 +709,8 @@ async def set_company_sampling(
         )
     except Exception:
         return JSONResponse(status_code=503,
-                            content={"error": "sampling_interval_seconds column not ready yet — retry after server restart"})
+                            content={"error": "sampling_interval_seconds column not ready yet â€” retry after server restart"})
     log_activity(sa["id"], "company_sampling_set", "companies",
                  f"company_id:{company_id} interval:{interval}s", company_id)
     return {"ok": True, "sampling_interval_seconds": interval}
+

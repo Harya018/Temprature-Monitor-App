@@ -65,6 +65,28 @@
 .anl-kpi-unit { font-size: 0.7rem; font-weight: 500; color: #9CA3AF; margin-left: 2px; }
 .anl-kpi-label { font-size: 0.72rem; color: #9CA3AF; margin-top: 1px; white-space: nowrap; }
 
+/* ── Structured layout: labelled sections, equal-width cards per row ── */
+.anl-structured { gap: 22px; }
+.anl-section { display: flex; flex-direction: column; gap: 12px; }
+.anl-section-title {
+  margin: 0;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: #6B7280;
+}
+.anl-grid { display: grid; gap: 14px; align-items: stretch; }
+.anl-grid-2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.anl-grid-3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.anl-grid > .chart-card { display: flex; flex-direction: column; min-width: 0; margin: 0; }
+.anl-structured .chart-card-header { margin-bottom: 12px; }
+.anl-stack { display: flex; flex-direction: column; gap: 14px; min-width: 0; }
+.anl-stack > .chart-card { margin: 0; }
+.anl-stack > .chart-card:last-child { flex: 1; }
+@media (max-width: 1200px) { .anl-grid-3 { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+@media (max-width: 800px)  { .anl-grid-2, .anl-grid-3 { grid-template-columns: minmax(0, 1fr); } }
+
 /* ── 3-column row: wide (2fr) + equal secondary (1fr) + equal secondary (1fr) ── */
 .anl-row3 {
   display: grid;

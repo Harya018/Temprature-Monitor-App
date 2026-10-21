@@ -5,7 +5,7 @@ Prevents the PostgreSQL database from growing unboundedly by deleting old rows.
 Runs daily at 2:00 AM UTC.
 
 Retention policy:
-    readings          → 30 days
+    readings          → kept forever (set READINGS_RETENTION_DAYS to a number to enable)
     escalation_log    → 90 days
     delivery_receipts → 90 days
 
@@ -26,7 +26,7 @@ from utils.time import now_iso
 
 logger = get_logger(__name__)
 
-RETENTION_DAYS_READINGS       = 30
+RETENTION_DAYS_READINGS       = int(os.environ.get("READINGS_RETENTION_DAYS", "0"))   # 0 = never delete
 RETENTION_DAYS_ESCALATION_LOG = 90
 RETENTION_DAYS_RECEIPTS       = 90
 
@@ -43,18 +43,16 @@ def cleanup_old_readings() -> None:
     """
     from database.connection import execute_write
 
-    try:
-        cur = execute_write(
-            "DELETE FROM readings WHERE timestamp::TIMESTAMPTZ < NOW() - INTERVAL %s",
-            (f"{RETENTION_DAYS_READINGS} days",),
-        )
-        deleted_readings = cur.rowcount
-        logger.info(
-            "Retention: deleted %d readings older than %d days.",
-            deleted_readings, RETENTION_DAYS_READINGS,
-        )
-    except Exception as exc:
-        logger.error("Retention: readings cleanup failed: %s", exc)
+    if RETENTION_DAYS_READINGS > 0:
+        try:
+            cur = execute_write(
+                "DELETE FROM readings WHERE timestamp::TIMESTAMPTZ < NOW() - INTERVAL %s",
+                (f"{RETENTION_DAYS_READINGS} days",),
+            )
+            logger.info("Retention: deleted %d readings older than %d days.",
+                        cur.rowcount, RETENTION_DAYS_READINGS)
+        except Exception as exc:
+            logger.error("Retention: readings cleanup failed: %s", exc)
 
     try:
         cur = execute_write(
@@ -106,7 +104,7 @@ def get_database_stats() -> dict:
         # Use pg_class statistics for an instant estimate instead of COUNT(*) full scan.
         # reltuples is updated by autovacuum and accurate to ~1-2% on large tables.
         rows = execute_read(
-            "SELECT reltuples::bigint AS estimate FROM pg_class WHERE relname = 'readings'"
+            "SELECT reltuples::bigint AS estimate FROM pg_class WHERE relname = 'readings' AND relnamespace = current_schema()::regnamespace"
         )
         stats["readings_count"] = int(rows[0]["estimate"]) if rows else 0
     except Exception as exc:

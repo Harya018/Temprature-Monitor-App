@@ -22,10 +22,11 @@ logger = get_logger(__name__)
 router = APIRouter(prefix="/api", tags=["Events"])
 
 
-@router.get("/events", dependencies=[Depends(require_admin)])
+@router.get("/events")
 async def get_events(
     limit: int = Query(100, ge=1, le=500),
     type:  str = Query("all"),
+    admin: dict = Depends(require_admin),
 ):
     """
     Merged audit timeline from:
@@ -37,10 +38,15 @@ async def get_events(
     Returns events sorted by timestamp desc.
     """
     events = []
+    # Company scoping: alerts by company; threshold changes and backups belong
+    # to the plant feed, so only the sensor company (or a platform caller) sees them.
+    from services.sensor_company import owns_sensor_feed
+    company_id = admin.get("company_id")
+    plant_events = owns_sensor_feed(company_id)
 
     try:
         # Config changes
-        if type in ("all", "config"):
+        if type in ("all", "config") and plant_events:
             rows = execute_read(
                 "SELECT id, changed_at as ts, changed_by, field_name, old_value, new_value "
                 "FROM config_changes ORDER BY id DESC LIMIT %s", (limit,)
@@ -61,17 +67,21 @@ async def get_events(
 
         # Alerts
         if type in ("all", "alert"):
+            cf = "WHERE company_id = %s " if company_id is not None else ""
             rows = execute_read(
                 "SELECT id, timestamp as ts, parameter, value, severity, "
                 "direction, escalation_level, acknowledged, acknowledged_by "
-                "FROM alerts ORDER BY id DESC LIMIT %s", (limit,)
+                f"FROM alerts {cf}ORDER BY id DESC LIMIT %s",
+                ((company_id, limit) if company_id is not None else (limit,)),
             )
             for r in rows:
                 events.append({
                     "type":        "alert",
                     "timestamp":   r["ts"],
                     "description": f"Alert fired: {r['parameter']} "
-                                   f"{r['value']:.1f}°C ({r['severity']})",
+                                   f"{(r['value'] or 0):.2f}"
+                                   f"{'°C' if str(r['parameter']).lower() == 'temperature' else ''} "
+                                   f"({r['severity']})",
                     "details": {
                         "parameter":        r["parameter"],
                         "value":            r["value"],
@@ -84,7 +94,7 @@ async def get_events(
                 })
 
         # Backups from filesystem
-        if type in ("all", "backup"):
+        if type in ("all", "backup") and plant_events:
             try:
                 backup_dir = Path(_BACKUP_DIR)
                 if backup_dir.exists():

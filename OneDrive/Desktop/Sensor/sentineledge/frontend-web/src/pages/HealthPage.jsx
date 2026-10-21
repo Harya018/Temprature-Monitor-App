@@ -16,6 +16,7 @@ import {
 import { utcToIST, timeAgo } from '../utils/time.js'
 import Badge from '../components/shared/Badge.jsx'
 import { useToast, ToastContainer } from '../components/shared/Toast.jsx'
+import TimeAgo from '../components/shared/TimeAgo.jsx'
 
 const MODULE_ICONS = {
   sensor:    <Thermometer   size={20} />,
@@ -29,6 +30,13 @@ function statusBadge(s) {
   const str = String(s || '')
   if (!str || str === 'not_built')      return { color:'gray',  label:'Not Built' }
   if (str === 'ok')                     return { color:'green', label:'OK' }
+  if (str === 'live')                   return { color:'green', label:'Live' }
+  if (str === 'connected')              return { color:'green', label:'Connected' }
+  if (str === 'not connected')          return { color:'red',   label:'Not Connected' }
+  if (str === 'excel live')             return { color:'green', label:'Excel Live' }
+  if (str === 'no data')                return { color:'red',   label:'No Data' }
+  if (str === 'no source')              return { color:'gray',  label:'No Live Source' }
+  if (str === 'checking')               return { color:'amber', label:'Checking…' }
   if (str === 'starting')               return { color:'amber', label:'Starting' }
   if (str.startsWith('configured'))     return { color:'green', label:'Configured' }
   if (str.startsWith('ok'))             return { color:'green', label:'OK' }
@@ -39,6 +47,8 @@ function statusBadge(s) {
 function statusIcon(s) {
   const str = String(s || '')
   if (!str || str === 'not_built')   return <Archive size={16} className="text-gray-400" />
+  if (str === 'live' || str === 'excel live' || str === 'connected') return <CheckCircle size={16} className="text-emerald-500" />
+  if (str === 'not connected')       return <XCircle size={16} className="text-red-500" />
   if (str.startsWith('ok'))          return <CheckCircle size={16} className="text-emerald-500" />
   if (str.startsWith('configured'))  return <CheckCircle size={16} className="text-emerald-500" />
   if (str === 'starting')            return <AlertTriangle size={16} className="text-amber-500" />
@@ -218,6 +228,7 @@ export default function HealthPage() {
               )
               const sb      = statusBadge(val)
               const isError = val.startsWith('error')
+              const detail  = raw && typeof raw === 'object' ? (raw.detail || raw.source) : null
               return (
                 <div key={mod} className="card p-5">
                   <div className="flex items-start justify-between mb-3">
@@ -247,7 +258,11 @@ export default function HealthPage() {
                     <p className="text-xs text-gray-400 mt-2">Module not implemented yet</p>
                   )}
                   {val !== 'unknown' && val !== 'not_built' && !isError && (
-                    <p className="text-xs text-gray-400 mt-2 truncate" title={val}>{val}</p>
+                    <p className="text-xs text-gray-400 mt-2 truncate" title={detail || val}>
+                      {detail
+                        ? (mod === 'sensor' && raw.source ? `${raw.source} · ${raw.detail}` : detail)
+                        : val}
+                    </p>
                   )}
                 </div>
               )
@@ -262,7 +277,7 @@ export default function HealthPage() {
             {[
               { label: 'Total Readings', value: stats?.readings_count  ?? '—', icon: '📡' },
               { label: 'Total Alerts',   value: stats?.alerts_count    ?? '—', icon: '🔔' },
-              { label: 'DB Size',        value: stats ? `${stats.database_size_mb} MB` : '—', icon: '💾' },
+              { label: 'DB Size',        value: stats?.database_size_mb != null ? `${stats.database_size_mb} MB` : '—', icon: '💾' },
               { label: 'Backups',        value: stats?.backup_count    ?? '—', icon: '📦' },
             ].map(s => (
               <div key={s.label} className="card p-4 flex items-center gap-3">
@@ -304,7 +319,7 @@ export default function HealthPage() {
                       <td className="font-semibold text-purple-700">{c.new_value}</td>
                       <td className="text-gray-500">{c.changed_by}</td>
                       <td>
-                        <p className="text-xs">{timeAgo(c.changed_at)}</p>
+                        <p className="text-xs"><TimeAgo ts={c.changed_at} /></p>
                         <p className="text-xs text-gray-400">{utcToIST(c.changed_at)}</p>
                       </td>
                     </tr>
@@ -353,7 +368,7 @@ export default function HealthPage() {
               type="tel"
               value={smsPhone}
               onChange={e => setSmsPhone(e.target.value)}
-              placeholder="+916385936224 or 6385936224"
+              placeholder="+91XXXXXXXXXX or 10-digit number"
               className="input w-full mb-4"
               onKeyDown={e => { if (e.key === 'Enter') handleTestSms() }}
             />

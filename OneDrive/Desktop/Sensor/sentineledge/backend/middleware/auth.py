@@ -37,25 +37,71 @@ def require_admin(
                 if admin_id is not None:
                     from database.connection import execute_read
                     admin_rows = execute_read(
-                        "SELECT is_active, company_id FROM admins WHERE id = %s", (admin_id,)
+                        "SELECT a.is_active, a.company_id, a.role, c.is_active AS company_active "
+                        "FROM admins a LEFT JOIN companies c ON c.id = a.company_id WHERE a.id = %s", (admin_id,)
                     )
                     if admin_rows:
-                        if admin_rows[0].get("is_active") == 0:
+                        row = admin_rows[0]
+                        if row.get("is_active") == 0:
                             raise HTTPException(
                                 status_code=status.HTTP_401_UNAUTHORIZED,
                                 detail="Your account has been suspended. Contact your administrator.",
                             )
+                        if row.get("role") != "super_admin":
+                            # An admin with no company would otherwise be treated as "platform-wide"
+                            # (every company's data); a switched-off company is locked out completely.
+                            if row.get("company_id") is None:
+                                raise HTTPException(
+                                    status_code=status.HTTP_403_FORBIDDEN,
+                                    detail="This account is not assigned to a company. Contact the Super Admin.",
+                                )
+                            if row.get("company_active") == 0:
+                                raise HTTPException(
+                                    status_code=status.HTTP_403_FORBIDDEN,
+                                    detail="This company is switched off. Contact the Super Admin.",
+                                )
                         return {
                             "admin_id":   admin_id,
-                            "company_id": admin_rows[0].get("company_id"),
+                            "company_id": row.get("company_id"),
+                            "role":       row.get("role"),
                         }
-                return {"admin_id": None, "company_id": None}
+                # a session that is not tied to an existing admin must never act as "no company"
+                # (which would mean every company's data)
 
     raise HTTPException(
         status_code=status.HTTP_401_UNAUTHORIZED,
         detail="Invalid or missing admin session. Please log in.",
         headers={"WWW-Authenticate": "Bearer"},
     )
+
+
+def session_admin(authorization: Optional[str]) -> Optional[dict]:
+    """The admin behind a Bearer token: {id, name, role, company_id, token} or None.
+    `name` is the name used to sign in, so actions are recorded under the person who did them."""
+    if not authorization or not authorization.startswith("Bearer "):
+        return None
+    token = authorization[7:].strip()
+    if not token:
+        return None
+    from database.connection import execute_read
+    rows = execute_read(
+        "SELECT a.id, COALESCE(s.login_name, a.name) AS name, a.name AS account_name, a.role, a.company_id "
+        "FROM admin_sessions s JOIN admins a ON a.id = s.admin_id "
+        "WHERE s.token = %s AND s.expires_at > NOW() LIMIT 1", (token,))
+    if not rows:
+        return None
+    return {**rows[0], "token": token}
+
+
+def require_platform_admin(
+    authorization: Optional[str] = Header(default=None),
+) -> dict:
+    """Super Admin session only (never a company admin): for test / import tools that act on
+    the whole server."""
+    admin = require_admin(authorization)
+    if admin.get("role") != "super_admin":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Super Admin only")
+    return admin
 
 
 def require_subscriber_auth(

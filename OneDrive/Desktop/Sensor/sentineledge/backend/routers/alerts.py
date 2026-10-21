@@ -9,6 +9,7 @@ Rate limiting (slowapi):
 """
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.responses import JSONResponse
 
 import database
 import core.escalation as escalation
@@ -121,17 +122,30 @@ async def get_alert(alert_id: int, request: Request):
 async def acknowledge_alert(alert_id: int, body: AcknowledgeIn, request: Request):
     company_id = _session_company_id(request)
     # Verify the alert belongs to this company before acknowledging
-    if company_id is not None:
-        row = database.get_alert(alert_id, company_id=company_id)
-        if not row:
-            raise HTTPException(status_code=404, detail="Alert not found")
-    ok = await escalation.acknowledge(alert_id, f"{body.acknowledged_by} (app)")
+    row = database.get_alert(alert_id, company_id=company_id) if company_id is not None else database.get_alert(alert_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Alert not found")
+    if row.get("acknowledged"):
+        # someone else was first: keep their name and time, tell this admin who it was
+        return JSONResponse(status_code=409, content={
+            "error": "AlreadyAcknowledged", "alert_id": alert_id,
+            "acknowledged_by": row.get("acknowledged_by"), "acknowledged_at": row.get("acknowledged_at"),
+            "message": f"Already acknowledged by {row.get('acknowledged_by') or 'someone else'}"})
+    # recorded under the signed-in admin's own name (a typed name could be anybody's)
+    from middleware.auth import session_admin
+    me = session_admin(request.headers.get("authorization"))
+    who = (me or {}).get("name") or body.acknowledged_by
+    ok = await escalation.acknowledge(alert_id, f"{who} (dashboard)")
     if not ok:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Alert {alert_id} not found or already acknowledged",
-        )
-    return {"status": "acknowledged", "alert_id": alert_id}
+        latest = database.get_alert(alert_id) or {}
+        return JSONResponse(status_code=409, content={
+            "error": "AlreadyAcknowledged", "alert_id": alert_id,
+            "acknowledged_by": latest.get("acknowledged_by"), "acknowledged_at": latest.get("acknowledged_at"),
+            "message": f"Already acknowledged by {latest.get('acknowledged_by') or 'someone else'}"})
+    if me:
+        from utils.activity_logger import log_activity
+        log_activity(me["id"], "acknowledge_alert", "alert", f"alert:{alert_id} {row.get('parameter')}", row.get("company_id"))
+    return {"status": "acknowledged", "alert_id": alert_id, "acknowledged_by": f"{who} (dashboard)"}
 
 
 _VALID_PERIODS = {"1h", "24h", "7d", "30d", "all"}
@@ -175,6 +189,16 @@ async def delete_alerts(
         label   = _PERIOD_LABELS[period]
         msg     = f"{deleted} alert{'s' if deleted != 1 else ''} deleted ({label})"
         logger.info("DELETE /api/alerts: %s", msg)
+        try:   # with several admins, the company must be able to see who removed alert history
+            from middleware.auth import session_admin
+            from utils.activity_logger import log_activity
+            from services import company_log
+            me = session_admin(request.headers.get("authorization")) or {}
+            if me:
+                log_activity(me["id"], "delete_alerts", "alert", msg, company_id)
+                company_log.log(company_id, f"{me['name']}: {msg}")
+        except Exception as exc:
+            logger.warning("DELETE /api/alerts: could not record who deleted: %s", exc)
         return {
             "deleted": deleted,
             "period":  period,
@@ -206,6 +230,8 @@ async def get_subscriber_alerts(
 ):
     sub = database.get_subscriber_by_id(sub_session["subscriber_id"])
     company_id = sub.get("company_id") if sub else None
+    if company_id is None:          # a person with no company must never be shown every company's alerts
+        return []
     offset = (page - 1) * limit
     rows = database.get_recent_alerts(limit=limit, offset=offset, company_id=company_id)
     result = []
@@ -242,7 +268,17 @@ async def subscriber_acknowledge_alert(
     request: Request,
     sub_session: dict = Depends(require_subscriber_auth),
 ):
-    ok = await escalation.acknowledge(alert_id, f"{body.acknowledged_by} (app)")
+    # A person may only acknowledge their OWN company's alerts (same answer as "not found",
+    # so alert numbers of other companies cannot be probed).
+    sub = database.get_subscriber_by_id(sub_session["subscriber_id"])
+    rows = execute_read("SELECT company_id FROM alerts WHERE id = %s", (alert_id,))
+    if not sub or sub.get("company_id") is None or not rows or rows[0].get("company_id") != sub.get("company_id"):
+        raise HTTPException(
+            status_code=404,
+            detail=f"Alert {alert_id} not found or already acknowledged",
+        )
+    who = sub_session.get("name") or body.acknowledged_by     # the signed-in person, not a typed name
+    ok = await escalation.acknowledge(alert_id, f"{who} (app)")
     if not ok:
         raise HTTPException(
             status_code=404,

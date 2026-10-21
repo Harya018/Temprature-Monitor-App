@@ -11,7 +11,7 @@ from utils.logger import get_logger
 logger = get_logger(__name__)
 
 
-def get_ack_log(limit: int = 100) -> list:
+def get_ack_log(limit: int = 100, company_id: int | None = None) -> list:
     """
     Return recent acknowledged alerts with response_time_seconds computed.
     response_time_seconds = (acknowledged_at - timestamp) in seconds.
@@ -44,10 +44,11 @@ def get_ack_log(limit: int = 100) -> list:
             WHERE acknowledged = 1
               AND acknowledged_at IS NOT NULL
               AND acknowledged_by IS NOT NULL
+              AND (%s::int IS NULL OR company_id = %s::int)
             ORDER BY acknowledged_at DESC
             LIMIT %s
             """,
-            (limit,),
+            (company_id, company_id, limit),
         )
         return rows
     except Exception as exc:

@@ -21,6 +21,7 @@ import { VolumeX } from 'lucide-react'
 
 import useWebSocket  from './hooks/useWebSocket.js'
 import useAudioAlarm from './hooks/useAudioAlarm.js'
+import useAdminIdentity from './hooks/useAdminIdentity.js'
 import { ToastContainer, useToast } from './components/shared/Toast.jsx'
 import { fetchHealth } from './services/api.js'
 
@@ -376,13 +377,16 @@ function SubAdminProtected({ children }) {
 
 // ── Layout wrapper ────────────────────────────────────────────────────────────
 function SubAdminLayout({ children, connectionStatus, unreadCount }) {
+  const me = useAdminIdentity()
   return (
     <div style={{ display: 'flex', minHeight: '100vh' }}>
       <SubAdminSidebar unreadCount={unreadCount} />
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', marginLeft: 240 }}>
         <header className="flex items-center justify-between px-6 bg-white border-b border-gray-100"
                 style={{ height: 64, position: 'sticky', top: 0, zIndex: 40, flexShrink: 0 }}>
-          <span className="text-sm font-bold text-gray-700">Sub-Admin Dashboard</span>
+          <span className="text-sm font-bold text-gray-700 truncate">
+            {me?.company_name ? `${me.company_name} — Sub-Admin Dashboard` : 'Sub-Admin Dashboard'}
+          </span>
           <span className={`text-xs font-bold px-2 py-1 rounded-full ${
             connectionStatus === 'LIVE' ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'
           }`}>
@@ -399,6 +403,11 @@ function SubAdminLayout({ children, connectionStatus, unreadCount }) {
 
 // ── Root sub-admin app ────────────────────────────────────────────────────────
 export default function SubAdminApp() {
+  // Hold routing until an impersonation code is redeemed; otherwise
+  // SubAdminProtected redirects first and strips imp_code from the URL.
+  const [impPending, setImpPending] = useState(
+    () => new URLSearchParams(window.location.search).has('imp_code')
+  )
   const [alertCount, setAlertCount] = useState(0)
   const [health,     setHealth]     = useState(null)
   const [thresholds, setThresholds] = useState(null)
@@ -435,6 +444,7 @@ export default function SubAdminApp() {
         // Code was invalid or already used — leave auth state empty so the
         // normal login page renders instead of an authenticated shell.
       })
+      .finally(() => setImpPending(false))
   }, [])
 
   useEffect(() => {
@@ -466,7 +476,10 @@ export default function SubAdminApp() {
   useEffect(() => {
     loadHealth()
     const t = setInterval(loadHealth, 30000)
-    return () => clearInterval(t)
+    // Refresh straight away when the user comes back to the tab
+    const onVisible = () => { if (document.visibilityState === 'visible') loadHealth() }
+    document.addEventListener('visibilitychange', onVisible)
+    return () => { clearInterval(t); document.removeEventListener('visibilitychange', onVisible) }
   }, [loadHealth])
 
   const protect = (page) => (
@@ -484,6 +497,14 @@ export default function SubAdminApp() {
       </SubAdminLayout>
     </SubAdminProtected>
   )
+
+  if (impPending) {
+    return (
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: '100vh', color: '#6B7280', fontSize: 14 }}>
+        Signing in as admin…
+      </div>
+    )
+  }
 
   return (
     <>

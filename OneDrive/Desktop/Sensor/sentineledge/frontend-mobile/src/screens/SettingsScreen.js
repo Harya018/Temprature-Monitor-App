@@ -16,7 +16,7 @@ import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
 import { useFocusEffect } from '@react-navigation/native';
 
-import { API_BASE, WS_URL } from '../config/config';
+import { serverBase, serverLabel } from '../config/config';
 import { clearSession, getSession } from '../services/auth';
 import { deregisterPushToken } from '../services/pushTokenService';
 import { useWebSocket } from '../hooks/useWebSocket';
@@ -36,12 +36,16 @@ const SettingsRow = ({ icon, label, value, valueColor, iconColor = '#818CF8' }) 
 const SettingsScreen = ({ navigation }) => {
   const { connected } = useWebSocket();
   const [username, setUsername] = React.useState('');
+  const [company, setCompany] = React.useState('');
+  const [kind, setKind] = React.useState('subscriber');
 
   useFocusEffect(
     useCallback(() => {
       (async () => {
         const session = await getSession();
         setUsername(session.username || 'Unknown');
+        setCompany(session.company || '');
+        setKind(session.kind || 'subscriber');
       })();
     }, [])
   );
@@ -57,8 +61,8 @@ const SettingsScreen = ({ navigation }) => {
           style: 'destructive',
           onPress: async () => {
             const session = await getSession();
-            if (session?.token) {
-              deregisterPushToken(session.token, API_BASE.replace('/api', '')).catch(() => {});
+            if (session?.token && session.kind !== 'admin') {
+              deregisterPushToken(session.token, serverBase()).catch(() => {});
             }
             await clearSession();
             navigation.replace('Login');
@@ -87,7 +91,7 @@ const SettingsScreen = ({ navigation }) => {
                 </View>
                 <View>
                   <Text style={styles.usernameText}>{username}</Text>
-                  <Text style={styles.roleText}>Authorized Worker</Text>
+                  <Text style={styles.roleText}>{company ? `${company} · ` : ''}{kind === 'admin' ? 'Company admin' : 'Alert recipient'}</Text>
                 </View>
               </View>
             </View>
@@ -99,15 +103,8 @@ const SettingsScreen = ({ navigation }) => {
             <View style={styles.card}>
               <SettingsRow
                 icon="server-outline"
-                label="API Server"
-                value={API_BASE}
-                iconColor="#6366F1"
-              />
-              <View style={styles.divider} />
-              <SettingsRow
-                icon="wifi-outline"
-                label="WebSocket URL"
-                value={WS_URL}
+                label="Server (change it by signing out)"
+                value={serverLabel()}
                 iconColor="#6366F1"
               />
               <View style={styles.divider} />

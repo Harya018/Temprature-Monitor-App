@@ -3,7 +3,9 @@
  * Threshold config, demo controls (CSV playback), and admin info.
  */
 import { useState, useEffect, useCallback, useRef, memo } from 'react'
-import { Settings2, RotateCcw, Database, Info, Server, RefreshCw, Mail, CheckCircle, MessageSquare, Smartphone, PlusCircle, Trash2, Eye, EyeOff, Bell, BellOff } from 'lucide-react'
+import { Settings2, RotateCcw, Database, Info, Server, RefreshCw, Mail, CheckCircle, MessageSquare, Smartphone, PlusCircle, Trash2, Eye, EyeOff, Bell, BellOff, Building2 } from 'lucide-react'
+import useAdminIdentity, { refreshAdminIdentity } from '../hooks/useAdminIdentity.js'
+import useCompanyParameters from '../hooks/useCompanyParameters.js'
 import {
   fetchThresholds, updateThresholds, resetThresholds,
   createBackup, fetchHealth, fetchAlertSettings, updateAlertSettings,
@@ -23,17 +25,92 @@ function _bearerHeaders(extra = {}) {
   }
 }
 
-function maskEmail(email) {
-  if (!email) return '—'
-  const at = email.indexOf('@')
-  if (at < 0) return email
-  const local = email.slice(0, at)
-  const domain = email.slice(at)
-  const shown = local.slice(0, Math.min(2, local.length))
-  return shown + '•'.repeat(Math.max(3, local.length - shown.length)) + domain
+function timeSince(isoStr) {
+  if (!isoStr) return null
+  try {
+    const secs = Math.floor((Date.now() - new Date(isoStr).getTime()) / 1000)
+    if (secs < 5)  return 'just now'
+    if (secs < 60) return `${secs}s ago`
+    const mins = Math.floor(secs / 60)
+    if (mins < 60) return `${mins}m ago`
+    return `${Math.floor(mins / 60)}h ago`
+  } catch { return null }
+}
+
+/* On/off switch used by the two live-source panels */
+function SwitchBtn({ on, onClick, disabled }) {
+  return (
+    <button
+      type="button" onClick={onClick} disabled={disabled}
+      aria-pressed={on} title={on ? 'Switch off' : 'Switch on'}
+      style={{
+        width: 44, height: 24, borderRadius: 99, border: 'none', position: 'relative', flexShrink: 0,
+        background: on ? '#10B981' : '#D1D5DB', cursor: disabled ? 'wait' : 'pointer',
+        opacity: disabled ? 0.6 : 1, transition: 'background 0.2s',
+      }}
+    >
+      <span style={{
+        position: 'absolute', top: 3, left: on ? 23 : 3, width: 18, height: 18, borderRadius: '50%',
+        background: '#fff', transition: 'left 0.2s', boxShadow: '0 1px 3px rgba(0,0,0,0.2)',
+      }} />
+    </button>
+  )
+}
+
+/* Requests this company sent to the Super Admin, with their outcome. */
+const REQ_STATUS = {
+  pending:  { bg: '#FFFBEB', fg: '#92400E', label: 'Pending'  },
+  approved: { bg: '#ECFDF5', fg: '#065F46', label: 'Approved' },
+  rejected: { bg: '#FEF2F2', fg: '#991B1B', label: 'Rejected' },
+}
+
+function ApprovalRequests({ refreshKey }) {
+  const [rows, setRows] = useState(null)
+
+  const load = useCallback(async () => {
+    try {
+      const res = await fetch('/api/admin/approvals', { headers: _bearerHeaders() })
+      setRows(res.ok ? await res.json() : [])
+    } catch { setRows([]) }
+  }, [])
+
+  useEffect(() => { load() }, [load, refreshKey])
+  useEffect(() => { const t = setInterval(load, 30000); return () => clearInterval(t) }, [load])
+
+  if (!rows || rows.length === 0) return null
+  return (
+    <div style={{ marginTop: 16 }}>
+      <p style={{ fontSize: 12, fontWeight: 600, color: '#374151', marginBottom: 8 }}>Requests to Super Admin</p>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+        {rows.slice(0, 10).map(r => {
+          const st = REQ_STATUS[r.status] || REQ_STATUS.pending
+          const what = r.action_type === 'delete_parameter' ? 'Delete' : 'Add'
+          return (
+            <div key={r.id} style={{
+              display: 'flex', alignItems: 'center', gap: 10, padding: '8px 12px',
+              borderRadius: 8, border: '1px solid #E5E7EB', fontSize: 12,
+            }}>
+              <span style={{ background: st.bg, color: st.fg, fontWeight: 600, borderRadius: 999, padding: '2px 8px', flexShrink: 0 }}>
+                {st.label}
+              </span>
+              <span style={{ color: '#111827', fontWeight: 500 }}>{what} parameter “{r.parameter_name || '—'}”</span>
+              <span style={{ color: '#9CA3AF', marginLeft: 'auto', textAlign: 'right' }}>
+                {r.status === 'pending'
+                  ? `requested ${timeSince(r.created_at) || ''}`
+                  : `${r.reviewed_by ? `by ${r.reviewed_by} ` : ''}${timeSince(r.reviewed_at) || ''}`}
+                {r.review_note ? ` — “${r.review_note}”` : ''}
+              </span>
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
 }
 
 function Section({ title, icon: Icon, children }) {
+  const me = useAdminIdentity()
+  const readOnly = me?.role === 'sub'          // a sub-admin can look, not change
   return (
     <div className="card">
       <div className="flex items-center gap-2.5 px-5 py-4 border-b border-gray-100">
@@ -41,8 +118,9 @@ function Section({ title, icon: Icon, children }) {
           <Icon size={15} className="text-purple-600" />
         </div>
         <h3 className="text-sm font-semibold text-gray-800">{title}</h3>
+        {readOnly && <span className="ml-auto text-[11px] font-semibold px-2 py-0.5 rounded-full bg-gray-100 text-gray-500">Read-only</span>}
       </div>
-      <div className="p-5">{children}</div>
+      <fieldset disabled={readOnly} className="p-5" style={{ border: 0, margin: 0, minWidth: 0 }}>{children}</fieldset>
     </div>
   )
 }
@@ -285,6 +363,658 @@ const AddParameterForm = memo(function AddParameterForm({ onToast, onAdded }) {
   )
 })
 
+/**
+ * Parameter limits & alerts — one row per parameter THIS company has (temperature, pH,
+ * pressure, …). Nothing is shown for parameters the company does not have.
+ */
+function ParameterLimitsSection({ params, onSaved, addToast }) {
+  const [edit, setEdit] = useState({})
+  const [saving, setSaving] = useState(null)
+  const [testing, setTesting] = useState(null)
+
+  const sendTest = async (p) => {
+    if (!window.confirm(`Send a TEST alert for ${p.name}?\n\nThis is a REAL alert: it is saved, shown on the dashboard and sent by SMS / e-mail / app to your company's subscribers.`)) return
+    setTesting(p.id)
+    try {
+      const res = await fetch(`/api/admin/parameters/${p.id}/test-alert`, { method: 'POST', headers: _bearerHeaders() })
+      const d = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(d.error || d.detail || `Error ${res.status}`)
+      addToast({ type: 'success', message: `Test alert #${d.alert_id} sent: ${d.parameter} ${d.value} (${d.direction} limit ${d.limit}) — ${d.subscribers} subscriber(s) notified` })
+    } catch (err) {
+      addToast({ type: 'error', message: err.message })
+    } finally { setTesting(null) }
+  }
+
+  useEffect(() => {
+    const e = {}
+    for (const p of params) {
+      e[p.id] = { min: p.min_value ?? '', max: p.max_value ?? '', on: p.alerts_enabled !== false }
+    }
+    setEdit(e)
+  }, [params])
+
+  const save = async (p) => {
+    const v = edit[p.id] || {}
+    const min = v.min === '' ? null : Number(v.min)
+    const max = v.max === '' ? null : Number(v.max)
+    if (min != null && max != null && min >= max) {
+      addToast({ type: 'error', message: `${p.name}: minimum must be lower than maximum` }); return
+    }
+    setSaving(p.id)
+    try {
+      const res = await fetch(`/api/admin/parameters/${p.id}/limits`, {
+        method: 'PUT', headers: _bearerHeaders(),
+        body: JSON.stringify({ min_value: min, max_value: max, alerts_enabled: !!v.on }),
+      })
+      const d = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(d.error || d.detail || `Error ${res.status}`)
+      addToast({ type: 'success', message: `${p.name}: saved (${min ?? '—'} – ${max ?? '—'}, alerts ${v.on ? 'on' : 'off'})` })
+      onSaved && onSaved()
+    } catch (err) {
+      addToast({ type: 'error', message: err.message })
+    } finally { setSaving(null) }
+  }
+
+  if (!params.length) {
+    return (
+      <Section title="Parameter limits & alerts" icon={Settings2}>
+        <p className="text-sm text-gray-500">
+          Your company has no approved parameters yet. Request one below under <strong>Add Parameter</strong> —
+          its settings appear here once Super Admin approves it.
+        </p>
+      </Section>
+    )
+  }
+  return (
+    <Section title="Parameter limits & alerts" icon={Settings2}>
+      <div className="space-y-3">
+        <p className="text-xs text-gray-500 leading-relaxed">
+          An alert fires when a reading goes below the minimum or above the maximum. Switching alerts off stops
+          notifications (SMS, e-mail, app) for that parameter only — readings are still recorded.
+        </p>
+        {params.map(p => {
+          const v = edit[p.id] || { min: '', max: '', on: true }
+          return (
+            <div key={p.id} className="rounded-xl border border-gray-200 bg-gray-50 p-3 flex flex-wrap items-end gap-3">
+              <div className="min-w-[140px]">
+                <p className="text-sm font-semibold text-gray-800">{p.name}</p>
+                <p className="text-xs text-gray-500">{p.unit || '—'}</p>
+              </div>
+              <label className="flex flex-col gap-1 text-xs text-gray-600">Minimum
+                <input type="number" step="any" className="form-input text-xs" style={{ width: 110 }}
+                  value={v.min} onChange={e => setEdit(s => ({ ...s, [p.id]: { ...v, min: e.target.value } }))} />
+              </label>
+              <label className="flex flex-col gap-1 text-xs text-gray-600">Maximum
+                <input type="number" step="any" className="form-input text-xs" style={{ width: 110 }}
+                  value={v.max} onChange={e => setEdit(s => ({ ...s, [p.id]: { ...v, max: e.target.value } }))} />
+              </label>
+              <div className="flex flex-col gap-1 text-xs text-gray-600">Alerts
+                <SwitchBtn on={!!v.on} onClick={() => setEdit(s => ({ ...s, [p.id]: { ...v, on: !v.on } }))} />
+              </div>
+              <button className="btn btn-primary btn-sm" disabled={saving === p.id} onClick={() => save(p)}>
+                {saving === p.id ? 'Saving…' : 'Save'}
+              </button>
+              <button className="btn btn-sm" disabled={testing === p.id} onClick={() => sendTest(p)}
+                title="Sends a real alert to your company's subscribers"
+                style={{ background: '#0891B2', color: '#fff', border: 'none' }}>
+                {testing === p.id ? 'Sending…' : 'Send test alert'}
+              </button>
+            </div>
+          )
+        })}
+      </div>
+    </Section>
+  )
+}
+
+
+/**
+ * Alert messages — for each parameter THIS company has, one form for the SMS and one for the e-mail.
+ * The text uses {placeholders} that are filled in when the alert is sent. Empty = standard message.
+ */
+const MSG_FIELDS = [
+  ['name', 'person who gets it'], ['company', 'company name'], ['parameter', 'e.g. pH'], ['unit', 'e.g. C, pH'],
+  ['value', 'reading'], ['limit', 'limit crossed'], ['direction', 'above / below'], ['severity', 'WARNING…'],
+  ['time', 'when (IST)'], ['min', 'allowed minimum'], ['max', 'allowed maximum'],
+]
+const SMS_EXAMPLE = '{company}: {parameter} is {value}{unit}, {direction} the limit {limit}{unit}. {time}'
+const MAIL_SUBJECT_EXAMPLE = '[{severity}] {parameter} is {direction} the limit - {company}'
+const MAIL_BODY_EXAMPLE =
+  'Hello {name},\n\n{parameter} reached {value} {unit} at {time}.\n' +
+  'The allowed range is {min} to {max} {unit}; the limit that was crossed is {limit} {unit}.\n\n' +
+  'Please check the plant and acknowledge the alert on the dashboard.\n\n- {company}'
+
+function Chips({ onPick }) {
+  return (
+    <div className="flex flex-wrap gap-1">
+      {MSG_FIELDS.map(([k, hint]) => (
+        <button key={k} type="button" title={hint} onClick={() => onPick(`{${k}}`)}
+          className="text-[11px] px-1.5 py-0.5 rounded border border-gray-300 bg-white text-gray-600 hover:bg-violet-50 hover:border-violet-300">
+          {`{${k}}`}
+        </button>
+      ))}
+    </div>
+  )
+}
+
+function AlertMessagesSection({ params, onSaved, addToast }) {
+  const [edit, setEdit] = useState({})
+  const [busy, setBusy] = useState(null)
+  const [prev, setPrev] = useState({})
+  const fieldRefs = useRef({})
+  const lastServer = useRef({})
+  const lastField = useRef({})        // which e-mail box (subject / body) was used last, per parameter
+
+  useEffect(() => {
+    setEdit(old => {
+      const next = { ...old }
+      for (const p of params) {
+        const server = { sms: p.sms_template || '', subject: p.email_subject || '', body: p.email_body || '' }
+        const before = lastServer.current[p.id]
+        if (!before || before.sms !== server.sms || before.subject !== server.subject || before.body !== server.body) {
+          next[p.id] = server          // new from the server (first load, or just saved)
+          lastServer.current[p.id] = server
+        }
+      }
+      return next
+    })
+  }, [params])
+
+  const set = (id, field, value) => setEdit(s => ({ ...s, [id]: { ...(s[id] || {}), [field]: value } }))
+  const insert = (id, field, token) => {
+    const el = fieldRefs.current[`${id}:${field}`]
+    const cur = (edit[id] || {})[field] || ''
+    if (!el) { set(id, field, cur + token); return }
+    const a = el.selectionStart ?? cur.length, b = el.selectionEnd ?? cur.length
+    set(id, field, cur.slice(0, a) + token + cur.slice(b))
+    setTimeout(() => { el.focus(); el.setSelectionRange(a + token.length, a + token.length) }, 0)
+  }
+
+  const call = async (p, path, method, body) => {
+    const res = await fetch(`/api/admin/parameters/${p.id}/${path}`, { method, headers: _bearerHeaders(), body: JSON.stringify(body) })
+    const d = await res.json().catch(() => ({}))
+    if (!res.ok) throw new Error(d.error || d.detail || `Error ${res.status}`)
+    return d
+  }
+  const bodyFor = (v, kind) => (kind === 'sms'
+    ? { sms_template: v.sms || '' }
+    : { email_subject: v.subject || '', email_body: v.body || '' })
+
+  const save = async (p, kind) => {
+    const v = edit[p.id] || {}
+    setBusy(`${p.id}:${kind}`)
+    try {
+      await call(p, 'messages', 'PUT', bodyFor(v, kind))
+      const empty = !((kind === 'sms' ? v.sms : `${v.subject || ''}${v.body || ''}`) || '').trim()
+      addToast({ type: 'success', message: `${p.name}: ${kind === 'sms' ? 'SMS' : 'e-mail'} wording saved${empty ? ' (standard message)' : ''}` })
+      lastServer.current[p.id] = undefined      // re-read what the server now holds
+      onSaved && onSaved()
+    } catch (err) { addToast({ type: 'error', message: err.message }) } finally { setBusy(null) }
+  }
+  const preview = async (p, kind) => {
+    const v = edit[p.id] || {}
+    setBusy(`${p.id}:${kind}:p`)
+    try {
+      const d = await call(p, 'messages/preview', 'POST', bodyFor(v, kind))
+      setPrev(s => ({ ...s, [`${p.id}:${kind}`]: d }))
+    } catch (err) { addToast({ type: 'error', message: err.message }) } finally { setBusy(null) }
+  }
+
+  if (!params.length) return null
+  const box = { border: '1px solid #E5E7EB', borderRadius: 12, background: '#fff', padding: 12 }
+  return (
+    <Section title="Alert messages (SMS and e-mail)" icon={MessageSquare}>
+      <div className="space-y-4">
+        <p className="text-xs text-gray-500 leading-relaxed">
+          Write what your people receive when a parameter goes out of range. Each parameter has its own SMS and its own
+          e-mail. Click a placeholder such as <code>{'{value}'}</code> to insert it; it is replaced by the real value when the
+          alert is sent. Leave a box empty to keep the standard message. An SMS is cut at 160 characters (one message).
+        </p>
+        {params.map(p => {
+          const v = edit[p.id] || { sms: '', subject: '', body: '' }
+          const ps = prev[`${p.id}:sms`], pm = prev[`${p.id}:email`]
+          const smsLen = (v.sms || '').length
+          return (
+            <div key={p.id} className="rounded-xl border border-gray-200 bg-gray-50 p-3 space-y-3">
+              <p className="text-sm font-semibold text-gray-800">{p.name} <span className="text-xs font-normal text-gray-500">{p.unit ? `(${p.unit})` : ''}</span></p>
+
+              {/* ── SMS form ── */}
+              <div style={box} className="space-y-2">
+                <p className="text-xs font-semibold text-gray-700 flex items-center gap-1.5"><Smartphone size={13} /> SMS for {p.name}</p>
+                <textarea ref={el => { fieldRefs.current[`${p.id}:sms`] = el }} rows={3} maxLength={300} className="form-input text-xs w-full"
+                  placeholder="Standard SMS (leave empty), or type your own text"
+                  value={v.sms} onChange={e => set(p.id, 'sms', e.target.value)} />
+                <Chips onPick={t => insert(p.id, 'sms', t)} />
+                <div className="flex flex-wrap items-center gap-2">
+                  <button className="btn btn-primary btn-sm" disabled={busy === `${p.id}:sms`} onClick={() => save(p, 'sms')}>
+                    {busy === `${p.id}:sms` ? 'Saving…' : 'Save SMS'}
+                  </button>
+                  <button className="btn btn-sm" disabled={busy === `${p.id}:sms:p`} onClick={() => preview(p, 'sms')}>Preview</button>
+                  <button className="btn btn-sm" onClick={() => set(p.id, 'sms', SMS_EXAMPLE)}>Use example</button>
+                  <button className="btn btn-sm" onClick={() => set(p.id, 'sms', '')}>Standard message</button>
+                  <span className="text-xs ml-auto" style={{ color: smsLen > 160 ? '#B45309' : '#6B7280' }}>
+                    {smsLen} typed{smsLen > 160 ? ' (the sent SMS is cut at 160)' : ''}
+                  </span>
+                </div>
+                {ps && (
+                  <div className="rounded-lg bg-gray-50 border border-gray-200 p-2 text-xs text-gray-700 whitespace-pre-wrap">
+                    {ps.sms ? <>{ps.sms}<div className="text-gray-400 mt-1">{ps.sms_length} characters · example values</div></> : 'The standard SMS will be sent.'}
+                  </div>
+                )}
+              </div>
+
+              {/* ── E-mail form ── */}
+              <div style={box} className="space-y-2">
+                <p className="text-xs font-semibold text-gray-700 flex items-center gap-1.5"><Mail size={13} /> E-mail for {p.name}</p>
+                <input ref={el => { fieldRefs.current[`${p.id}:subject`] = el }} maxLength={150} className="form-input text-xs w-full"
+                  placeholder="Subject (leave empty for the standard subject)"
+                  onFocus={() => { lastField.current[p.id] = 'subject' }}
+                  value={v.subject} onChange={e => set(p.id, 'subject', e.target.value)} />
+                <textarea ref={el => { fieldRefs.current[`${p.id}:body`] = el }} rows={7} maxLength={3000} className="form-input text-xs w-full"
+                  placeholder="E-mail text (leave empty for the standard e-mail)"
+                  onFocus={() => { lastField.current[p.id] = 'body' }}
+                  value={v.body} onChange={e => set(p.id, 'body', e.target.value)} />
+                <p className="text-[11px] text-gray-500">A placeholder goes into the box you clicked last (subject or text).</p>
+                <Chips onPick={t => insert(p.id, lastField.current[p.id] || 'body', t)} />
+                <div className="flex flex-wrap items-center gap-2">
+                  <button className="btn btn-primary btn-sm" disabled={busy === `${p.id}:email`} onClick={() => save(p, 'email')}>
+                    {busy === `${p.id}:email` ? 'Saving…' : 'Save e-mail'}
+                  </button>
+                  <button className="btn btn-sm" disabled={busy === `${p.id}:email:p`} onClick={() => preview(p, 'email')}>Preview</button>
+                  <button className="btn btn-sm" onClick={() => { set(p.id, 'subject', MAIL_SUBJECT_EXAMPLE); set(p.id, 'body', MAIL_BODY_EXAMPLE) }}>Use example</button>
+                  <button className="btn btn-sm" onClick={() => { set(p.id, 'subject', ''); set(p.id, 'body', '') }}>Standard e-mail</button>
+                </div>
+                {pm && (
+                  <div className="rounded-lg bg-gray-50 border border-gray-200 p-2 text-xs text-gray-700">
+                    <p className="font-semibold">{pm.email_subject || 'Standard subject'}</p>
+                    <p className="whitespace-pre-wrap mt-1">{pm.email_body || 'The standard e-mail will be sent.'}</p>
+                    <p className="text-gray-400 mt-1">example values</p>
+                  </div>
+                )}
+              </div>
+            </div>
+          )
+        })}
+        <p className="text-xs text-gray-400">Tip: press <strong>Send test alert</strong> above to receive the real message on your own phone and e-mail.</p>
+      </div>
+    </Section>
+  )
+}
+
+
+/**
+ * E-mail account for alerts — the company's own mailbox. Alert e-mails and the daily report are sent
+ * from it. The password is stored encrypted on the server and is never shown again.
+ */
+const MAIL_STEPS = {
+  gmail: {
+    title: 'Gmail / Google Workspace — how to get the app password',
+    steps: [
+      'Open myaccount.google.com and sign in with the Gmail address the alerts should be sent from.',
+      'Go to Security and turn on "2-Step Verification" (Google only offers app passwords when it is on).',
+      'Open myaccount.google.com/apppasswords (or type "App passwords" in the search box of your Google account).',
+      'Type a name such as SentinelEdge and press Create.',
+      'Google shows a 16-letter password. Copy it (spaces do not matter) and paste it into "App password" above. It is shown only once.',
+      'Press Save, then "Send test e-mail".',
+    ],
+    notes: [
+      'Use the APP password, never your normal Gmail password.',
+      'Google Workspace (company) accounts: if "App passwords" is missing, your administrator has switched it off — ask them to allow it.',
+      'Gmail sends up to about 500 e-mails a day, which is plenty for alerts.',
+    ],
+  },
+  outlook: {
+    title: 'Outlook.com / Hotmail — how to get the app password',
+    steps: [
+      'Sign in at account.microsoft.com and open Security, then "Advanced security options".',
+      'Turn on "Two-step verification".',
+      'Under "App passwords" choose "Create a new app password".',
+      'Copy the password that is shown and paste it into "App password" above (it is shown only once).',
+      'Use your full Outlook / Hotmail address as the e-mail address, press Save, then "Send test e-mail".',
+    ],
+    notes: ['Use the app password, not your normal Microsoft password.'],
+  },
+  office365: {
+    title: 'Microsoft 365 (work account) — what to ask your IT administrator',
+    steps: [
+      'Use your work e-mail address as the e-mail address.',
+      'Ask your IT administrator to allow "Authenticated SMTP" (SMTP AUTH) for that mailbox in the Microsoft 365 admin centre.',
+      'If two-step verification is on for the mailbox, ask them for an app password and use it as the password.',
+      'Press Save, then "Send test e-mail".',
+    ],
+    notes: ['Some organisations have switched off password sign-in for mail programs. If so, this will not work: use a Gmail or other account for alerts instead.'],
+  },
+  yahoo: {
+    title: 'Yahoo Mail — how to get the app password',
+    steps: [
+      'Sign in at Yahoo and open Account Info, then "Account security".',
+      'Turn on two-step verification.',
+      'Choose "Generate app password", name it SentinelEdge and press Generate.',
+      'Copy the password and paste it into "App password" above, press Save, then "Send test e-mail".',
+    ],
+    notes: ['Use the app password, not your normal Yahoo password.'],
+  },
+  other: {
+    title: 'Another e-mail provider — what you need',
+    steps: [
+      'Ask your IT department or e-mail provider for the "outgoing mail (SMTP)" details: the server name, the port and the password to use.',
+      'The port is usually 587 with STARTTLS, or 465 with SSL. Choose it in the boxes above.',
+      'Enter the server, the port and the security, your e-mail address and the password.',
+      'Press Save, then "Send test e-mail".',
+    ],
+    notes: ['Only secure connections (STARTTLS or SSL) are allowed.'],
+  },
+}
+
+function EmailAccountSection({ addToast }) {
+  const [info, setInfo] = useState(null)
+  const [form, setForm] = useState({ provider: 'gmail', email: '', password: '', host: '', port: 587, security: 'starttls', from_name: '' })
+  const [show, setShow] = useState(false)
+  const [busy, setBusy] = useState(null)
+  const [testTo, setTestTo] = useState('')
+  const [result, setResult] = useState(null)
+
+  const load = useCallback(async () => {
+    try {
+      const res = await fetch('/api/admin/email-account', { headers: _bearerHeaders() })
+      if (!res.ok) return
+      const d = await res.json()
+      setInfo(d)
+      if (d.configured) {
+        setForm(f => ({ ...f, provider: d.provider, email: d.email, host: d.provider === 'other' ? d.host : '', port: d.port, security: d.security, from_name: d.from_name || '', password: '' }))
+      }
+    } catch { /* silent */ }
+  }, [])
+  useEffect(() => { load() }, [load])
+
+  const set = (k, v) => setForm(f => ({ ...f, [k]: v }))
+  const api = async (path, method, body) => {
+    const res = await fetch(path, { method, headers: _bearerHeaders(), body: body ? JSON.stringify(body) : undefined })
+    const d = await res.json().catch(() => ({}))
+    if (!res.ok) throw Object.assign(new Error(d.error || d.detail || `Error ${res.status}`), { data: d })
+    return d
+  }
+
+  const save = async () => {
+    setBusy('save'); setResult(null)
+    try {
+      await api('/api/admin/email-account', 'PUT', {
+        provider: form.provider, email: form.email, password: form.password || null,
+        host: form.provider === 'other' ? form.host : null, port: form.provider === 'other' ? Number(form.port) : null,
+        security: form.security, from_name: form.from_name || null,
+      })
+      addToast({ type: 'success', message: 'E-mail account saved. Press "Send test e-mail" to check it.' })
+      setForm(f => ({ ...f, password: '' })); setShow(false)
+      await load()
+    } catch (err) { addToast({ type: 'error', message: err.message }) } finally { setBusy(null) }
+  }
+  const test = async () => {
+    setBusy('test'); setResult(null)
+    try {
+      const d = await api('/api/admin/email-account/test', 'POST', { to: testTo || null })
+      setResult({ ok: true, text: `Test e-mail sent to ${d.to}. Check that inbox (and the spam folder).` })
+    } catch (err) { setResult({ ok: false, text: err.message }) } finally { setBusy(null); load() }
+  }
+  const remove = async () => {
+    if (!window.confirm('Remove this e-mail account?\n\nThe saved password is deleted and NO alert e-mails are sent until you add an account again.')) return
+    setBusy('remove')
+    try { await api('/api/admin/email-account', 'DELETE'); setForm(f => ({ ...f, email: '', password: '' })); setResult(null); await load(); addToast({ type: 'success', message: 'E-mail account removed' }) }
+    catch (err) { addToast({ type: 'error', message: err.message }) } finally { setBusy(null) }
+  }
+
+  const providers = info?.providers || {}
+  const steps = MAIL_STEPS[form.provider] || MAIL_STEPS.other
+  const configured = !!info?.configured
+  return (
+    <Section title="E-mail account for alerts" icon={Mail}>
+      <div className="space-y-4">
+        <div className="rounded-lg p-3 text-xs leading-relaxed"
+          style={{ background: configured ? (info.last_status === 'failed' ? '#FEF2F2' : '#ECFDF5') : '#FFFBEB', border: '1px solid ' + (configured ? (info.last_status === 'failed' ? '#FECACA' : '#A7F3D0') : '#FDE68A') }}>
+          {configured ? (
+            <>
+              <p className="font-semibold text-gray-800">Alerts and the daily report are sent from <span style={{ color: '#7C3AED' }}>{info.email}</span></p>
+              {!info.password_ok && <p className="text-red-700 mt-1">The saved password can no longer be read on this computer. Type the app password again and press Save.</p>}
+              {info.last_status === 'ok' && <p className="text-emerald-700 mt-1">Last e-mail sent successfully{info.last_at ? ` (${utcToIST ? utcToIST(info.last_at) : info.last_at})` : ''}.</p>}
+              {info.last_status === 'failed' && <p className="text-red-700 mt-1">Last e-mail failed: {info.last_error}</p>}
+              {!info.last_status && <p className="text-gray-500 mt-1">Not used yet — press "Send test e-mail".</p>}
+            </>
+          ) : (
+            <p className="text-gray-700">
+              No e-mail account is set up, so alert e-mails are NOT sent. Add your company's e-mail address and app password below
+              (the steps for getting the app password are underneath).
+            </p>
+          )}
+        </div>
+
+        <div className="grid gap-3 sm:grid-cols-2">
+          <label className="flex flex-col gap-1 text-xs text-gray-600">E-mail provider
+            <select className="form-input text-xs" value={form.provider} onChange={e => set('provider', e.target.value)}>
+              {Object.entries(providers).map(([k, v]) => <option key={k} value={k}>{v.label}</option>)}
+            </select>
+          </label>
+          <label className="flex flex-col gap-1 text-xs text-gray-600">Your e-mail address (alerts are sent from it)
+            <input type="email" autoComplete="off" className="form-input text-xs" placeholder="alerts@yourcompany.com"
+              value={form.email} onChange={e => set('email', e.target.value)} />
+          </label>
+          <label className="flex flex-col gap-1 text-xs text-gray-600">App password
+            <div className="flex gap-1">
+              <input type={show ? 'text' : 'password'} autoComplete="new-password" className="form-input text-xs flex-1"
+                placeholder={configured && info.password_ok ? '•••••••• saved (leave empty to keep it)' : 'Paste the app password here'}
+                value={form.password} onChange={e => set('password', e.target.value)} />
+              <button type="button" className="btn btn-sm" onClick={() => setShow(s => !s)} title={show ? 'Hide' : 'Show'}>{show ? <EyeOff size={14} /> : <Eye size={14} />}</button>
+            </div>
+          </label>
+          <label className="flex flex-col gap-1 text-xs text-gray-600">Name shown to the reader (optional)
+            <input className="form-input text-xs" maxLength={80} placeholder="e.g. Alpha Plant Alerts"
+              value={form.from_name} onChange={e => set('from_name', e.target.value)} />
+          </label>
+          {form.provider === 'other' && (
+            <>
+              <label className="flex flex-col gap-1 text-xs text-gray-600">Mail server (SMTP)
+                <input className="form-input text-xs" placeholder="smtp.yourprovider.com" value={form.host} onChange={e => set('host', e.target.value)} />
+              </label>
+              <div className="flex gap-2">
+                <label className="flex flex-col gap-1 text-xs text-gray-600 flex-1">Port
+                  <select className="form-input text-xs" value={form.port} onChange={e => set('port', e.target.value)}>
+                    {[587, 465, 25, 2525].map(p => <option key={p} value={p}>{p}</option>)}
+                  </select>
+                </label>
+                <label className="flex flex-col gap-1 text-xs text-gray-600 flex-1">Security
+                  <select className="form-input text-xs" value={form.security} onChange={e => set('security', e.target.value)}>
+                    <option value="starttls">STARTTLS</option><option value="ssl">SSL</option>
+                  </select>
+                </label>
+              </div>
+            </>
+          )}
+        </div>
+
+        <div className="flex flex-wrap items-center gap-2">
+          <button className="btn btn-primary btn-sm" disabled={busy === 'save'} onClick={save}>{busy === 'save' ? 'Saving…' : 'Save'}</button>
+          <input className="form-input text-xs" style={{ width: 220 }} placeholder={configured ? `Send test to (default ${info.email})` : 'Send test to (optional)'}
+            value={testTo} onChange={e => setTestTo(e.target.value)} />
+          <button className="btn btn-sm" disabled={busy === 'test' || !configured} onClick={test}>{busy === 'test' ? 'Sending…' : 'Send test e-mail'}</button>
+          {configured && <button className="btn btn-sm" disabled={busy === 'remove'} onClick={remove} style={{ color: '#B91C1C' }}>Remove account</button>}
+        </div>
+        {result && (
+          <p className="text-xs rounded-lg p-2" style={{ background: result.ok ? '#ECFDF5' : '#FEF2F2', color: result.ok ? '#047857' : '#B91C1C' }}>{result.text}</p>
+        )}
+        <p className="text-[11px] text-gray-400">
+          SentinelEdge only sends mail from this account; it never reads it. {info?.where === 'env'
+            ? 'It is saved in the server\'s settings file (.env) automatically, so you never have to edit that file.'
+            : 'The password is stored encrypted on this computer.'} The password is never shown again. A test e-mail can go to your own
+          address or to someone on your Subscribers list.
+        </p>
+
+        <div className="rounded-xl border border-gray-200 bg-gray-50 p-3">
+          <p className="text-sm font-semibold text-gray-800 mb-2">{steps.title}</p>
+          <ol className="list-decimal pl-5 space-y-1 text-xs text-gray-700 leading-relaxed">
+            {steps.steps.map((s, i) => <li key={i}>{s}</li>)}
+          </ol>
+          {steps.notes.length > 0 && (
+            <ul className="list-disc pl-5 mt-2 space-y-1 text-xs text-gray-500 leading-relaxed">
+              {steps.notes.map((n, i) => <li key={i}>{n}</li>)}
+            </ul>
+          )}
+          <p className="text-[11px] text-gray-400 mt-2">Choose another provider in the list above to see its steps.</p>
+        </div>
+      </div>
+    </Section>
+  )
+}
+
+
+/**
+ * Phone app — the same app (APK) is used by every company; each phone is pointed at its own company's
+ * server. This card shows the address to type into the app.
+ */
+function PhoneAppSection() {
+  const [info, setInfo] = useState(null)
+  useEffect(() => {
+    fetch('/api/app/server-address', { headers: _bearerHeaders() })
+      .then(r => (r.ok ? r.json() : null)).then(setInfo).catch(() => {})
+  }, [])
+  const list = info?.addresses || []
+  return (
+    <Section title="Phone app" icon={Smartphone}>
+      <div className="space-y-3">
+        <p className="text-xs text-gray-600 leading-relaxed">
+          Everyone uses the <strong>same SentinelEdge app</strong>. It shows only the parameters of <strong>your company</strong>
+          (what you added under Parameters), with your own limits. It receives your live values and your alerts and lets people acknowledge them.
+        </p>
+        <div className="rounded-xl bg-gray-50 border border-gray-200 px-4 py-3">
+          <p className="text-xs font-semibold text-gray-700 mb-1">Server address to type into the app</p>
+          {list.length === 0 ? (
+            <p className="text-xs text-gray-500">The address could not be found automatically. Use this computer&apos;s IP address followed by :{info?.port || 5000}.</p>
+          ) : (
+            <ul className="space-y-1">
+              {list.map(a => (
+                <li key={a.address} className="text-sm font-mono text-gray-800">
+                  {a.address}:{info.port}
+                  <span className="ml-2 text-[11px] font-sans text-gray-500">
+                    {a.kind === 'tailscale' ? 'Tailscale — works from anywhere' : 'this network (same Wi-Fi / LAN)'}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+        <ol className="list-decimal pl-5 space-y-1 text-xs text-gray-600 leading-relaxed">
+          <li>Install the SentinelEdge app on the phone.</li>
+          <li>Open it and type the <strong>server address</strong> above, then the person&apos;s <strong>name</strong> and <strong>PIN</strong>. Set each person&apos;s PIN under Subscribers.</li>
+          <li>The phone must reach this computer: the same Wi-Fi, or Tailscale / VPN when away. The app remembers the address.</li>
+          <li>To change the server (for example another company), sign out in the app and enter the new address.</li>
+        </ol>
+        <p className="text-[11px] text-gray-400">Company admins can also sign in to the app with their admin name and password.</p>
+      </div>
+    </Section>
+  )
+}
+
+
+/**
+ * Connect to the main server (Tailscale) — status, the invitation link Super Admin gave, and the steps.
+ * Company servers send their data to the main server, and phones reach company servers, through Tailscale.
+ */
+function TailscaleSection({ addToast }) {
+  const [info, setInfo] = useState(null)
+  const [busy, setBusy] = useState(false)
+  const [link, setLink] = useState('')
+
+  const load = useCallback(async () => {
+    setBusy(true)
+    try {
+      const r = await fetch('/api/admin/tailscale', { headers: _bearerHeaders() })
+      if (r.ok) setInfo(await r.json())
+    } catch { /* silent */ } finally { setBusy(false) }
+  }, [])
+  useEffect(() => { load() }, [load])
+  useEffect(() => {
+    if (info && window.location.hash === '#tailscale') document.getElementById('tailscale')?.scrollIntoView({ behavior: 'smooth' })
+  }, [info])
+
+  const saveLink = async () => {
+    try {
+      const r = await fetch('/api/admin/tailscale/invite', { method: 'PUT', headers: _bearerHeaders(), body: JSON.stringify({ url: link.trim() }) })
+      const d = await r.json().catch(() => ({}))
+      if (!r.ok) throw new Error(d.error || d.detail || `Error ${r.status}`)
+      addToast({ type: 'success', message: 'Invitation link saved' }); setLink(''); load()
+    } catch (err) { addToast({ type: 'error', message: err.message }) }
+  }
+
+  const ts = info?.tailscale
+  const isNode = info?.role === 'node'
+  const stateLabel = !ts ? 'Checking…'
+    : !ts.installed ? 'Not installed'
+    : ts.state === 'running' ? 'Connected'
+    : ts.state === 'needs_login' ? 'Installed — please sign in'
+    : 'Installed — turned off'
+  const good = ts?.running && (!isNode || !info?.hub_url || info?.hub_reachable)
+  const color = good ? '#047857' : '#B45309'
+  const bg = good ? '#ECFDF5' : '#FFFBEB'
+  const border = good ? '#A7F3D0' : '#FDE68A'
+
+  return (
+    <div id="tailscale">
+      <Section title={isNode ? 'Connect to the main server (Tailscale)' : 'Tailscale (company servers and phones reach this server)'} icon={Server}>
+        <div className="space-y-4">
+          <div className="rounded-lg p-3 text-xs leading-relaxed" style={{ background: bg, border: `1px solid ${border}`, color }}>
+            <p className="font-semibold">Tailscale on this computer: {stateLabel}{ts?.ip ? ` · ${ts.ip}` : ''}</p>
+            {isNode && info?.hub_url && (
+              <p className="mt-1">
+                Main server {info.hub_url}: {info.hub_reachable ? 'reachable ✓' : 'NOT reachable'}
+              </p>
+            )}
+            {isNode && !info?.hub_url && <p className="mt-1">This server is not paired with the main server yet.</p>}
+            {!isNode && ts?.running && <p className="mt-1">Company servers can reach this server at <strong>{ts.ip ? `http://${ts.ip}:${window.location.port || 5000}` : '—'}</strong>.</p>}
+            <button className="btn btn-sm mt-2" disabled={busy} onClick={load}>{busy ? 'Checking…' : 'Check again'}</button>
+          </div>
+
+          <div className="rounded-xl border border-gray-200 bg-gray-50 p-3">
+            <p className="text-sm font-semibold text-gray-800 mb-2">{isNode ? 'How to connect to the main server' : 'How to set up Tailscale on this computer'}</p>
+            <ol className="list-decimal pl-5 space-y-1.5 text-xs text-gray-700 leading-relaxed">
+              <li>Download <strong>Tailscale for Windows</strong> from <strong>tailscale.com/download</strong> (free) and install it.</li>
+              <li>Click the Tailscale icon near the clock (bottom right) and choose <strong>Log in</strong>. Sign in with a Google or Microsoft account.</li>
+              {isNode ? (
+                <li>Open the <strong>invitation link</strong> below, sign in if asked, and press <strong>Accept</strong>. The main server then appears in your Tailscale.</li>
+              ) : (
+                <li>For each company: in the Tailscale admin console open <strong>Machines</strong>, choose this computer, then <strong>Share…</strong> and copy the link (switch on <em>Reusable link</em> to use it for several companies). Paste it in Super Admin → Config → Tailscale.</li>
+              )}
+              <li>The icon should show <strong>Connected</strong>. In the Tailscale menu turn on <strong>Run unattended</strong> and <strong>Start on login</strong>, so it stays on after a restart.</li>
+              <li>Come back here and press <strong>Check again</strong>. It turns green when everything is connected.</li>
+              {isNode && <li>Then pair this server with the main server (the address is the main server&apos;s Tailscale address{info?.hub_address ? `: ${info.hub_address}` : ''}) using the pairing code from Super Admin.</li>}
+            </ol>
+            <p className="text-[11px] text-gray-500 mt-2">
+              Invitation and share links work once per person and expire after 30 days if unused. Ask Super Admin for a new one if yours has expired.
+            </p>
+          </div>
+
+          {isNode && (
+            <div className="rounded-xl border border-gray-200 bg-white p-3 space-y-2">
+              <p className="text-xs font-semibold text-gray-700">Invitation link from Super Admin</p>
+              {info?.invite_url ? (
+                <div className="flex flex-wrap items-center gap-2">
+                  <a className="btn btn-primary btn-sm" href={info.invite_url} target="_blank" rel="noreferrer">Open invitation link</a>
+                  <button className="btn btn-sm" onClick={() => { navigator.clipboard?.writeText(info.invite_url); addToast({ type: 'success', message: 'Link copied' }) }}>Copy link</button>
+                  <span className="text-[11px] text-gray-400 truncate" style={{ maxWidth: 260 }}>{info.invite_url}</span>
+                </div>
+              ) : (
+                <p className="text-xs text-gray-500">Super Admin has not shared one yet. If you were given a link, paste it here.</p>
+              )}
+              <div className="flex flex-wrap gap-2">
+                <input className="form-input text-xs flex-1" style={{ minWidth: 220 }} placeholder="https://login.tailscale.com/admin/invite/…"
+                  value={link} onChange={e => setLink(e.target.value)} />
+                <button className="btn btn-sm" disabled={!link.trim()} onClick={saveLink}>Save link</button>
+              </div>
+            </div>
+          )}
+        </div>
+      </Section>
+    </div>
+  )
+}
+
+
 export default function SettingsPage() {
   const { toasts, addToast, dismiss } = useToast()
 
@@ -295,7 +1025,6 @@ export default function SettingsPage() {
   const [resetting, setResetting] = useState(false)
   const [threshMsg, setThreshMsg] = useState(null)
 
-  const [emailVisible, setEmailVisible] = useState(false)
 
   const [alertSettings, setAlertSettings] = useState({
     temp_alerts_enabled: true,
@@ -310,11 +1039,8 @@ export default function SettingsPage() {
   const [backing, setBacking] = useState(false)
   const [health, setHealth] = useState(null)
 
-  const [testEmailAddr, setTestEmailAddr] = useState('crharya@gmail.com')
-  const [testingEmail, setTestingEmail] = useState(false)
-  const [testEmailMsg, setTestEmailMsg] = useState(null)
 
-  const [testSmsPhone, setTestSmsPhone] = useState('6385936224')
+  const [testSmsPhone, setTestSmsPhone] = useState('')
   const [testingSms, setTestingSms] = useState(false)
   const [testSmsMsg, setTestSmsMsg] = useState(null)
 
@@ -323,6 +1049,9 @@ export default function SettingsPage() {
 
   const [existingParams, setExistingParams] = useState([])
   const [deletingId, setDeletingId] = useState(null)
+  const [reqVersion, setReqVersion] = useState(0)   // bump to refresh the approval list
+  const me = useAdminIdentity()
+  const { has } = useCompanyParameters()   // Settings shows only the company's own parameters
 
   const [psSettings, setPsSettings] = useState({
     file_path: '', temp_col: 'TEMPERATURE', timestamp_col: '', date_col: 'DATE/TIME', time_col: '', auto_save: false,
@@ -331,7 +1060,6 @@ export default function SettingsPage() {
   const [psTesting,    setPsTesting]    = useState(false)
   const [psMsg,        setPsMsg]        = useState(null)
   const [psTestResult, setPsTestResult] = useState(null)
-  const [psEnabled,    setPsEnabled]    = useState(true)
   const [psStatus,     setPsStatus]     = useState(null)  // {enabled, is_active, in_loop_mode}
   const [psDiag,       setPsDiag]       = useState(null)
   const [psDiagLoading, setPsDiagLoading] = useState(false)
@@ -342,6 +1070,10 @@ export default function SettingsPage() {
   const [opcStatus,  setOpcStatus]  = useState(null)
   const [opcSaving,  setOpcSaving]  = useState(false)
   const [opcMsg,     setOpcMsg]     = useState(null)
+
+  const [collectorStatus,     setCollectorStatus]     = useState(null)
+  const [collectorRefreshing, setCollectorRefreshing] = useState(false)
+  const [collectorStatusErr,  setCollectorStatusErr]  = useState(null)
 
   // Track whether user has touched the inputs so fetches don't overwrite
   const dirtyRef = useRef(false)
@@ -423,22 +1155,64 @@ export default function SettingsPage() {
       if (res.ok) {
         const d = await res.json()
         setPsStatus(d)
-        setPsEnabled(d.enabled)
       }
     } catch { /* silent */ }
   }, [])
 
-  const handlePsToggle = async (enabled) => {
-    setPsEnabled(enabled)
+  const loadCollectorStatus = useCallback(async () => {
     try {
-      await fetch('/api/admin/proserver/reading-enabled', {
+      const token = sessionStorage.getItem('admin_token') || ''
+      const res = await fetch('/api/collector/status', {
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      })
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      setCollectorStatus(await res.json())
+      setCollectorStatusErr(null)
+    } catch (err) {
+      setCollectorStatusErr('Unable to reach collector status service')
+    }
+  }, [])
+
+  // ── The two live sources — each has its own on/off switch ───────────────────
+  const [collectorOn, setCollectorOn] = useState(null)   // Pro-Server EX live collector
+  const [excelOn,     setExcelOn]     = useState(null)   // Excel file reader
+  const [dsSaving,    setDsSaving]    = useState(null)   // 'collector' | 'excel' while saving
+
+  const loadDataSource = useCallback(async () => {
+    try {
+      const res = await fetch('/api/admin/data-source', { headers: _bearerHeaders() })
+      if (res.ok) {
+        const d = await res.json()
+        setCollectorOn(!!d.collector_enabled)
+        setExcelOn(!!d.excel_enabled)
+        if (d.excel) setPsStatus(d.excel)
+      }
+    } catch { /* silent */ }
+  }, [])
+
+  useEffect(() => { if (me) loadDataSource() }, [loadDataSource, me?.id, me?.owns_sensor_feed])
+
+  const handleSourceToggle = async (which, on) => {
+    setDsSaving(which)
+    try {
+      const res = await fetch('/api/admin/data-source', {
         method: 'POST',
         headers: _bearerHeaders(),
-        body: JSON.stringify({ enabled }),
+        body: JSON.stringify({ [which]: on }),
       })
-      addToast({ type: enabled ? 'success' : 'info', message: enabled ? 'Excel reading enabled' : 'Excel reading disabled — watchdog active' })
+      const data = await res.json().catch(() => ({}))
+      if (!res.ok) throw new Error(data.error || data.detail?.[0]?.msg || `Error ${res.status}`)
+      refreshAdminIdentity()        // this company may now own the live feed
+      setCollectorOn(!!data.collector_enabled)
+      setExcelOn(!!data.excel_enabled)
+      addToast({
+        type: 'success',
+        message: `${which === 'collector' ? 'Pro-Server EX live collector' : 'Excel reader'} switched ${on ? 'ON' : 'OFF'}`,
+      })
       loadPsStatus()
-    } catch { /* silent */ }
+    } catch (err) {
+      addToast({ type: 'error', message: err.message })
+    } finally { setDsSaving(null) }
   }
 
   const loadAlertSettings = useCallback(async () => {
@@ -463,13 +1237,19 @@ export default function SettingsPage() {
     } finally { setAlertSettingsSaving(false) }
   }
 
-  useEffect(() => { loadThresholds(); loadHealth(); loadParams(); loadPsSettings(); loadAlertSettings(); loadOpcSettings(); loadPsStatus() }, [loadThresholds, loadHealth, loadParams, loadPsSettings, loadAlertSettings, loadOpcSettings, loadPsStatus])
+  useEffect(() => { loadThresholds(); loadHealth(); loadParams(); loadAlertSettings(); if (me) { loadPsSettings(); loadOpcSettings(); loadPsStatus(); loadCollectorStatus() } }, [loadThresholds, loadHealth, loadParams, loadPsSettings, loadAlertSettings, loadOpcSettings, loadPsStatus, loadCollectorStatus, me?.id])
 
   // Poll Pro-Server EX status every 5 seconds to show live/loop/watchdog badge
   useEffect(() => {
     const id = setInterval(loadPsStatus, 5000)
     return () => clearInterval(id)
   }, [loadPsStatus])
+
+  // Poll Live Collector status every 3 seconds
+  useEffect(() => {
+    const id = setInterval(loadCollectorStatus, 3000)
+    return () => clearInterval(id)
+  }, [loadCollectorStatus])
 
   const handleDeleteParam = async (param) => {
     if (!window.confirm(`Request deletion of "${param.name}"? Super Admin must approve before it's removed.`)) return
@@ -483,6 +1263,7 @@ export default function SettingsPage() {
       const data = await res.json().catch(() => ({}))
       if (res.ok) {
         addToast({ type: 'success', message: `Deletion of "${param.name}" submitted for Super Admin approval.` })
+        setReqVersion(v => v + 1)
       } else {
         addToast({ type: 'error', message: data.error || `Error ${res.status}` })
       }
@@ -492,10 +1273,6 @@ export default function SettingsPage() {
       setDeletingId(null)
     }
   }
-
-  useEffect(() => {
-    if (health?.smtp_user) setTestEmailAddr(health.smtp_user)
-  }, [health])
 
   const handleUpdate = async (e) => {
     if (e && e.preventDefault) e.preventDefault()
@@ -557,31 +1334,6 @@ export default function SettingsPage() {
     finally { setBacking(false) }
   }
 
-  const handleTestEmail = async () => {
-    if (!testEmailAddr.trim()) return
-    setTestingEmail(true); setTestEmailMsg(null)
-    try {
-      const res = await fetch('/api/admin/test-email', {
-        method: 'POST',
-        headers: _bearerHeaders(),
-        body: JSON.stringify({ email: testEmailAddr.trim() }),
-        credentials: 'include',
-      })
-      const data = await res.json()
-      if (res.ok && data.status === 'sent') {
-        setTestEmailMsg({ type: 'success', text: `✅ Test email sent to ${data.email}` })
-        addToast({ type: 'success', message: `📧 Test email sent to ${data.email}` })
-      } else {
-        const err = data.error || data.detail || 'Unknown error'
-        setTestEmailMsg({ type: 'error', text: `Failed: ${err}` })
-        addToast({ type: 'error', message: `Email failed: ${err}` })
-      }
-    } catch (err) {
-      setTestEmailMsg({ type: 'error', text: 'Failed: ' + err.message })
-      addToast({ type: 'error', message: 'Email test error: ' + err.message })
-    } finally { setTestingEmail(false) }
-  }
-
   const handleTestSms = async () => {
     if (!testSmsPhone.trim()) return
     setTestingSms(true); setTestSmsMsg(null)
@@ -628,6 +1380,7 @@ export default function SettingsPage() {
       })
       const data = await res.json()
       if (res.ok) {
+        refreshAdminIdentity()        // saving the file settings moves the live feed to this company
         const msg = data.active
           ? '✅ Saved — sensor is now reading the file.'
           : '✅ Saved — file not yet found (check the path).'
@@ -679,230 +1432,31 @@ export default function SettingsPage() {
     <>
       <div className="space-y-5 max-w-2xl">
 
-        {/* ── Section 1: Threshold Configuration ─────────────────────────── */}
-        <Section title="Threshold Configuration" icon={Settings2}>
-          <form onSubmit={handleUpdate} className="space-y-4">
-            <div className="flex items-center gap-2 mb-2">
-              <Badge
-                color={isOverride ? 'orange' : 'green'}
-                label={isOverride ? 'Runtime Override Active' : 'Using Defaults'}
-                dot={false}
-              />
-            </div>
-
-            <div className="grid grid-cols-2 gap-4">
-              {/* ── High Threshold ── */}
-              <div>
-                <label className="text-xs font-medium text-gray-600 mb-1 block">
-                  High Threshold (°C) <span className="text-red-400">↑ Overheating danger</span>
-                </label>
-                <input
-                  className="form-input"
-                  type="number"
-                  step="any"
-                  value={high}
-                  onChange={e => { setHigh(e.target.value); dirtyRef.current = true }}
-                  onFocus={e => { e.target.select(); dirtyRef.current = true }}
-                />
-              </div>
-
-              {/* ── Low Threshold ── */}
-              <div>
-                <label className="text-xs font-medium text-gray-600 mb-1 block">
-                  Low Threshold (°C) <span className="text-blue-400">↓ Machine ready</span>
-                </label>
-                <input
-                  className="form-input"
-                  type="number"
-                  step="any"
-                  value={low}
-                  onChange={e => { setLow(e.target.value); dirtyRef.current = true }}
-                  onFocus={e => { e.target.select(); dirtyRef.current = true }}
-                />
-              </div>
-            </div>
-
-            {isOverride && threshData?.last_changed && (
-              <p className="text-xs text-amber-600 bg-amber-50 rounded-lg px-3 py-2">
-                Changed {utcToIST(threshData.last_changed)}
-              </p>
-            )}
-
-            <StatusMsg msg={threshMsg} />
-
-            <p className="text-xs text-gray-400">
-              Changes take effect immediately. Reset restores 90°C / 38°C defaults.
-            </p>
-
-            <div className="flex gap-2">
-              <button type="submit" disabled={saving} className="btn btn-primary btn-sm flex-1">
-                <Settings2 size={13} /> {saving ? 'Saving…' : 'Update Thresholds'}
-              </button>
-              <button type="button" onClick={handleReset} disabled={resetting} className="btn btn-ghost btn-sm">
-                <RotateCcw size={13} /> {resetting ? 'Resetting…' : 'Reset to Default'}
-              </button>
-            </div>
-          </form>
-        </Section>
-
-        {/* ── Section 2: Alert Controls ────────────────────────────────────── */}
-        <Section title="Alert Controls" icon={Bell}>
-          <div className="space-y-4">
-            <p className="text-xs text-gray-500 leading-relaxed">
-              Disable an alert type to stop notifications (SMS, email, in-app) even if the threshold is breached.
-              Sensor readings continue normally — only the alert dispatch is suppressed.
-            </p>
-
-            {/* Temperature alert toggle */}
-            <div className="flex items-center justify-between py-3 px-4 rounded-xl bg-gray-50 border border-gray-200">
-              <div className="flex items-center gap-3">
-                <div className={`w-8 h-8 rounded-lg flex items-center justify-center ${alertSettings.temp_alerts_enabled ? 'bg-orange-100' : 'bg-gray-100'}`}>
-                  {alertSettings.temp_alerts_enabled
-                    ? <Bell size={15} className="text-orange-600" />
-                    : <BellOff size={15} className="text-gray-400" />
-                  }
-                </div>
-                <div>
-                  <p className="text-sm font-semibold text-gray-800">Temperature Alerts</p>
-                  <p className="text-xs text-gray-500">Fire when temp &gt; {threshData?.temperature?.high ?? 90}°C or &lt; {threshData?.temperature?.low ?? 42}°C</p>
-                </div>
-              </div>
-              <button
-                type="button"
-                onClick={() => setAlertSettings(s => ({ ...s, temp_alerts_enabled: !s.temp_alerts_enabled }))}
-                style={{
-                  width: 44, height: 24, borderRadius: 12, border: 'none', cursor: 'pointer',
-                  background: alertSettings.temp_alerts_enabled ? '#7C3AED' : '#D1D5DB',
-                  position: 'relative', transition: 'background 0.2s',
-                }}
-              >
-                <span style={{
-                  position: 'absolute', top: 3,
-                  left: alertSettings.temp_alerts_enabled ? 23 : 3,
-                  width: 18, height: 18, borderRadius: '50%', background: '#fff',
-                  transition: 'left 0.2s', boxShadow: '0 1px 3px rgba(0,0,0,0.2)',
-                }} />
-              </button>
-            </div>
-
-            {/* pH alert toggle */}
-            <div className="flex items-center justify-between py-3 px-4 rounded-xl bg-gray-50 border border-gray-200">
-              <div className="flex items-center gap-3">
-                <div className={`w-8 h-8 rounded-lg flex items-center justify-center ${alertSettings.ph_alerts_enabled ? 'bg-blue-100' : 'bg-gray-100'}`}>
-                  {alertSettings.ph_alerts_enabled
-                    ? <Bell size={15} className="text-blue-600" />
-                    : <BellOff size={15} className="text-gray-400" />
-                  }
-                </div>
-                <div>
-                  <p className="text-sm font-semibold text-gray-800">pH Alerts</p>
-                  <p className="text-xs text-gray-500">Fire when pH &lt; {alertSettings.ph_threshold_min} or pH &gt; {alertSettings.ph_threshold_max}</p>
-                </div>
-              </div>
-              <button
-                type="button"
-                onClick={() => setAlertSettings(s => ({ ...s, ph_alerts_enabled: !s.ph_alerts_enabled }))}
-                style={{
-                  width: 44, height: 24, borderRadius: 12, border: 'none', cursor: 'pointer',
-                  background: alertSettings.ph_alerts_enabled ? '#7C3AED' : '#D1D5DB',
-                  position: 'relative', transition: 'background 0.2s',
-                }}
-              >
-                <span style={{
-                  position: 'absolute', top: 3,
-                  left: alertSettings.ph_alerts_enabled ? 23 : 3,
-                  width: 18, height: 18, borderRadius: '50%', background: '#fff',
-                  transition: 'left 0.2s', boxShadow: '0 1px 3px rgba(0,0,0,0.2)',
-                }} />
-              </button>
-            </div>
-
-            {/* pH threshold range */}
-            <div className="rounded-xl bg-blue-50 border border-blue-200 p-4 space-y-3">
-              <p className="text-xs font-semibold text-blue-800">pH Alert Range</p>
-              <p className="text-xs text-blue-600 leading-relaxed">
-                Alert fires when pH drops <strong>below Minimum</strong> or rises <strong>above Maximum</strong>.
-                Normal range is highlighted between the two thresholds.
-              </p>
-              <div className="flex items-center gap-4 flex-wrap">
-                <div className="flex flex-col gap-1">
-                  <label className="text-xs font-medium text-blue-700">Minimum pH</label>
-                  <div className="flex items-center gap-2">
-                    <input
-                      type="number"
-                      step="0.1"
-                      min="0"
-                      max="14"
-                      value={alertSettings.ph_threshold_min}
-                      onChange={e => setAlertSettings(s => ({ ...s, ph_threshold_min: parseFloat(e.target.value) || 5.5 }))}
-                      className="form-input text-xs"
-                      style={{ width: 90 }}
-                    />
-                    <span className="text-xs text-blue-500">pH</span>
-                  </div>
-                  <span className="text-xs text-blue-400">Default: 5.5</span>
-                </div>
-                <div style={{ fontSize: 18, color: '#93C5FD', alignSelf: 'center', marginTop: 4 }}>→</div>
-                <div className="flex flex-col gap-1">
-                  <label className="text-xs font-medium text-blue-700">Maximum pH</label>
-                  <div className="flex items-center gap-2">
-                    <input
-                      type="number"
-                      step="0.1"
-                      min="0"
-                      max="14"
-                      value={alertSettings.ph_threshold_max}
-                      onChange={e => setAlertSettings(s => ({ ...s, ph_threshold_max: parseFloat(e.target.value) || 7.0 }))}
-                      className="form-input text-xs"
-                      style={{ width: 90 }}
-                    />
-                    <span className="text-xs text-blue-500">pH</span>
-                  </div>
-                  <span className="text-xs text-blue-400">Default: 7.0</span>
-                </div>
-              </div>
-              <p className="text-xs text-blue-500">
-                Safe zone: <strong>{alertSettings.ph_threshold_min} – {alertSettings.ph_threshold_max} pH</strong>
-              </p>
-            </div>
-
-            <StatusMsg msg={alertSettingsMsg} />
-
-            <div className="flex gap-2 flex-wrap">
-              <button
-                onClick={handleSaveAlertSettings}
-                disabled={alertSettingsSaving}
-                className="btn btn-primary btn-sm"
-              >
-                <Settings2 size={13} /> {alertSettingsSaving ? 'Saving…' : 'Save Alert Settings'}
-              </button>
-              <button
-                onClick={async () => {
-                  setPhSimulating(true)
-                  try {
-                    const r = await simulatePhBreach()
-                    addToast({ type: r.breaches_fired > 0 ? 'success' : 'warning',
-                      message: r.breaches_fired > 0
-                        ? `✅ pH ${r.ph_value} injected — alert fired, notifications sent`
-                        : `⚠ pH ${r.ph_value} injected but no breach (check threshold & ph_alerts_enabled)` })
-                  } catch (err) {
-                    addToast({ type: 'error', message: 'pH simulate failed: ' + err.message })
-                  } finally { setPhSimulating(false) }
-                }}
-                disabled={phSimulating}
-                className="btn btn-sm"
-                style={{ background: '#0891B2', color: '#fff', border: 'none' }}
-              >
-                {phSimulating
-                  ? <><RefreshCw size={13} className="animate-spin" /> Testing…</>
-                  : '🧪 Simulate pH=7.5555'
-                }
-              </button>
-            </div>
+        {/* ── Organisation ── */}
+        <div className="card px-5 py-4 flex items-center gap-3">
+          <div className="w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0" style={{ background: '#F3F0FF' }}>
+            <Building2 size={18} style={{ color: '#7C3AED' }} />
           </div>
-        </Section>
+          <div className="min-w-0">
+            <p className="text-xs font-semibold uppercase tracking-wide text-gray-400">Company</p>
+            <p className="text-sm font-bold text-gray-900 truncate">{me?.company_name || '—'}</p>
+          </div>
+          {me?.name && (
+            <div className="ml-auto text-right">
+              <p className="text-xs text-gray-400">Signed in as</p>
+              <p className="text-sm font-semibold text-gray-700">{me.name}</p>
+            </div>
+          )}
+        </div>
 
-        {/* ── Section 3: Database Backup ──────────────────────────────────── */}
+        <ParameterLimitsSection params={existingParams} onSaved={loadParams} addToast={addToast} />
+        <AlertMessagesSection params={existingParams} onSaved={loadParams} addToast={addToast} />
+        <EmailAccountSection addToast={addToast} />
+        <PhoneAppSection />
+        <TailscaleSection addToast={addToast} />
+
+                {/* ── Section 3: Database Backup ──────────────────────────────────── */}
+{me?.owns_sensor_feed && (   /* a backup holds every company's data: main company only */
         <Section title="Database Backup" icon={RotateCcw}>
           <div className="flex items-center gap-4 p-4 rounded-xl bg-blue-50 border border-blue-200">
             <div className="flex-1 min-w-0">
@@ -917,105 +1471,7 @@ export default function SettingsPage() {
             </button>
           </div>
         </Section>
-
-        {/* ── Section 3: Email Configuration ──────────────────────────── */}
-        <Section title="Email Configuration" icon={Mail}>
-          <div className="space-y-4">
-
-            {/* SMTP credentials (masked) */}
-            <div className="rounded-xl bg-gray-50 border border-gray-200 divide-y divide-gray-100">
-              <div className="flex items-center justify-between px-4 py-3">
-                <div className="flex items-center gap-2 text-xs text-gray-500">
-                  <Mail size={13} />
-                  <span className="font-medium">Sender Email</span>
-                </div>
-                <div className="flex items-center gap-2">
-                  <span className="text-xs font-semibold text-gray-700 font-mono">
-                    {emailVisible
-                      ? (health?.smtp_user || 'crharya@gmail.com')
-                      : maskEmail(health?.smtp_user || 'crharya@gmail.com')
-                    }
-                  </span>
-                  <button
-                    type="button"
-                    onClick={() => setEmailVisible(v => !v)}
-                    className="text-gray-400 hover:text-gray-600 transition-colors"
-                    title={emailVisible ? 'Hide' : 'Show'}
-                  >
-                    {emailVisible ? <EyeOff size={13} /> : <Eye size={13} />}
-                  </button>
-                </div>
-              </div>
-              <div className="flex items-center justify-between px-4 py-3">
-                <div className="flex items-center gap-2 text-xs text-gray-500">
-                  <CheckCircle size={13} />
-                  <span className="font-medium">App Password</span>
-                </div>
-                <span className="text-xs font-semibold text-gray-700 font-mono tracking-wider">••••••••••••</span>
-              </div>
-              <div className="flex items-center justify-between px-4 py-3">
-                <div className="flex items-center gap-2 text-xs text-gray-500">
-                  <CheckCircle size={13} />
-                  <span className="font-medium">Email Status</span>
-                </div>
-                <span className={`text-xs font-semibold ${
-                  String(health?.modules?.email?.status || health?.modules?.email || '') === 'configured'
-                  || String(health?.modules?.email?.status || health?.modules?.email || '') === 'ok'
-                    ? 'text-emerald-600' : 'text-amber-600'
-                }`}>
-                  {String(health?.modules?.email?.status || health?.modules?.email || '') === 'configured'
-                   || String(health?.modules?.email?.status || health?.modules?.email || '') === 'ok'
-                    ? '✓ Configured' : '⚠ Not yet verified'}
-                </span>
-              </div>
-            </div>
-
-            {/* How to get Gmail App Password */}
-            <div className="rounded-xl bg-indigo-50 border border-indigo-200 p-4 space-y-2">
-              <p className="text-xs font-semibold text-indigo-800">How to update credentials (Gmail App Password)</p>
-              <ol className="text-xs text-indigo-700 leading-relaxed space-y-1 list-decimal list-inside">
-                <li>Go to <strong>myaccount.google.com → Security → 2-Step Verification</strong></li>
-                <li>Scroll to the bottom — click <strong>App passwords</strong></li>
-                <li>Choose app: <em>Mail</em>, device: <em>Windows Computer</em> → <strong>Generate</strong></li>
-                <li>Copy the 16-character key shown (no spaces)</li>
-                <li>Open <code className="bg-indigo-100 px-1 rounded">.env</code> on the server and update:<br />
-                  <code className="bg-indigo-100 px-1 rounded">SMTP_USER=your@gmail.com</code><br />
-                  <code className="bg-indigo-100 px-1 rounded">SMTP_PASSWORD=xxxx xxxx xxxx xxxx</code>
-                </li>
-                <li>Restart the server for changes to take effect</li>
-              </ol>
-            </div>
-
-            {/* Test email */}
-            <div className="rounded-xl bg-indigo-50 border border-indigo-200 p-4 space-y-3">
-              <p className="text-xs font-semibold text-indigo-800">📧 Send Test Email</p>
-              <p className="text-xs text-indigo-600 leading-relaxed">
-                Sends a test alert email immediately — no breach required.
-              </p>
-              <div className="flex items-center gap-2">
-                <input
-                  type="email"
-                  value={testEmailAddr}
-                  onChange={e => setTestEmailAddr(e.target.value)}
-                  placeholder="recipient@example.com"
-                  className="form-input flex-1 text-xs"
-                />
-                <button
-                  onClick={handleTestEmail}
-                  disabled={testingEmail || !testEmailAddr.trim()}
-                  className="btn btn-sm flex-shrink-0 flex items-center gap-1.5"
-                  style={{ background: '#4F46E5', color: '#fff', border: 'none' }}
-                >
-                  {testingEmail
-                    ? <><RefreshCw size={13} className="animate-spin" /> Sending…</>
-                    : <><Mail size={13} /> Send Test</>
-                  }
-                </button>
-              </div>
-              <StatusMsg msg={testEmailMsg} />
-            </div>
-          </div>
-        </Section>
+)}
 
         {/* ── Section 4: SMS Configuration ─────────────────────────────── */}
         <Section title="SMS Configuration" icon={MessageSquare}>
@@ -1024,7 +1480,7 @@ export default function SettingsPage() {
             {/* GSM modem status */}
             {(() => {
               const smsStatus = String(health?.modules?.sms?.status || '')
-              const connected = smsStatus.startsWith('ok') || smsStatus.startsWith('configured')
+              const connected = smsStatus === 'connected' || smsStatus.startsWith('ok') || smsStatus.startsWith('configured')
               const hasError  = smsStatus.startsWith('error')
               return (
                 <div className={`rounded-xl px-4 py-3 border ${
@@ -1040,23 +1496,36 @@ export default function SettingsPage() {
                   </div>
                   <p className={`text-xs leading-relaxed ${connected ? 'text-emerald-700' : hasError ? 'text-red-600' : 'text-amber-700'}`}>
                     {connected
-                      ? 'USB GSM modem is connected and ready. SMS alerts will be sent automatically on breach.'
+                      ? `SIM7600 GSM modem is connected${health?.modules?.sms?.port ? ' on ' + health.modules.sms.port : ''} and ready. SMS alerts are sent automatically on a breach.`
                       : hasError
                       ? `Modem error: ${smsStatus}. Check USB connection and driver.`
-                      : 'GSM modem not detected. Plug in the USB GSM modem — SMS alerts will activate automatically once connected.'
+                      : 'GSM modem not detected. Plug in the SIM7600 USB modem (with a SIM card) and restart SentinelEdge — SMS alerts then start automatically.'
                     }
                   </p>
                 </div>
               )
             })()}
 
-            <div className="rounded-xl bg-gray-50 border border-gray-200 px-4 py-3">
-              <p className="text-xs font-semibold text-gray-700 mb-1">How it works</p>
+            <div className="rounded-xl bg-gray-50 border border-gray-200 px-4 py-3 space-y-2">
+              <p className="text-xs font-semibold text-gray-700">What you need to send SMS</p>
               <p className="text-xs text-gray-600 leading-relaxed">
-                The system uses a <strong>USB GSM modem</strong> to send SMS alerts.
-                No configuration needed — plug in the modem and it works.
-                If the modem is not connected, SMS alerts will be skipped.
+                SMS alerts are sent by a <strong>GSM modem</strong> plugged into this computer. SentinelEdge is set up for the
+                <strong> SIM7600 (SIM7600 EI 4G modem / HAT, connected by USB)</strong> — the module SentinelEdge is built and tested with.
+                Without it, only e-mail and app alerts are sent.
               </p>
+              <ol className="list-decimal pl-5 space-y-1 text-xs text-gray-600 leading-relaxed">
+                <li>A <strong>SIM7600</strong> USB GSM modem, with its antenna fitted.</li>
+                <li>A working <strong>SIM card</strong> in the modem that can send SMS (active plan or balance, network signal, and the SIM&apos;s PIN lock switched off).</li>
+                <li>The modem&apos;s <strong>USB driver</strong> installed on this computer. In Windows Device Manager, under "Ports (COM &amp; LPT)", the modem shows up as COM ports, one of them an "AT" port.</li>
+                <li><strong>Plug the modem in, then restart SentinelEdge</strong> (STOP.bat, then START.bat). The status above turns to "Connected" when the modem answers.</li>
+                <li>Press <strong>Send Test</strong> below (to a person on your Subscribers list) to check that a real SMS arrives.</li>
+              </ol>
+              <ul className="list-disc pl-5 space-y-1 text-xs text-gray-500 leading-relaxed">
+                <li>One modem serves the whole computer: every company on this PC uses it, and each company's SMS goes only to its own subscribers.</li>
+                <li>Each SMS is charged by the SIM&apos;s mobile plan. An SMS is one message of up to 160 characters.</li>
+                <li>Write your own SMS wording per parameter under "Alert messages" above.</li>
+                <li>If the status says "Not Connected": check the USB cable and driver, that the SIM is inserted and has signal, then restart.</li>
+              </ul>
             </div>
 
             {/* Test SMS */}
@@ -1070,7 +1539,7 @@ export default function SettingsPage() {
                   type="tel"
                   value={testSmsPhone}
                   onChange={e => setTestSmsPhone(e.target.value)}
-                  placeholder="Phone number (e.g. 6385936224)"
+                  placeholder="Phone number (10 digits)"
                   className="form-input flex-1 text-xs"
                 />
                 <button
@@ -1133,91 +1602,81 @@ export default function SettingsPage() {
           <p style={{ fontSize: 11, color: '#9CA3AF', marginTop: 12 }}>
             Deletion requests go to Super Admin for approval before the parameter is removed.
           </p>
+          <ApprovalRequests refreshKey={reqVersion} />
         </Section>
 
         {/* ── Section 6: Add Parameter ──────────────────────────────────────── */}
         <Section title="Add Parameter" icon={PlusCircle}>
-          <AddParameterForm onToast={addToast} onAdded={loadParams} />
+          <AddParameterForm onToast={addToast} onAdded={() => { loadParams(); setReqVersion(v => v + 1) }} />
         </Section>
 
+{me && (
+<>
         {/* ── Section 7: Pro-Server EX Data Source ──────────────────────────── */}
-        <Section title="Pro-Server EX Data Source" icon={Server}>
+        <Section title={me.collector_available ? "Pro-Server EX Data Source" : "Excel Live Reader"} icon={Server}>
           <div className="space-y-4">
-            <p className="text-xs text-gray-500 leading-relaxed">
-              Point to the file Pro-face Pro-Server EX writes to. The server will
-              read the latest row in real time and push it to the dashboard.
-              Supports <strong>.csv</strong> and <strong>.xlsx</strong> files.
-            </p>
-
-            {/* ── Live-Only toggle ── */}
-            <div className="flex items-center justify-between rounded-xl border p-3"
-              style={{ borderColor: psEnabled ? '#C4B5FD' : '#10B981', background: psEnabled ? '#F5F3FF' : '#F0FDF4' }}>
-              <div>
-                <p className="text-sm font-semibold text-gray-800">
-                  {psEnabled ? 'Loop Mode (default)' : 'Live-Only Mode'}
-                </p>
-                <p className="text-xs text-gray-500 mt-0.5">
-                  {psEnabled
-                    ? 'Shows historical rows while waiting for live data'
-                    : 'Shows — until Pro-Server EX writes a new row, then shows live. No looping.'}
-                </p>
-              </div>
-              <div className="flex items-center gap-3">
-                {/* Status badge */}
-                {psStatus && (
-                  <span className="text-xs font-semibold px-2 py-0.5 rounded-full" style={{
-                    background: !psStatus.is_active ? '#F3F4F6'
-                      : !psStatus.enabled ? (psStatus.in_loop_mode ? '#FEF3C7' : '#D1FAE5')
-                      : psStatus.in_loop_mode ? '#EDE9FE'
-                      : '#D1FAE5',
-                    color: !psStatus.is_active ? '#6B7280'
-                      : !psStatus.enabled ? (psStatus.in_loop_mode ? '#92400E' : '#065F46')
-                      : psStatus.in_loop_mode ? '#5B21B6'
-                      : '#065F46',
-                  }}>
-                    {!psStatus.is_active ? 'INACTIVE'
-                      : !psStatus.enabled
-                        ? (psStatus.in_loop_mode ? '○ WAITING' : '● LIVE')
-                        : psStatus.in_loop_mode ? '↻ LOOPING'
-                        : '● LIVE'}
-                  </span>
-                )}
-                {/* Toggle */}
-                <div className="flex items-center gap-1.5">
-                  <span className="text-xs text-gray-500">Loop</span>
-                  <button
-                    onClick={() => handlePsToggle(!psEnabled)}
-                    style={{
-                      width: 44, height: 24, borderRadius: 99,
-                      background: psEnabled ? '#D1D5DB' : '#10B981',
-                      border: 'none', cursor: 'pointer', position: 'relative',
-                      transition: 'background 0.2s',
-                    }}
-                  >
-                    <span style={{
-                      position: 'absolute', top: 3,
-                      left: psEnabled ? 3 : 23,
-                      width: 18, height: 18, borderRadius: '50%',
-                      background: '#fff', transition: 'left 0.2s',
-                      boxShadow: '0 1px 3px rgba(0,0,0,0.2)',
-                    }} />
-                  </button>
-                  <span className="text-xs text-gray-500">Live-Only</span>
+            {/* One plant per PC: show which company receives this PC's live readings */}
+            {/* Each live source on this PC belongs to one company (they can differ) */}
+            {me.company_id && me.source_owners && (
+              <div className="rounded-xl border p-3 text-sm space-y-1" style={{ borderColor: '#C7D2FE', background: '#EEF2FF', color: '#3730A3' }}>
+                {(me.collector_available ? [['collector', 'Live collector'], ['excel', 'Excel reader']] : [['excel', 'Excel reader']]).map(([src, label]) => {
+                  const o = me.source_owners[src] || {}
+                  const mine = o.company_id === me.company_id
+                  return (
+                    <div key={src}>
+                      {label} on this PC → <strong>{o.company_name || '—'}</strong>{mine ? ' (your company)' : ''}
+                    </div>
+                  )
+                })}
+                <div className="text-xs" style={{ color: '#4F46E5' }}>
+                  Switching a source on makes it {me.company_name}'s — unless another company is using it right now.
+                  Only {me.company_name}'s approved parameters are stored.
                 </div>
               </div>
+            )}
+            {/* ── Excel reader on/off (separate from the live collector) ── */}
+            <div className="rounded-xl border p-3 space-y-2"
+              style={{ borderColor: excelOn ? '#10B981' : '#D1D5DB', background: excelOn ? '#F0FDF4' : '#F9FAFB' }}>
+              <div className="flex items-center justify-between gap-3">
+                <div className="min-w-0">
+                  <p className="text-sm font-semibold text-gray-800">Excel reader — {excelOn ? 'ON' : 'OFF'}</p>
+                  <p className="text-xs text-gray-500 mt-0.5">
+                    {excelOn
+                      ? 'The dashboard follows the last row of the file below'
+                      : 'Switch on to read the Excel file below. Save the file path first.'}
+                  </p>
+                </div>
+                <div className="flex items-center gap-3 flex-shrink-0">
+                  {excelOn && psStatus && (
+                    <span className="text-xs font-semibold px-2 py-0.5 rounded-full" style={{
+                      background: !psStatus.is_active ? '#FEE2E2' : psStatus.in_loop_mode ? '#FEF3C7' : '#D1FAE5',
+                      color:      !psStatus.is_active ? '#991B1B' : psStatus.in_loop_mode ? '#92400E' : '#065F46',
+                    }}>
+                      {!psStatus.is_active ? 'CANNOT READ FILE' : psStatus.in_loop_mode ? '↻ LAST ROW' : '● NEW ROWS'}
+                    </span>
+                  )}
+                  <SwitchBtn on={!!excelOn} disabled={dsSaving === 'excel' || excelOn == null}
+                    onClick={() => handleSourceToggle('excel', !excelOn)} />
+                </div>
+              </div>
+              {excelOn && psStatus?.is_active && (
+                <div className="text-xs text-gray-500 grid grid-cols-2 gap-x-4 gap-y-0.5">
+                  <span>Reading via: <strong>{psStatus.mode === 'com' ? 'open Excel (live)' : 'saved file'}</strong></span>
+                  <span>New rows seen: <strong>{psStatus.new_rows_seen ?? 0}</strong></span>
+                  <span>Last row: <strong>{psStatus.current_temperature ?? '—'} °C</strong>
+                    {psStatus.values && Object.entries(psStatus.values).map(([k, v]) => ` · ${k} ${v}`)}</span>
+                  <span>Last new row: <strong>{psStatus.last_new_row_at ? utcToIST(psStatus.last_new_row_at) : '—'}</strong></span>
+                </div>
+              )}
             </div>
 
-            {!psEnabled && (
-              <div className="rounded-xl bg-emerald-50 border border-emerald-200 p-3 flex gap-2 items-start">
-                <span style={{ fontSize: 15 }}>⚡</span>
-                <p className="text-xs text-emerald-800 leading-relaxed">
-                  <strong>Live-Only mode active</strong> — saved and survives server restarts.
-                  Dashboard shows <strong>—</strong> when Pro-Server EX is not writing.
-                  The moment a new row appears with a current timestamp, it reads and displays instantly.
-                  When writing stops, values return to <strong>—</strong> automatically. No old data is shown. Alerts fire only for live readings.
-                </p>
-              </div>
-            )}
+            <p className="text-xs text-gray-500 leading-relaxed">
+              Point to the file Pro-face Pro-Server EX writes to (<strong>.xls</strong>, <strong>.xlsx</strong>,
+              <strong> .xlsm</strong>, <strong>.xlsb</strong> or <strong>.csv</strong>). The reader takes the file's
+              <strong> last row</strong> and keeps showing it until the next row is added; each new row is then stored
+              and checked for alerts once. It works while Excel has the file open, and sees a row typed into an open
+              workbook even before it is saved.
+            </p>
 
             {/* ── Auto-Save toggle ── */}
             <div className="flex items-center justify-between rounded-xl border p-3"
@@ -1429,6 +1888,153 @@ export default function SettingsPage() {
           </div>
         </Section>
 
+{me?.collector_available && (
+<>
+        {/* ── Section 7b: Pro-Server EX Live Collector ──────────────────────── */}
+        <Section title="Pro-Server EX Live Collector" icon={Server}>
+          <div className="space-y-4">
+            <p className="text-xs text-gray-500 leading-relaxed">
+              Live industrial data received from the Pro-Server EX collector.
+              The collector script (<code className="bg-gray-100 px-1 rounded">proserver_collector.py</code>) runs on the
+              Pro-Server EX machine and POSTs readings to this backend over HTTP.
+            </p>
+
+            {/* ── Live collector on/off (separate from the Excel reader) ── */}
+            <div className="flex items-center justify-between rounded-xl border p-3 gap-3"
+              style={{ borderColor: collectorOn ? '#10B981' : '#D1D5DB', background: collectorOn ? '#F0FDF4' : '#F9FAFB' }}>
+              <div className="min-w-0">
+                <p className="text-sm font-semibold text-gray-800">Live collector — {collectorOn ? 'ON' : 'OFF'}</p>
+                <p className="text-xs text-gray-500 mt-0.5">
+                  {collectorOn
+                    ? 'Readings sent by the collector feed the dashboard'
+                    : 'Readings from the collector are ignored (the script can keep running)'}
+                </p>
+              </div>
+              <SwitchBtn on={!!collectorOn} disabled={dsSaving === 'collector' || collectorOn == null}
+                onClick={() => handleSourceToggle('collector', !collectorOn)} />
+            </div>
+
+            {/* ── Connection status banner ── */}
+            {(() => {
+              const cs = collectorStatus?.connection_state
+              const cfg = !collectorStatusErr && {
+                never_connected: { dot: '#9CA3AF', bg: '#F3F4F6', color: '#374151', label: 'NEVER CONNECTED' },
+                stale:           { dot: '#F59E0B', bg: '#FEF3C7', color: '#92400E', label: 'STALE'           },
+                live:            { dot: '#10B981', bg: '#D1FAE5', color: '#065F46', label: 'LIVE'             },
+              }[cs] || { dot: '#EF4444', bg: '#FEE2E2', color: '#991B1B', label: 'DISCONNECTED' }
+
+              return (
+                <div className="rounded-xl border p-3 flex items-center justify-between"
+                  style={{ background: collectorStatusErr ? '#FEE2E2' : cfg.bg, borderColor: collectorStatusErr ? '#FCA5A5' : 'transparent' }}>
+                  <div className="flex items-center gap-2">
+                    <span style={{ width: 10, height: 10, borderRadius: '50%', background: collectorStatusErr ? '#EF4444' : cfg.dot, display: 'inline-block', flexShrink: 0 }} />
+                    <span className="text-sm font-bold" style={{ color: collectorStatusErr ? '#991B1B' : cfg.color }}>
+                      {collectorStatusErr ? 'DISCONNECTED' : cfg.label}
+                    </span>
+                  </div>
+                  <button
+                    onClick={async () => { setCollectorRefreshing(true); await loadCollectorStatus(); setCollectorRefreshing(false) }}
+                    disabled={collectorRefreshing}
+                    className="flex items-center gap-1.5 text-xs px-2.5 py-1 rounded-lg border"
+                    style={{ background: '#fff', borderColor: '#D1D5DB', color: '#374151' }}
+                  >
+                    <RefreshCw size={12} className={collectorRefreshing ? 'animate-spin' : ''} />
+                    Refresh Status
+                  </button>
+                </div>
+              )
+            })()}
+
+            {collectorStatusErr ? (
+              <p className="text-xs text-red-600 bg-red-50 rounded-lg px-3 py-2">{collectorStatusErr}</p>
+            ) : collectorStatus ? (
+              <>
+                {/* ── Status grid ── */}
+                <div className="rounded-xl bg-gray-50 border border-gray-200 divide-y divide-gray-100">
+                  {[
+                    { label: 'Collector Status', value: collectorStatus.connection_state?.replace('_', ' ').toUpperCase() ?? '—' },
+                    { label: 'Collector IP',     value: collectorStatus.collector_ip ?? '—' },
+                    { label: 'Last Data Received', value: collectorStatus.last_received_at
+                        ? new Date(collectorStatus.last_received_at).toLocaleTimeString()
+                        : '—' },
+                    { label: 'Time Since Last Data', value: timeSince(collectorStatus.last_received_at) ?? '—' },
+                    { label: 'Total Readings',   value: collectorStatus.total_received ?? 0 },
+                    { label: 'Backend Connection', value: 'CONNECTED' },
+                  ].map(({ label, value }) => (
+                    <div key={label} className="flex items-center justify-between px-3 py-2">
+                      <span className="text-xs text-gray-500">{label}</span>
+                      <span className="text-xs font-semibold text-gray-800 font-mono">{value}</span>
+                    </div>
+                  ))}
+                </div>
+
+                {/* ── Latest values ── */}
+                {collectorStatus.latest_reading ? (
+                  <div className="rounded-xl bg-gray-50 border border-gray-200 p-3 space-y-2">
+                    <p className="text-xs font-semibold text-gray-700">Latest Values</p>
+                    <div className="grid grid-cols-3 gap-3">
+                      {[
+                        { label: 'Temperature', key: 'temperature', unit: '°C' },
+                        { label: 'Pressure',    key: 'pressure',    unit: ''   },
+                        { label: 'pH',          key: 'ph',          unit: ''   },
+                      ].map(({ label, key, unit }) => {
+                        const v = collectorStatus.latest_reading[key]
+                        return (
+                          <div key={key} className="rounded-lg bg-white border border-gray-200 px-3 py-2">
+                            <p className="text-xs text-gray-500 mb-0.5">{label}</p>
+                            <p className="text-sm font-bold text-gray-800 font-mono">
+                              {v != null && !Number.isNaN(v) ? `${v}${unit}` : '—'}
+                            </p>
+                          </div>
+                        )
+                      })}
+                    </div>
+                    <p className="text-xs text-gray-400">
+                      Last updated: {collectorStatus.last_received_at
+                        ? new Date(collectorStatus.last_received_at).toLocaleTimeString()
+                        : '—'}
+                    </p>
+                  </div>
+                ) : (
+                  <div className="rounded-xl bg-gray-50 border border-gray-200 px-3 py-4 text-center text-xs text-gray-400">
+                    No readings received yet
+                  </div>
+                )}
+
+                {/* ── Collector configuration (read-only, remote) ── */}
+                <div className="rounded-xl bg-amber-50 border border-amber-200 p-3 space-y-2">
+                  <p className="text-xs font-semibold text-amber-800">Collector Configuration</p>
+                  <p className="text-xs text-amber-700 leading-relaxed">
+                    The collector runs on the Pro-Server EX machine. Settings below are configured
+                    locally on that machine in <code className="bg-amber-100 px-1 rounded">collector_config.json</code>.
+                  </p>
+                  <div className="space-y-1 pt-1">
+                    {[
+                      { label: 'Collector Endpoint', value: `${window.location.protocol}//${window.location.hostname}:5000/api/collector/reading` },
+                      { label: 'Authentication',     value: 'Configured on Pro-Server EX machine' },
+                      { label: 'Configuration',      value: 'Configured on Pro-Server EX machine' },
+                    ].map(({ label, value }) => (
+                      <div key={label} className="flex items-start justify-between gap-2">
+                        <span className="text-xs text-amber-700 shrink-0">{label}</span>
+                        <span className="text-xs font-mono text-amber-900 text-right break-all">{value}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </>
+            ) : (
+              <div className="rounded-xl bg-gray-50 border border-gray-200 px-3 py-4 text-center text-xs text-gray-400">
+                Loading collector status…
+              </div>
+            )}
+          </div>
+        </Section>
+
+</>
+)}
+
+{me?.collector_available && (
+<>
         {/* ── Section 8: OPC DA Secondary Sensor ────────────────────────────── */}
         <Section title="OPC DA (Secondary Sensor)" icon={Server}>
           <div className="space-y-4">
@@ -1535,7 +2141,13 @@ export default function SettingsPage() {
           </div>
         </Section>
 
-        {/* ── Section 9: Admin Info ───────────────────────────────────────── */}
+</>
+)}
+
+</>
+)}
+
+                {/* ── Section 9: Admin Info ─────────────────────────────────────────── */}
         <Section title="Admin Info" icon={Info}>
           <div className="space-y-3">
             {[
@@ -1544,7 +2156,7 @@ export default function SettingsPage() {
               { label: 'Backend Port', value: '5000 (HTTPS)', icon: '🌐' },
               { label: 'App Version', value: health?.version || 'v1.0.0', icon: '📦' },
               { label: 'Environment', value: health?.environment || 'development', icon: '⚙️' },
-              { label: 'Sensor Mode', value: 'CSV Playback (real client data)', icon: '📊' },
+              { label: 'Live data', value: me?.collector_available ? 'Pro-Server live collector / Excel reader' : 'Excel live reader', icon: '📊' },
             ].map(({ label, value, icon }) => (
               <div key={label} className="flex items-center justify-between py-2 border-b border-gray-100 last:border-0">
                 <div className="flex items-center gap-2 text-xs text-gray-500">

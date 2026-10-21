@@ -20,6 +20,11 @@ def log_activity(
     logged and silently swallowed so they never block the caller.
     """
     try:
+        if company_id is None and admin_id:     # filed under the admin's company, so it shows up there
+            from database.connection import execute_read
+            r = execute_read("SELECT company_id, role FROM admins WHERE id = %s", (admin_id,))
+            if r and r[0].get("role") != "super_admin":
+                company_id = r[0].get("company_id")
         execute_write(
             """
             INSERT INTO admin_activity (admin_id, company_id, action, entity, details, created_at)

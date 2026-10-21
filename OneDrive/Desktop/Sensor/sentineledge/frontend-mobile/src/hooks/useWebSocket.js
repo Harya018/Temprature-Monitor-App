@@ -5,7 +5,8 @@
 // ─────────────────────────────────────────────
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { AppState } from 'react-native';
-import { WS_URL } from '../config/config';
+import { wsUrl } from '../config/config';
+import { getSession } from '../services/auth';
 
 const HEARTBEAT_INTERVAL = 30000;   // 30 seconds
 const INITIAL_BACKOFF = 3000;       // 3 seconds
@@ -14,8 +15,8 @@ const MAX_BACKOFF = 30000;          // 30 seconds
 export const useWebSocket = () => {
   const [connected, setConnected] = useState(false);
   const [lastMessage, setLastMessage] = useState(null);
-  const [temperature, setTemperature] = useState(null);
-  const [alerts, setAlerts] = useState([]);
+  const [values, setValues] = useState({});      // latest live value per parameter: { ph: { value, timestamp } }
+  const [alerts, setAlerts] = useState([]);       // alerts pushed live by the server (newest first)
 
   const wsRef = useRef(null);
   const reconnectTimerRef = useRef(null);
@@ -53,23 +54,42 @@ export const useWebSocket = () => {
       const data = JSON.parse(event.data);
       setLastMessage(data);
 
-      switch (data.type) {
-        case 'temperature_update':
-          if (data.temperature !== undefined) {
-            setTemperature(data.temperature);
-          }
-          break;
+      if (data.type === 'pong' || data.type === 'heartbeat' || data.type === 'connected') return;
 
-        case 'alert':
-          setAlerts((prev) => [data, ...prev]);
-          break;
+      // A live reading carries every parameter this company measures (temperature and/or extra_params)
+      const got = {};
+      if (data.temperature !== null && data.temperature !== undefined) got.temperature = Number(data.temperature);
+      if (data.extra_params && typeof data.extra_params === 'object') {
+        Object.entries(data.extra_params).forEach(([k, v]) => {
+          if (v !== null && v !== undefined && !Number.isNaN(Number(v))) got[String(k).toLowerCase()] = Number(v);
+        });
+      }
+      const stamp = data.timestamp || new Date().toISOString();
+      if (Object.keys(got).length && data.is_valid !== false) {
+        setValues((prev) => {
+          const next = { ...prev };
+          Object.entries(got).forEach(([k, v]) => { next[k] = { value: v, timestamp: stamp }; });
+          return next;
+        });
+      }
 
-        case 'pong':
-          // Heartbeat acknowledged — do nothing
-          break;
-
-        default:
-          break;
+      // Limits crossed: the server sends each breach with its alert number
+      if (Array.isArray(data.breaches) && data.breaches.length) {
+        const fresh = data.breaches
+          .filter((b) => b && b.alert_id !== null && b.alert_id !== undefined)
+          .map((b) => ({
+            id: b.alert_id,
+            parameter: b.parameter,
+            value: b.value,
+            threshold: b.threshold,
+            direction: b.direction,
+            severity: b.severity,
+            timestamp: stamp,
+            test: data.type === 'test_alert',
+          }));
+        if (fresh.length) {
+          setAlerts((prev) => [...fresh.filter((f) => !prev.some((p) => p.id === f.id)), ...prev]);
+        }
       }
     } catch (err) {
       console.warn('[WS] Failed to parse message:', err);
@@ -81,9 +101,18 @@ export const useWebSocket = () => {
     if (!isMountedRef.current || manuallyDisconnectedRef.current) return;
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) return;
 
-    console.log(`[WS] Connecting to ${WS_URL} (backoff=${backoffRef.current}ms)`);
+    getSession().then(({ token }) => {
+      if (!isMountedRef.current || manuallyDisconnectedRef.current) return;
+      const url = wsUrl(token);
+      if (!token || !url) return;          // not signed in / no server yet
+      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) return;
+      console.log(`[WS] Connecting (backoff=${backoffRef.current}ms)`);
+      openSocket(url);
+    });
+  }, [handleMessage, startHeartbeat]);
 
-    const ws = new WebSocket(WS_URL);
+  const openSocket = useCallback((url) => {
+    const ws = new WebSocket(url);
     wsRef.current = ws;
 
     ws.onopen = () => {
@@ -175,5 +204,5 @@ export const useWebSocket = () => {
     };
   }, [connect, clearTimers]);
 
-  return { connected, lastMessage, temperature, alerts };
+  return { connected, lastMessage, values, alerts };
 };

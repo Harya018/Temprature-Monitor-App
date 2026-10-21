@@ -35,7 +35,7 @@ class BreachEvent(BaseModel):
 # ── API response models ───────────────────────────────────────────────────────
 
 class ReadingOut(BaseModel):
-    temperature: float
+    temperature: Optional[float] = None      # None for a plant without a temperature sensor
     timestamp: str
     breaches: list[BreachEvent] = Field(default_factory=list)
     is_valid: bool = True

@@ -1,5 +1,5 @@
-"""
-routers/phase5_comms.py — Phase 5: Communication & Relationship Management.
+﻿"""
+routers/phase5_comms.py â€” Phase 5: Communication & Relationship Management.
 
 All routes protected by require_super_admin.
 
@@ -28,7 +28,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
 
 from database.connection import execute_read, execute_write
-from routers.super_admin import require_super_admin
+from routers.super_admin_v2 import require_super_admin
 from utils.activity_logger import log_activity
 from utils.logger import get_logger
 
@@ -37,7 +37,7 @@ logger = get_logger(__name__)
 router = APIRouter(prefix="/api/super-admin/comms", tags=["Super Admin Comms"])
 
 
-# ─── Pydantic bodies ──────────────────────────────────────────────────────────
+# â”€â”€â”€ Pydantic bodies â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 class _MessageIn(BaseModel):
     subject: str = Field(min_length=1, max_length=200)
@@ -83,14 +83,14 @@ class _ToggleDoneIn(BaseModel):
     done: bool
 
 
-# ─── Helper ───────────────────────────────────────────────────────────────────
+# â”€â”€â”€ Helper â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 def _company_or_404(company_id: int):
     rows = execute_read("SELECT id, name FROM companies WHERE id = %s", (company_id,))
     return rows[0] if rows else None
 
 
-# ─── Direct Messages ──────────────────────────────────────────────────────────
+# â”€â”€â”€ Direct Messages â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @router.post("/messages/{company_id}", status_code=201, summary="Send direct message to a company")
 async def send_message(
@@ -155,7 +155,7 @@ async def list_messages(
     return rows
 
 
-# ─── Scheduled Broadcasts ─────────────────────────────────────────────────────
+# â”€â”€â”€ Scheduled Broadcasts â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @router.post("/broadcast/scheduled", status_code=201, summary="Schedule a broadcast")
 async def create_scheduled_broadcast(
@@ -165,7 +165,7 @@ async def create_scheduled_broadcast(
     try:
         scheduled_dt = datetime.fromisoformat(body.scheduled_at.replace("Z", "+00:00"))
     except ValueError:
-        return JSONResponse(status_code=422, content={"error": "Invalid scheduled_at — use ISO 8601"})
+        return JSONResponse(status_code=422, content={"error": "Invalid scheduled_at â€” use ISO 8601"})
 
     if scheduled_dt <= datetime.now(timezone.utc):
         return JSONResponse(status_code=422, content={"error": "scheduled_at must be in the future"})
@@ -221,7 +221,7 @@ async def cancel_scheduled_broadcast(
     if rows[0]["status"] != "pending":
         return JSONResponse(
             status_code=409,
-            content={"error": f"Broadcast is already {rows[0]['status']} — cannot cancel"},
+            content={"error": f"Broadcast is already {rows[0]['status']} â€” cannot cancel"},
         )
 
     execute_write(
@@ -235,7 +235,7 @@ async def cancel_scheduled_broadcast(
     return {"cancelled": True, "broadcast_id": broadcast_id}
 
 
-# ─── Company Notes (CRM) ──────────────────────────────────────────────────────
+# â”€â”€â”€ Company Notes (CRM) â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @router.get("/notes/{company_id}", summary="List CRM notes for a company")
 async def list_notes(
@@ -331,7 +331,7 @@ async def delete_note(
     return {"deleted": True, "note_id": note_id}
 
 
-# ─── Onboarding Checklist ─────────────────────────────────────────────────────
+# â”€â”€â”€ Onboarding Checklist â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 @router.get("/onboarding/{company_id}", summary="Get onboarding checklist for a company")
 async def list_onboarding(
@@ -432,3 +432,4 @@ async def delete_onboarding_item(
         rows[0]["company_id"],
     )
     return {"deleted": True, "item_id": item_id}
+

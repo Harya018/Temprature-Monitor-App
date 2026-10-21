@@ -702,20 +702,6 @@
   }
 }
 
-/* ── Phase 6: Billing Tab ────────────────────────────────────────────────────── */
-.sa-bil-tier-card {
-  background: #F9FAFB;
-  border: 1px solid #E5E7EB;
-  border-radius: 10px;
-  padding: 14px 16px;
-  margin-bottom: 12px;
-  transition: box-shadow .15s;
-}
-
-.sa-bil-tier-card:hover {
-  box-shadow: 0 2px 8px rgba(0,0,0,.08);
-}
-
 /* ── Phase 5: Communications Tab ────────────────────────────────────────────── */
 .sa-comms-msg-card {
   background: #F9FAFB;

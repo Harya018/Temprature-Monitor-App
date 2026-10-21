@@ -16,6 +16,7 @@ import { fetchReceipts } from '../services/api.js'
 import { utcToIST, timeAgo } from '../utils/time.js'
 import { SkeletonTable } from '../components/Skeleton'
 import ErrorState from '../components/ErrorState'
+import TimeAgo from '../components/shared/TimeAgo.jsx'
 
 export default function ReceiptsPage() {
   const [receipts,   setReceipts]   = useState([])
@@ -184,7 +185,7 @@ export default function ReceiptsPage() {
                       {/* Sent At */}
                       <td className="text-xs text-gray-500">
                         <p>{utcToIST(r.sent_at)}</p>
-                        <p className="text-gray-400">{timeAgo(r.sent_at)}</p>
+                        <p className="text-gray-400"><TimeAgo ts={r.sent_at} /></p>
                       </td>
 
                       {/* Status — directly from backend success flag */}

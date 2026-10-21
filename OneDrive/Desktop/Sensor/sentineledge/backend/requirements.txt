@@ -1,11 +1,16 @@
-fastapi==0.111.0
-uvicorn[standard]==0.29.0
-websockets==12.0
-pywebpush==1.14.0
-python-dotenv==1.0.1
-requests==2.31.0
-pydantic==2.7.0
+# Pinned to the versions the system was audited and tested against (2026-10-07).
+# Older pins (fastapi 0.111 / starlette 0.37, requests 2.31, python-dotenv 1.0.1)
+# had known vulnerabilities and had not been tested with this code.
+fastapi==0.141.1
+starlette==1.6.0
+uvicorn[standard]==0.52.4
+websockets==15.0.1
+pywebpush==2.3.0
+python-dotenv==1.2.2
+requests==2.34.2
+pydantic==2.13.5
 firebase-admin==6.5.0
+cryptography>=42          # encrypts each company's e-mail password at rest
 
 # ── PostgreSQL driver ─────────────────────────────────────────────────────────
 psycopg2-binary==2.9.9
@@ -14,10 +19,11 @@ psycopg2-binary==2.9.9
 slowapi==0.1.9
 
 # ── Security / password hashing ───────────────────────────────────────────────
-bcrypt==4.2.1
+bcrypt==4.0.1
 
 # ── TOTP two-factor authentication ────────────────────────────────────────────
 pyotp==2.9.0
+pyserial>=3.5         # SMS through the SIM7600 USB GSM modem (serial / AT commands)
 
 # ── Error tracking ───────────────────────────────────────────────────────────
 sentry-sdk[fastapi]==2.8.0
@@ -26,8 +32,12 @@ sentry-sdk[fastapi]==2.8.0
 openpyxl==3.1.2   # .xlsx support
 xlrd==2.0.1       # .xls (legacy Excel) support — xlrd 2.x handles .xls only
 olefile>=0.46     # OLE2 compound-doc reader — lets xlrd split multi-block Pro-Server EX .xls files
+pywin32==311; sys_platform == "win32"   # Excel COM (win32com/pythoncom) — live Excel reader + bulk loader; needs Microsoft Excel
 
 # ── SMS via USB GSM modem (optional, only for SMS_METHOD=gammu) ───────────────
 # Windows: pip install python-gammu   Linux/macOS: pip install gammu
 # python-gammu; sys_platform == "win32"
 # gammu; sys_platform != "win32"
+
+email-validator==2.3.0   # pydantic EmailStr (subscriber / admin e-mail fields)
+python-multipart==0.0.32   # form / file uploads

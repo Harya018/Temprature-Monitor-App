@@ -435,9 +435,12 @@ async def send_sms_to_all(
     direction: str,
     timestamp_utc: str,
     parameter: str = "temperature",
+    sms_template: str | None = None,
+    sms_ctx: dict | None = None,
 ) -> list:
     """
     Queue SMS alerts for ALL active subscribers simultaneously.
+    sms_template / sms_ctx: the company's own wording for this parameter (each person's {name} is filled in).
 
     For the GSM dongle (SMS_METHOD=gammu), jobs are pushed to the queue at once
     and the single worker drains them as fast as the hardware allows.
@@ -469,6 +472,14 @@ async def send_sms_to_all(
 
     message = build_sms_message(value, threshold, direction, timestamp_utc, parameter)
 
+    def _message_for(sub: dict) -> str:
+        if sms_template and sms_template.strip():
+            from services import message_templates as _mt
+            custom = _mt.sms_text(sms_template, {**(sms_ctx or {}), "name": sub.get("name") or "Operator"})
+            if custom:
+                return custom
+        return message
+
     # ── Serial modem path: use the queue worker ─────────────────────────────
     # Both gammu and sim7600 own a single physical serial port — cannot be
     # shared across threads.  Push all jobs onto the queue and let the single
@@ -477,7 +488,7 @@ async def send_sms_to_all(
         results: list[dict] = []
         for sub in targets:
             holder: dict = {"to": sub["phone"], "status": "queued", "error": None}
-            _sms_queue.put((sub["phone"], message, holder))
+            _sms_queue.put((sub["phone"], _message_for(sub), holder))
             results.append(holder)
 
         logger.info(
@@ -511,14 +522,18 @@ async def send_sms_to_all(
     async def _send_one(sub: dict) -> dict:
         holder: dict = {"to": sub["phone"], "status": "unknown", "error": None}
         try:
-            ok = await send_alert_sms_async(
-                phone=sub["phone"],
-                value=value,
-                threshold=threshold,
-                direction=direction,
-                timestamp_utc=timestamp_utc,
-                parameter=parameter,
-            )
+            if sms_template and sms_template.strip():
+                loop = asyncio.get_running_loop()
+                ok = await loop.run_in_executor(None, send_sms, sub["phone"], _message_for(sub))
+            else:
+                ok = await send_alert_sms_async(
+                    phone=sub["phone"],
+                    value=value,
+                    threshold=threshold,
+                    direction=direction,
+                    timestamp_utc=timestamp_utc,
+                    parameter=parameter,
+                )
             holder["status"] = "sent" if ok else "failed"
             if not ok:
                 holder["error"] = "send_sms returned False"

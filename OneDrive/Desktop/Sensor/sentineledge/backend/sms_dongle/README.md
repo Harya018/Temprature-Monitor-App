@@ -123,7 +123,7 @@ python test_dongle.py --no-sms
 ── Step 4 — Network Operator ───────────────────────────
 ✓ PASS  Registered on: Airtel
 
-── Step 5 — Send Test SMS to 6385936224 ────────────────
+── Step 5 — Send Test SMS to 9876543210 ────────────────
 ✓ PASS  SMS sent in 4.2s via COM3
 
 ── RESULTS SUMMARY ─────────────────────────────────────

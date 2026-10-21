@@ -26,6 +26,7 @@ from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
+from services.sensor_company import require_plant_owner
 router = APIRouter(prefix="/api/analytics", tags=["Analytics"])
 
 # ── In-memory analytics cache (TTL = 60 seconds) ──────────────────────────────
@@ -50,6 +51,15 @@ def _cache_get(store: dict, key: tuple):
 def _cache_set(store: dict, key: tuple, result) -> None:
     with _cache_lock:
         store[key] = (result, time.monotonic())
+
+
+def _csv_guard(company_id, source: str) -> str:
+    """The imported CSV history has no owner column: it belongs to the company that owns this
+    PC's sensor feed. Everyone else is limited to their own live readings."""
+    if source == "live" or company_id is None:
+        return source
+    from services.sensor_company import owns_sensor_feed
+    return source if owns_sensor_feed(company_id) else "live"
 
 
 # ── datetime parsing ──────────────────────────────────────────────────────────
@@ -140,6 +150,16 @@ def _live_extra_filter(parameter: str) -> str:
         return ""
     return f"AND extra_params ? '{parameter}'"
 
+# readings.timestamp is ISO-8601 TEXT. Comparing it to ISO text bounds lets
+# PostgreSQL use the timestamp / (company_id, timestamp) indexes; casting the
+# column (timestamp::timestamptz BETWEEN ...) forced full scans of ~8M rows.
+# The '~' suffix keeps fractional-second rows at the upper bound.
+_TS_RANGE_SQL = (
+    "timestamp BETWEEN to_char((%s)::timestamptz AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS') "
+    "AND to_char((%s)::timestamptz AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS') || '~'"
+)
+
+
 def _csv_param_col(parameter: str) -> Optional[str]:
     mapping = {"temperature": "temperature", "pressure": "pressure", "ph": "ph"}
     return mapping.get(parameter)
@@ -147,7 +167,7 @@ def _csv_param_col(parameter: str) -> Optional[str]:
 
 # ── CSV import endpoints ───────────────────────────────────────────────────────
 
-@router.post("/csv/import", dependencies=[Depends(require_admin)])
+@router.post("/csv/import", dependencies=[Depends(require_plant_owner)])
 async def import_csv(file: UploadFile = File(...)):
     content = await file.read()
     text = content.decode("utf-8-sig", errors="replace")
@@ -254,7 +274,7 @@ async def import_csv(file: UploadFile = File(...)):
     return {"imported": imported, "skipped": skipped, "errors": errors[:20]}
 
 
-@router.get("/csv/status", dependencies=[Depends(require_admin)])
+@router.get("/csv/status", dependencies=[Depends(require_plant_owner)])
 def csv_status():
     rows = execute_read(
         """
@@ -275,7 +295,7 @@ def csv_status():
     }
 
 
-@router.delete("/csv/clear", dependencies=[Depends(require_admin)])
+@router.delete("/csv/clear", dependencies=[Depends(require_plant_owner)])
 def csv_clear():
     execute_write("TRUNCATE csv_sensor_history RESTART IDENTITY")
     log_activity(0, "csv_cleared", "csv_sensor_history", None)
@@ -294,6 +314,7 @@ def chart_live_trend(
     to_date: Optional[str] = Query(None),
 ):
     company_id = admin.get("company_id")
+    source = _csv_guard(company_id, source)
     _cache_key = (company_id, parameter, limit, source, from_date, to_date)
     cached = _cache_get(_live_trend_cache, _cache_key)
     if cached is not None:
@@ -319,7 +340,7 @@ def chart_live_trend(
             WHERE is_valid = 1
               {live_filter}
               {cid_filter}
-              AND timestamp::timestamptz BETWEEN %s AND %s
+              AND {_TS_RANGE_SQL}
             ORDER BY id DESC
             LIMIT %s
             """,
@@ -368,6 +389,7 @@ def chart_daily_avg(
     to_date: Optional[str] = Query(None),
 ):
     company_id = admin.get("company_id")
+    source = _csv_guard(company_id, source)
     _cache_key = (company_id, parameter, source, from_date, to_date)
     cached = _cache_get(_daily_avg_cache, _cache_key)
     if cached is not None:
@@ -395,7 +417,7 @@ def chart_daily_avg(
             WHERE is_valid = 1
               {live_filter}
               {cid_filter}
-              AND timestamp::timestamptz BETWEEN %s AND %s
+              AND {_TS_RANGE_SQL}
             GROUP BY DATE(timestamp::timestamptz)
             ORDER BY DATE(timestamp::timestamptz)
             """,
@@ -451,6 +473,7 @@ def chart_hourly_avg(
     to_date: Optional[str] = Query(None),
 ):
     company_id = admin.get("company_id")
+    source = _csv_guard(company_id, source)
     _cache_key = (company_id, parameter, source, from_date, to_date)
     cached = _cache_get(_hourly_avg_cache, _cache_key)
     if cached is not None:
@@ -476,7 +499,7 @@ def chart_hourly_avg(
             WHERE is_valid = 1
               {live_filter}
               {cid_filter}
-              AND timestamp::timestamptz BETWEEN %s AND %s
+              AND {_TS_RANGE_SQL}
             GROUP BY EXTRACT(HOUR FROM timestamp::timestamptz)
             ORDER BY hour
             """,
@@ -528,6 +551,7 @@ def chart_weekly_avg(
     to_date: Optional[str] = Query(None),
 ):
     company_id = admin.get("company_id")
+    source = _csv_guard(company_id, source)
     start, end = _date_range(from_date, to_date)
     ts_start = f"{start}T00:00:00+00:00"
     ts_end   = f"{end}T23:59:59+00:00"
@@ -550,7 +574,7 @@ def chart_weekly_avg(
             WHERE is_valid = 1
               {live_filter}
               {cid_filter}
-              AND timestamp::timestamptz BETWEEN %s AND %s
+              AND {_TS_RANGE_SQL}
             GROUP BY EXTRACT(WEEK FROM timestamp::timestamptz)
             ORDER BY week_number
             """,
@@ -602,6 +626,7 @@ def chart_distribution(
     to_date: Optional[str] = Query(None),
 ):
     company_id = admin.get("company_id")
+    source = _csv_guard(company_id, source)
     start, end = _date_range(from_date, to_date)
     ts_start = f"{start}T00:00:00+00:00"
     ts_end   = f"{end}T23:59:59+00:00"
@@ -637,7 +662,7 @@ def chart_distribution(
             WHERE is_valid = 1
               {live_filter}
               {cid_filter}
-              AND timestamp::timestamptz BETWEEN %s AND %s
+              AND {_TS_RANGE_SQL}
             GROUP BY bucket_label
             """,
             (*cid_params, ts_start, ts_end),
@@ -797,76 +822,56 @@ def chart_subscriber_response(
     ts_start = f"{start}T00:00:00+00:00"
     ts_end   = f"{end}T23:59:59+00:00"
 
-    cid_filter = "AND a.company_id = %s" if company_id else ""
-    cid_params = (company_id,) if company_id else ()
-
-    ack_rows = execute_read(
+    # REAL figures per person: only people who are switched on today; "total" = alerts that person was
+    # actually notified about (a successful SMS / e-mail / push receipt); "acknowledged" = alerts THEY
+    # acknowledged (their name is on the acknowledgement).
+    sub_filter = "AND s.company_id = %s" if company_id else ""
+    sub_params = (company_id,) if company_id else ()
+    rows = execute_read(
         f"""
-        SELECT
-            acknowledged_by                                              AS name,
-            COUNT(*)                                                     AS acknowledged_count,
-            ROUND(AVG(
-                EXTRACT(EPOCH FROM (
-                    acknowledged_at::timestamptz - timestamp::timestamptz
-                ))
-            )::numeric / 60, 1)                                         AS avg_minutes,
-            ROUND(MIN(
-                EXTRACT(EPOCH FROM (
-                    acknowledged_at::timestamptz - timestamp::timestamptz
-                ))
-            )::numeric / 60, 1)                                         AS fastest_minutes,
-            ROUND(MAX(
-                EXTRACT(EPOCH FROM (
-                    acknowledged_at::timestamptz - timestamp::timestamptz
-                ))
-            )::numeric / 60, 1)                                         AS slowest_minutes
-        FROM alerts a
-        WHERE acknowledged = 1
-          AND acknowledged_at IS NOT NULL
-          AND acknowledged_by IS NOT NULL
-          AND timestamp::timestamptz BETWEEN %s AND %s
-          {cid_filter}
-          AND EXTRACT(EPOCH FROM (
-                acknowledged_at::timestamptz - timestamp::timestamptz
-              )) > 0
-        GROUP BY acknowledged_by
-        ORDER BY avg_minutes ASC
+        SELECT s.id AS subscriber_id, s.name,
+               COALESCE(n.total, 0)   AS notified,
+               COALESCE(k.acked, 0)   AS acked,
+               k.avg_min, k.fast_min, k.slow_min
+          FROM subscribers s
+          LEFT JOIN LATERAL (
+                SELECT COUNT(DISTINCT dr.alert_id) AS total
+                  FROM delivery_receipts dr
+                  JOIN alerts a ON a.id = dr.alert_id AND a.company_id = s.company_id
+                 WHERE dr.subscriber_id = s.id AND dr.success = 1
+                   AND a.timestamp::timestamptz BETWEEN %s AND %s
+          ) n ON TRUE
+          LEFT JOIN LATERAL (
+                SELECT COUNT(*) AS acked,
+                       ROUND(AVG(x.secs)::numeric / 60, 1) AS avg_min,
+                       ROUND(MIN(x.secs)::numeric / 60, 1) AS fast_min,
+                       ROUND(MAX(x.secs)::numeric / 60, 1) AS slow_min
+                  FROM (SELECT EXTRACT(EPOCH FROM (a.acknowledged_at::timestamptz - a.timestamp::timestamptz)) AS secs
+                          FROM alerts a
+                         WHERE a.company_id = s.company_id AND a.acknowledged = 1 AND a.acknowledged_at IS NOT NULL
+                           AND (LOWER(a.acknowledged_by) = LOWER(s.name) OR LOWER(a.acknowledged_by) LIKE LOWER(s.name) || ' (%%')
+                           AND a.timestamp::timestamptz BETWEEN %s AND %s) x
+          ) k ON TRUE
+         WHERE COALESCE(s.is_active, 1) = 1 AND COALESCE(s.active, 1) = 1 {sub_filter}
+         ORDER BY s.escalation_order, s.name
         """,
-        (ts_start, ts_end, *cid_params),
+        (ts_start, ts_end, ts_start, ts_end, *sub_params),
     )
-
-    sub_cid_filter = "AND s.company_id = %s" if company_id else ""
-    total_rows = execute_read(
-        f"""
-        SELECT s.name, COUNT(DISTINCT el.alert_id) AS total_alerts
-        FROM subscribers s
-        JOIN escalation_log el ON el.subscriber_id = s.id
-        JOIN alerts a ON a.id = el.alert_id
-        WHERE a.timestamp::timestamptz BETWEEN %s AND %s
-          {sub_cid_filter}
-        GROUP BY s.name
-        """,
-        (ts_start, ts_end, *cid_params),
-    )
-    totals = {r["name"]: int(r["total_alerts"]) for r in total_rows}
 
     result = []
-    for i, r in enumerate(ack_rows):
-        name  = r["name"] or "Unknown"
-        acked = int(r["acknowledged_count"])
-        total = totals.get(name, acked)
-        ack_rate = round(100.0 * acked / total, 1) if total > 0 else 100.0
+    for r in rows:
+        acked = int(r["acked"] or 0)
+        total = max(int(r["notified"] or 0), acked)      # never more acknowledged than notified
         result.append({
-            "subscriber_id":      i + 1,
-            "name":               name,
-            "avg_minutes":        float(r["avg_minutes"] or 0),
-            "fastest_minutes":    float(r["fastest_minutes"] or 0),
-            "slowest_minutes":    float(r["slowest_minutes"] or 0),
+            "subscriber_id":      r["subscriber_id"],
+            "name":               r["name"] or "Unknown",
+            "avg_minutes":        float(r["avg_min"] or 0),
+            "fastest_minutes":    float(r["fast_min"] or 0),
+            "slowest_minutes":    float(r["slow_min"] or 0),
             "total_alerts":       total,
             "acknowledged_count": acked,
-            "ack_rate_percent":   ack_rate,
+            "ack_rate_percent":   round(100.0 * acked / total, 1) if total > 0 else 0.0,
         })
-
     return result
 
 
@@ -930,6 +935,7 @@ def chart_summary_stats(
     to_date: Optional[str] = Query(None),
 ):
     company_id = admin.get("company_id")
+    source = _csv_guard(company_id, source)
     start, end = _date_range(from_date, to_date)
     ts_start = f"{start}T00:00:00+00:00"
     ts_end   = f"{end}T23:59:59+00:00"
@@ -938,40 +944,40 @@ def chart_summary_stats(
     live_filter = _live_extra_filter(parameter)
     csv_col     = _csv_param_col(parameter)
 
-    values: list[float] = []
-
-    if source in ("live", "both") and live_col:
-        cid_filter = "AND company_id = %s" if company_id else ""
-        cid_params = (company_id,) if company_id else ()
-        for r in execute_read(
-            f"SELECT ({live_col})::float AS v FROM readings WHERE is_valid=1 "
-            f"{live_filter} {cid_filter} AND timestamp::timestamptz BETWEEN %s AND %s",
-            (*cid_params, ts_start, ts_end),
-        ):
-            if r["v"] is not None:
-                values.append(float(r["v"]))
-
-    if source in ("csv", "both") and csv_col:
-        for r in execute_read(
-            f"SELECT {csv_col}::float AS v FROM csv_sensor_history WHERE {csv_col} IS NOT NULL "
-            f"AND recorded_at BETWEEN %s AND %s",
-            (ts_start, ts_end),
-        ):
-            if r["v"] is not None:
-                values.append(float(r["v"]))
-
-    if not values:
-        return []
-
-    import statistics as _stats
-
-    avg_val = round(_stats.mean(values), 2)
-    min_val = round(min(values), 2)
-    max_val = round(max(values), 2)
-    std_val = round(_stats.stdev(values), 2) if len(values) > 1 else 0.0
-
     cid_filter = "AND company_id = %s" if company_id else ""
     cid_params = (company_id,) if company_id else ()
+
+    thr_rows = execute_read(
+        "SELECT value FROM company_config WHERE field = %s LIMIT 1",
+        (f"{parameter}_high",),
+    )
+    threshold_high = float(thr_rows[0]["value"]) if thr_rows else None
+
+    # Aggregate in PostgreSQL (count, sum, sum of squares, min, max, above
+    # threshold) — loading every reading into Python took minutes on 8M rows.
+    agg_sql = ("SELECT COUNT(v) AS n, SUM(v) AS s, SUM(v * v) AS ss, MIN(v) AS mn, MAX(v) AS mx, "
+               "COUNT(*) FILTER (WHERE v > %s) AS above FROM ({inner}) q WHERE v IS NOT NULL")
+    parts = []
+    if source in ("live", "both") and live_col:
+        inner = (f"SELECT ({live_col})::float AS v FROM readings WHERE is_valid=1 "
+                 f"{live_filter} {cid_filter} AND {_TS_RANGE_SQL}")
+        parts += execute_read(agg_sql.format(inner=inner), (threshold_high, *cid_params, ts_start, ts_end))
+    if source in ("csv", "both") and csv_col:
+        inner = (f"SELECT {csv_col}::float AS v FROM csv_sensor_history WHERE {csv_col} IS NOT NULL "
+                 f"AND recorded_at BETWEEN %s AND %s")
+        parts += execute_read(agg_sql.format(inner=inner), (threshold_high, ts_start, ts_end))
+
+    n = sum(int(r["n"] or 0) for r in parts)
+    if n == 0:
+        return []
+    s     = sum(float(r["s"] or 0) for r in parts)
+    ss    = sum(float(r["ss"] or 0) for r in parts)
+    above = sum(int(r["above"] or 0) for r in parts)
+    avg_val = round(s / n, 2)
+    min_val = round(min(float(r["mn"]) for r in parts if r["mn"] is not None), 2)
+    max_val = round(max(float(r["mx"]) for r in parts if r["mx"] is not None), 2)
+    var     = (ss - s * s / n) / (n - 1) if n > 1 else 0.0
+    std_val = round(max(var, 0.0) ** 0.5, 2)
 
     breach_rows = execute_read(
         f"SELECT COUNT(*) AS cnt FROM alerts WHERE parameter = %s "
@@ -980,15 +986,7 @@ def chart_summary_stats(
     )
     breach_count = int((breach_rows[0] or {}).get("cnt", 0))
 
-    thr_rows = execute_read(
-        "SELECT value FROM company_config WHERE field = %s LIMIT 1",
-        (f"{parameter}_high",),
-    )
-    threshold_high = float(thr_rows[0]["value"]) if thr_rows else None
-    above_pct = 0.0
-    if threshold_high is not None and values:
-        above = sum(1 for v in values if v > threshold_high)
-        above_pct = round(100.0 * above / len(values), 1)
+    above_pct = round(100.0 * above / n, 1) if threshold_high is not None else 0.0
 
     unit = "°C" if parameter == "temperature" else "hPa" if parameter == "pressure" else ""
 
@@ -999,7 +997,7 @@ def chart_summary_stats(
         "min":                          min_val,
         "max":                          max_val,
         "std_dev":                      std_val,
-        "reading_count":                len(values),
+        "reading_count":                n,
         "breach_count":                 breach_count,
         "time_above_threshold_percent": above_pct,
     }]
@@ -1067,13 +1065,13 @@ def incident_report(
             f"""
             (SELECT temperature, timestamp, 'before' AS side
                FROM readings
-              WHERE timestamp::timestamptz < %s::timestamptz AND is_valid = 1 {ctx_cid}
-              ORDER BY timestamp::timestamptz DESC LIMIT 5)
+              WHERE timestamp < LEFT(%s, 19) AND is_valid = 1 {ctx_cid}
+              ORDER BY timestamp DESC LIMIT 5)
             UNION ALL
             (SELECT temperature, timestamp, 'after' AS side
                FROM readings
-              WHERE timestamp::timestamptz >= %s::timestamptz AND is_valid = 1 {ctx_cid}
-              ORDER BY timestamp::timestamptz ASC LIMIT 5)
+              WHERE timestamp >= LEFT(%s, 19) AND is_valid = 1 {ctx_cid}
+              ORDER BY timestamp ASC LIMIT 5)
             ORDER BY timestamp ASC
             """,
             (alert["timestamp"], *ctx_params, alert["timestamp"], *ctx_params),
@@ -1100,6 +1098,7 @@ def chart_predictions(
     source:    str = Query("live"),
 ):
     company_id = admin.get("company_id")
+    source = _csv_guard(company_id, source)
     live_col    = _live_param_expr(parameter)
     live_filter = _live_extra_filter(parameter)
     csv_col     = _csv_param_col(parameter)
@@ -1124,12 +1123,14 @@ def chart_predictions(
         cid_params = (company_id,) if company_id else ()
         rows = execute_read(
             f"""
-            SELECT DISTINCT ON (DATE_TRUNC('minute', timestamp::timestamptz))
-                   ({live_col})::float AS v,
-                   EXTRACT(EPOCH FROM timestamp::timestamptz) AS ts
-              FROM readings
-             WHERE is_valid = 1 {live_filter} {cid_filter}
-             ORDER BY DATE_TRUNC('minute', timestamp::timestamptz) DESC, timestamp::timestamptz DESC
+            SELECT DISTINCT ON (DATE_TRUNC('minute', rts))
+                   v, EXTRACT(EPOCH FROM rts) AS ts
+              FROM (SELECT ({live_col})::float AS v, timestamp::timestamptz AS rts
+                      FROM readings
+                     WHERE is_valid = 1 {live_filter} {cid_filter}
+                     ORDER BY timestamp DESC
+                     LIMIT 3000) recent
+             ORDER BY DATE_TRUNC('minute', rts) DESC, rts DESC
              LIMIT 20
             """,
             cid_params,

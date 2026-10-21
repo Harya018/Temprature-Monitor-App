@@ -17,6 +17,7 @@ import {
   Wifi, WifiOff, ChevronDown,
 } from 'lucide-react'
 import './AnalyticsPage.css'
+import useCompanyParameters from '../hooks/useCompanyParameters.js'
 
 // ── auth headers (matches api.js pattern) ─────────────────────────────────────
 function adminHeaders() {
@@ -349,8 +350,7 @@ function HourlyAvgChart({ source, parameter, fromDate, toDate, h = 220 }) {
 // ─────────────────────────────────────────────────────────────────────────────
 // Chart 4 — Weekly Average
 // ─────────────────────────────────────────────────────────────────────────────
-function WeeklyAvgChart({ source, parameter, fromDate, toDate }) {
-  const unit = parameter === 'temperature' ? '°C' : 'hPa'
+function WeeklyAvgChart({ source, parameter, fromDate, toDate, unit = '', h = 220 }) {
   const url = `/api/analytics/charts/weekly-avg?parameter=${parameter}&source=${source}` +
     (fromDate ? `&from_date=${fromDate}` : '') + (toDate ? `&to_date=${toDate}` : '')
   const { data, loading, error, reload } = useChartData(url)
@@ -367,9 +367,9 @@ function WeeklyAvgChart({ source, parameter, fromDate, toDate }) {
         <span className="chart-card-title"><BarChart2 size={14} color={PURPLE} /> Weekly Average</span>
         <button className="btn-export-small" onClick={() => exportRows(rows, `weekly-avg-${parameter}.csv`)}>↓ CSV</button>
       </div>
-      {loading ? <Skeleton /> : error ? <ChartError onRetry={reload} /> :
-       !rows.length ? <Empty /> : (
-        <ResponsiveContainer width="100%" height={220}>
+      {loading ? <Skeleton h={h} /> : error ? <ChartError h={h} onRetry={reload} /> :
+       !rows.length ? <Empty h={h} /> : (
+        <ResponsiveContainer width="100%" height={h}>
           <LineChart data={rows} margin={{ top: 8, right: 16, bottom: 0, left: 0 }}>
             <CartesianGrid strokeDasharray="3 3" stroke="#F3F4F6" />
             <XAxis dataKey="week" tick={{ fontSize: 10, fill: '#9CA3AF' }} />
@@ -388,7 +388,7 @@ function WeeklyAvgChart({ source, parameter, fromDate, toDate }) {
 // ─────────────────────────────────────────────────────────────────────────────
 // Chart 5 — Distribution (horizontal bar)
 // ─────────────────────────────────────────────────────────────────────────────
-function DistributionChart({ source, parameter, fromDate, toDate }) {
+function DistributionChart({ source, parameter, fromDate, toDate, h = 220 }) {
   const url = `/api/analytics/charts/distribution?parameter=${parameter}&source=${source}` +
     (fromDate ? `&from_date=${fromDate}` : '') + (toDate ? `&to_date=${toDate}` : '')
   const { data, loading, error, reload } = useChartData(url)
@@ -409,9 +409,9 @@ function DistributionChart({ source, parameter, fromDate, toDate }) {
         <span className="chart-card-title"><BarChart2 size={14} color={PURPLE} /> Distribution</span>
         <button className="btn-export-small" onClick={() => exportRows(rows, `distribution-${parameter}.csv`)}>↓ CSV</button>
       </div>
-      {loading ? <Skeleton /> : error ? <ChartError onRetry={reload} /> :
-       !rows.length ? <Empty /> : (
-        <ResponsiveContainer width="100%" height={220}>
+      {loading ? <Skeleton h={h} /> : error ? <ChartError h={h} onRetry={reload} /> :
+       !rows.length ? <Empty h={h} /> : (
+        <ResponsiveContainer width="100%" height={h}>
           <BarChart data={rows} layout="vertical" margin={{ top: 4, right: 40, bottom: 0, left: 8 }}>
             <CartesianGrid strokeDasharray="3 3" stroke="#F3F4F6" horizontal={false} />
             <XAxis type="number" tick={{ fontSize: 10, fill: '#9CA3AF' }} />
@@ -691,20 +691,22 @@ function ChannelDeliveryChart({ fromDate, toDate }) {
             { key: 'mobile_push', label: 'Mobile Push' },
             { key: 'inapp',       label: 'In-App'      },
           ].map(({ key, label }) => {
-            const d    = data?.[key] || { sent: 0, failed: 0, rate_percent: 0 }
-            const rate = d.rate_percent ?? 0
-            const clr  = ringColor(rate)
+            const raw  = data && !Array.isArray(data) && typeof data[key] === 'object' ? data[key] : null
+            const d    = { sent: Number(raw?.sent ?? 0), failed: Number(raw?.failed ?? 0), rate_percent: raw?.rate_percent ?? 0 }
+            const none = d.sent + d.failed === 0
+            const rate = none ? 0 : d.rate_percent
+            const clr  = none ? '#9CA3AF' : ringColor(rate)
             return (
               <div key={key}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 11, marginBottom: 3 }}>
                   <span style={{ color: '#6B7280', fontWeight: 500 }}>{label}</span>
-                  <span style={{ color: clr, fontWeight: 700 }}>{rate}%</span>
+                  <span style={{ color: clr, fontWeight: 700 }}>{none ? '—' : `${rate}%`}</span>
                 </div>
                 <div style={{ background: '#F3F4F6', borderRadius: 4, height: 6, overflow: 'hidden' }}>
                   <div style={{ width: `${rate}%`, height: '100%', background: clr, borderRadius: 4, transition: 'width 0.4s' }} />
                 </div>
                 <div style={{ fontSize: 10, color: '#9CA3AF', marginTop: 2 }}>
-                  {d.sent} sent · {d.failed} failed
+                  {none ? 'No deliveries in this period' : `${d.sent} sent · ${d.failed} failed`}
                 </div>
               </div>
             )
@@ -872,10 +874,8 @@ function CsvImportPanel({ onImported }) {
 // ─────────────────────────────────────────────────────────────────────────────
 // Main page
 // ─────────────────────────────────────────────────────────────────────────────
-const DEFAULT_PARAMS = [
-  { value: 'temperature', label: 'Temperature', unit: '°C' },
-  { value: 'ph',          label: 'pH',          unit: ' pH' },
-]
+// Parameters come from the company (useCompanyParameters) — nothing is assumed.
+const paramLabelOf = n => (String(n).toLowerCase() === 'ph' ? 'pH' : String(n).charAt(0).toUpperCase() + String(n).slice(1))
 const RANGES = [
   { value: '1d',     label: 'Last 24h' },
   { value: '7d',     label: '7 Days'   },
@@ -891,6 +891,9 @@ function rangeToDates(range) {
   if (range === '30d') return { from: fmt(new Date(today - 30 * 86400000)), to: fmt(today) }
   return null
 }
+
+// Every chart on the page uses the same plot height so cards in a row line up
+const CHART_H = 220
 
 // ── KPI card ──────────────────────────────────────────────────────────────────
 function KpiCard({ label, value, unit = '', color = '#1F2937', icon: Icon, bg = '#F5F3FF', iconColor = PURPLE }) {
@@ -909,11 +912,15 @@ function KpiCard({ label, value, unit = '', color = '#1F2937', icon: Icon, bg = 
 
 export default function AnalyticsPage({ wsData }) {
   const [source,      setSource]    = useState('live')
-  const [parameter,   setParameter] = useState('temperature')
+  const { params: companyParams, loading: paramsLoading } = useCompanyParameters()
+  const paramList = companyParams.map(p => ({
+    value: p.name.toLowerCase(), label: paramLabelOf(p.name),
+    unit: p.unit ? (p.name.toLowerCase() === 'temperature' ? p.unit : ' ' + p.unit) : '',
+  }))
+  const [parameter,   setParameter] = useState('')
   const [range,       setRange]     = useState('7d')
   const [customFrom,  setCustomFrom] = useState('')
   const [customTo,    setCustomTo]   = useState('')
-  const [paramList,   setParamList]  = useState(DEFAULT_PARAMS)
   const [phThresholds, setPhThresholds] = useState({ high: 7.0, low: 5.5 })
   const [summaryStats, setSummaryStats] = useState(null)
 
@@ -928,23 +935,21 @@ export default function AnalyticsPage({ wsData }) {
       .catch(() => {})
   }, [])
 
-  // Load company parameters
+  // Keep the selected parameter valid as the company's parameters change
   useEffect(() => {
-    fetchCompanyParams().then(rows => {
-      const extras   = rows.map(p => ({ value: p.name.toLowerCase(), label: p.name.charAt(0).toUpperCase() + p.name.slice(1), unit: p.unit || '' }))
-      const existing = new Set(DEFAULT_PARAMS.map(p => p.value))
-      setParamList([...DEFAULT_PARAMS, ...extras.filter(p => !existing.has(p.value))])
-    })
-  }, [])
+    if (paramList.length && !paramList.some(p => p.value === parameter)) setParameter(paramList[0].value)
+  }, [paramList.map(p => p.value).join('|')]) // eslint-disable-line
 
   // Summary stats for KPI cards
   useEffect(() => {
+    if (!parameter) { setSummaryStats(null); return }
     const url = `/api/analytics/charts/summary-stats?parameter=${parameter}&source=${source}` +
       (fromDate ? `&from_date=${fromDate}` : '') + (toDate ? `&to_date=${toDate}` : '')
     apiFetch(url).then(d => setSummaryStats(Array.isArray(d) ? d[0] : null)).catch(() => setSummaryStats(null))
   }, [parameter, source, fromDate, toDate])
 
   const unit = paramList.find(p => p.value === parameter)?.unit || ''
+  const paramLabel = paramList.find(p => p.value === parameter)?.label || parameter
 
   const exportCsv = async () => {
     const url = `/api/analytics/charts/daily-avg?parameter=${parameter}&source=${source}` +
@@ -960,7 +965,7 @@ export default function AnalyticsPage({ wsData }) {
   }
 
   return (
-    <div className="analytics-page anl-onescreen">
+    <div className="analytics-page anl-structured">
 
       {/* ── Header ── */}
       <div className="anl-header-bar">
@@ -1007,19 +1012,57 @@ export default function AnalyticsPage({ wsData }) {
         <KpiCard label="Breaches"      value={summaryStats?.breach_count ?? '—'}    icon={AlertCircle}  bg="#FEF2F2" iconColor={CORAL}  color={summaryStats?.breach_count > 0 ? CORAL : '#22C55E'} />
       </div>
 
-      {/* ── Row 1: Temperature trend | Daily avg | Hourly avg ── */}
-      <div className="anl-row3">
-        <LiveTrendChart source={source} parameter="temperature" fromDate={fromDate} toDate={toDate} wsData={wsData} unit="°C" h={160} />
-        <DailyAvgChart  source={source} parameter={parameter}   fromDate={fromDate} toDate={toDate} h={160} />
-        <HourlyAvgChart source={source} parameter={parameter}   fromDate={fromDate} toDate={toDate} h={160} />
-      </div>
+      {!paramsLoading && paramList.length === 0 && (
+        <div className="chart-card" style={{ textAlign: 'center', padding: '40px 20px' }}>
+          <p style={{ fontWeight: 600, color: '#374151' }}>No parameters yet</p>
+          <p style={{ fontSize: 13, color: '#6B7280', marginTop: 4 }}>
+            Analytics appear once your first parameter is approved by the Super Admin (Settings → Add Parameter).
+          </p>
+        </div>
+      )}
 
-      {/* ── Row 2: pH trend | Breach frequency | Channel delivery ── */}
-      <div className="anl-row3">
-        <LiveTrendChart source={source} parameter="ph" fromDate={fromDate} toDate={toDate} wsData={wsData} unit=" pH" thresholdOverride={phThresholds} h={160} />
-        <BreachFrequencyChart fromDate={fromDate} toDate={toDate} h={160} />
-        <ChannelDeliveryChart fromDate={fromDate} toDate={toDate} />
-      </div>
+      {/* ── Live trends ── */}
+      <section className="anl-section" hidden={paramList.length === 0}>
+        <h2 className="anl-section-title">Live trends</h2>
+        <div className="anl-grid anl-grid-2">
+          {paramList.map(p => (
+            <LiveTrendChart key={p.value} source={source} parameter={p.value} fromDate={fromDate} toDate={toDate} wsData={wsData}
+              unit={p.unit} thresholdOverride={p.value === 'ph' ? phThresholds : null} h={CHART_H} />
+          ))}
+        </div>
+      </section>
+
+      {/* ── Patterns for the selected parameter ── */}
+      <section className="anl-section">
+        <h2 className="anl-section-title">{paramLabel} patterns</h2>
+        <div className="anl-grid anl-grid-3">
+          <DailyAvgChart  source={source} parameter={parameter} fromDate={fromDate} toDate={toDate} h={CHART_H} />
+          <HourlyAvgChart source={source} parameter={parameter} fromDate={fromDate} toDate={toDate} h={CHART_H} />
+          <WeeklyAvgChart source={source} parameter={parameter} fromDate={fromDate} toDate={toDate} unit={unit} h={CHART_H} />
+        </div>
+      </section>
+
+      {/* ── Distribution & breaches ── */}
+      <section className="anl-section">
+        <h2 className="anl-section-title">Distribution &amp; breaches</h2>
+        <div className="anl-grid anl-grid-2">
+          <DistributionChart source={source} parameter={parameter} fromDate={fromDate} toDate={toDate} h={CHART_H} />
+          <BreachFrequencyChart fromDate={fromDate} toDate={toDate} h={CHART_H} />
+        </div>
+      </section>
+
+      {/* ── Alert response ── */}
+      <section className="anl-section">
+        <h2 className="anl-section-title">Alert response</h2>
+        <div className="anl-grid anl-grid-2">
+          <AlertHeatmap fromDate={fromDate} toDate={toDate} />
+          {/* The heatmap is tall (24 hourly rows) — stack the other two beside it */}
+          <div className="anl-stack">
+            <ChannelDeliveryChart fromDate={fromDate} toDate={toDate} />
+            <SubscriberResponseTable fromDate={fromDate} toDate={toDate} />
+          </div>
+        </div>
+      </section>
 
     </div>
   )

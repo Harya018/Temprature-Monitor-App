@@ -19,7 +19,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
 
 from database.connection import execute_read, execute_write
-from routers.super_admin import require_super_admin
+from routers.super_admin_v2 import require_super_admin
 from utils.activity_logger import log_activity
 from utils.logger import get_logger
 
@@ -138,7 +138,7 @@ async def force_acknowledge(
     body: _ForceAckIn,
     sa: dict = Depends(require_super_admin),
 ):
-    rows = execute_read("SELECT id, acknowledged FROM alerts WHERE id = %s", (alert_id,))
+    rows = execute_read("SELECT id, acknowledged, company_id FROM alerts WHERE id = %s", (alert_id,))
     if not rows:
         return JSONResponse(status_code=404, content={"error": "Alert not found"})
 
@@ -162,6 +162,18 @@ async def force_acknowledge(
         None,
     )
     logger.info("Alert %d force-acknowledged by super_admin id=%d (reason=%r)", alert_id, sa["id"], body.reason)
+    try:   # if it is a company server's alert, that server's own copy is acknowledged too
+        from services.hub_sync import queue_node_ack
+        queue_node_ack(alert_id, "superadmin")
+    except Exception:
+        pass
+    # Tell open dashboards so the alert stops showing as active there too
+    try:
+        from modules.inapp.manager import broadcast as _broadcast
+        await _broadcast({"type": "acknowledgement", "alert_id": alert_id,
+                          "acknowledged_by": acknowledged_by}, company_id=rows[0].get("company_id"))
+    except Exception as exc:
+        logger.warning("force_acknowledge: broadcast failed: %s", exc)
     return {
         "alert_id":        alert_id,
         "acknowledged":    True,

@@ -7,6 +7,7 @@ import { RefreshCw, Database, Mail, MessageSquare, Wifi, Thermometer, Server } f
 import { fetchHealth, fetchDatabaseStats } from '../../services/api.js'
 import Card from '../shared/Card.jsx'
 import Badge from '../shared/Badge.jsx'
+import { useLiveSeconds } from '../../hooks/useNow.js'
 
 const MODULE_ICONS = {
   sensor:    <Thermometer  size={15} />,
@@ -46,12 +47,12 @@ export default function HealthStatus() {
 
   const modules  = health?.modules || {}
   const overall  = health?.status
-  const uptime   = health?.uptime_seconds
+  const uptime   = useLiveSeconds(health?.uptime_seconds)   // counts live between polls
 
   function humanUptime(s) {
-    if (!s) return '—'
-    const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60)
-    return h > 0 ? `${h}h ${m}m` : `${m}m`
+    if (s == null) return '—'
+    const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = Math.floor(s % 60)
+    return h > 0 ? `${h}h ${m}m ${sec}s` : m > 0 ? `${m}m ${sec}s` : `${sec}s`
   }
 
   const overallBadge = overall === 'ok' ? { color:'green', label:'Healthy' }
