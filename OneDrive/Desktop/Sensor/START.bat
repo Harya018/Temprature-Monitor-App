@@ -78,7 +78,7 @@ echo.
 echo [3/4] ProEasy Collector...
 echo.
 set "COLL_DIR=%~dp0sentineledge\collector"
-if not exist "%COLL_DIR%\" (
+if not exist "%COLL_DIR%\venv32\Scripts\python.exe" (
     echo       Not installed on this PC - live data comes from the Excel live reader.
     echo.
     goto collector_done
@@ -131,7 +131,7 @@ echo ==========================================
 echo     SENTINELEDGE IS RUNNING
 echo.
 echo     Dashboard  : http://localhost:5000
-if exist "%~dp0sentineledge\collector\" (echo     Collector  : ProEasy live collector) else (echo     Live data  : Excel live reader - set it up in Settings)
+if exist "%~dp0sentineledge\collector\venv32\Scripts\python.exe" (echo     Collector  : ProEasy live collector) else (echo     Live data  : Excel live reader - set it up in Settings)
 echo.
 echo     To STOP everything run STOP.bat
 echo ==========================================

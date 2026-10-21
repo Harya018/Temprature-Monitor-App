@@ -75,9 +75,11 @@ _src_cache: dict = {}
 
 def collector_installed() -> bool:
     """The Pro-face / Pro-Server live collector exists only on PCs where it was installed
-    (the sentineledge/collector folder). New company PCs use the Excel reader."""
+    (the sentineledge/collector folder WITH its 32-bit Python, venv32). A copy downloaded from
+    GitHub has the folder but not venv32 - such PCs use the Excel reader."""
     import os
-    return os.path.isdir(os.path.join(os.path.dirname(__file__), "..", "..", "collector"))
+    coll = os.path.join(os.path.dirname(__file__), "..", "..", "collector")
+    return os.path.isfile(os.path.join(coll, "venv32", "Scripts", "python.exe"))
 
 
 def get_source_company_id(source: str) -> Optional[int]:
