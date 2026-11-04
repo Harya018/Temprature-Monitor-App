@@ -303,12 +303,15 @@ def _probe_sensor(company_id=None) -> dict:
       excel live  the Excel reader is on and new rows are arriving in the file
       no data     a live source is switched on but nothing new is arriving (the detail says why)
       no source   this company has no live source switched on
-    Each company is shown only the source it owns (the collector / Excel reader on a shared PC can
-    belong to different companies). company_id None = platform level: any source.
+    A company can have several sources at once (e.g. the Pro-face collector for temperature / pressure
+    and an ESP32 Excel file for pH): every one of them is checked and listed in "sources", and the
+    overall status is "live" as soon as one of them delivers - the detail names each source, so a
+    stalled one is still visible. Each company is shown only the sources it owns; company_id None =
+    platform level: any source.
     """
     from services.sensor_company import get_source_company_id, get_sensor_company_id, collector_installed
     mine = lambda src: company_id is None or get_source_company_id(src) == company_id
-    waiting = None            # a switched-on source that is not delivering
+    found: list = []
 
     # 1) Pro-Server EX live collector
     try:
@@ -319,37 +322,40 @@ def _probe_sensor(company_id=None) -> dict:
             if state.last_received_at:
                 age = (datetime.now() - datetime.fromisoformat(state.last_received_at)).total_seconds()
             if age is not None and age <= SENSOR_LIVE_WINDOW_S:
-                return {"status": "live", "source": "Live collector (Pro-Server EX)",
-                        "detail": f"Last reading {int(age)} s ago", "last_reading_at": state.last_received_at,
-                        "age_seconds": int(age)}
-            if age is None:
-                why = "Collector has not sent any reading since the server started"
-            elif age < 3600:
-                why = f"No collector reading for {int(age // 60)} min {int(age % 60)} s"
+                found.append({"status": "live", "source": "Live collector (Pro-Server EX)",
+                              "detail": f"Last reading {int(age)} s ago", "last_reading_at": state.last_received_at,
+                              "age_seconds": int(age)})
             else:
-                why = f"No collector reading for {age / 3600:.1f} h"
-            waiting = {"status": "no data", "source": "Live collector (Pro-Server EX)", "detail": why,
-                       "last_reading_at": state.last_received_at, "age_seconds": int(age) if age is not None else None}
+                if age is None:
+                    why = "Collector has not sent any reading since the server started"
+                elif age < 3600:
+                    why = f"No collector reading for {int(age // 60)} min {int(age % 60)} s"
+                else:
+                    why = f"No collector reading for {age / 3600:.1f} h"
+                found.append({"status": "no data", "source": "Live collector (Pro-Server EX)", "detail": why,
+                              "last_reading_at": state.last_received_at, "age_seconds": int(age) if age is not None else None})
     except Exception:
         pass
 
-    # 2) Excel reader (independent switch in Settings)
+    # 2) Excel reader (independent switch in Settings) - e.g. an ESP32 logger's file
     try:
         import core.excel_sensor as xs
         if xs.EXCEL_LIVE_ENABLED and mine("excel"):
             fname = (xs.EXCEL_FILE_PATH or "").replace("\\", "/").rsplit("/", 1)[-1] or "the Excel file"
             if not xs.is_active() or (xs.current_temperature is None and not xs.extra_readings):
-                return waiting or {"status": "no data", "source": "Excel file",
-                                   "detail": f"Cannot read {fname} - check the file path in Settings",
-                                   "last_reading_at": None, "age_seconds": None}
-            st = xs.get_enabled_status()
-            if not st["in_loop_mode"]:
-                return {"status": "excel live", "source": "Excel file",
-                        "detail": f"New rows arriving in {fname}", "last_reading_at": st["last_new_row_at"],
-                        "age_seconds": None}
-            return waiting or {"status": "no data", "source": "Excel file",
-                               "detail": f"Excel reader is on but no new row has been added to {fname} - check the logger",
-                               "last_reading_at": st["last_new_row_at"], "age_seconds": None}
+                found.append({"status": "no data", "source": "Excel file",
+                              "detail": f"Cannot read {fname} - check the file path in Settings",
+                              "last_reading_at": None, "age_seconds": None})
+            else:
+                st = xs.get_enabled_status()
+                if not st["in_loop_mode"]:
+                    found.append({"status": "excel live", "source": "Excel file",
+                                  "detail": f"New rows arriving in {fname}", "last_reading_at": st["last_new_row_at"],
+                                  "age_seconds": None})
+                else:
+                    found.append({"status": "no data", "source": "Excel file",
+                                  "detail": f"Excel reader is on but no new row has been added to {fname} - check the logger",
+                                  "last_reading_at": st["last_new_row_at"], "age_seconds": None})
     except Exception:
         pass
 
@@ -357,16 +363,22 @@ def _probe_sensor(company_id=None) -> dict:
     try:
         from core.sensor import player
         if player.is_live and (company_id is None or company_id == get_sensor_company_id()):
-            return {"status": "live", "source": "USB sensor", "detail": "USB sensor streaming",
-                    "last_reading_at": None, "age_seconds": None}
+            found.append({"status": "live", "source": "USB sensor", "detail": "USB sensor streaming",
+                          "last_reading_at": None, "age_seconds": None})
     except Exception:
         pass
 
-    if waiting:
-        return waiting
-    return {"status": "no source", "source": "None",
-            "detail": "No live source is switched on for your company. Switch on the live collector or the Excel reader in Settings.",
-            "last_reading_at": None, "age_seconds": None}
+    if not found:
+        return {"status": "no source", "source": "None", "sources": [],
+                "detail": "No live source is switched on for your company. Switch on the live collector or the Excel reader in Settings.",
+                "last_reading_at": None, "age_seconds": None}
+    delivering = [d for d in found if d["status"] in ("live", "excel live")]
+    main = dict(delivering[0] if delivering else found[0])
+    if len(found) > 1:
+        main["source"] = " + ".join(d["source"] for d in found)
+        main["detail"] = " · ".join(f"{d['source']}: {d['detail']}" for d in found)
+    main["sources"] = found
+    return main
 
 
 def _resolve_token(request: Request) -> Optional[dict]:

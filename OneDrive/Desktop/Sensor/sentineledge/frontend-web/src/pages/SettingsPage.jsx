@@ -158,6 +158,18 @@ const AddParameterForm = memo(function AddParameterForm({ onToast, onAdded }) {
     dialogRef.current?.close()
   }, [])
 
+  // Opened from the dashboard's "Also arriving" list: ?addParameter=<name> fills the name in
+  useEffect(() => {
+    const wanted = new URLSearchParams(window.location.search).get('addParameter')
+    if (!wanted) return
+    const t = setTimeout(() => {
+      dialogRef.current?.showModal()
+      if (nameRef.current) nameRef.current.value = wanted
+      setTimeout(() => unitRef.current?.focus(), 30)
+    }, 400)
+    return () => clearTimeout(t)
+  }, [])
+
   // Close when clicking the backdrop (the dialog element itself, not its children)
   const handleDialogClick = useCallback((e) => {
     if (e.target === dialogRef.current) closeDialog()

@@ -18,6 +18,8 @@ import MiniAlertLog     from '../components/dashboard/MiniAlertLog.jsx'
 import SensorCard, { displayParamName } from '../components/dashboard/SensorCard.jsx'
 import SuperAdminNotices from '../components/dashboard/SuperAdminNotices.jsx'
 import useCompanyParameters from '../hooks/useCompanyParameters.js'
+import useAdminIdentity from '../hooks/useAdminIdentity.js'
+import UnmatchedValues from '../components/dashboard/UnmatchedValues.jsx'
 
 /* ── Truncate to 3 decimal places without rounding ──────────────────────────── */
 const trunc3 = v => { const n = Number(v); return isNaN(n) ? '—' : (Math.trunc(n * 1000) / 1000).toFixed(3) }
@@ -117,6 +119,7 @@ export default function DashboardPage({ wsData, health, thresholds, onAlertCount
   // Defensive destructure — all values have safe defaults
   const lastReading          = wsData?.lastReading          ?? null
   const lastCollectorReading = wsData?.lastCollectorReading ?? null
+  const liveValues           = wsData?.liveValues           ?? {}
   const readings             = wsData?.readings             ?? []
   const isConnected          = wsData?.isConnected          ?? false
   const connectionStatus     = wsData?.connectionStatus     ?? 'CONNECTING'
@@ -125,7 +128,9 @@ export default function DashboardPage({ wsData, health, thresholds, onAlertCount
   // When the collector is active, use its reading as the authoritative live
   // display value so the dashboard never switches to a non-collector source
   // between the collector's ~4 s polling intervals.
-  const displayReading = lastCollectorReading ?? lastReading
+  // Newest value of every parameter, from whichever source sends it (collector, Excel/ESP32, OPC):
+  // if only pH arrives only pH is live; if the collector sends all three, all three are live.
+  const displayReading = wsData?.liveReading ?? null
 
   const navigate = useNavigate()
 
@@ -134,7 +139,21 @@ export default function DashboardPage({ wsData, health, thresholds, onAlertCount
   // company sees none). The list refreshes live when a parameter is approved,
   // added or removed (server events are already scoped to this company).
   const { params, loading: paramsLoading, has } = useCompanyParameters()
+  const me = useAdminIdentity()
+  const isLive = n => liveValues[String(n).toLowerCase()] != null
+  // Each chart gets only the messages that carry ITS parameter, so the collector's readings and the
+  // ESP32 / Excel file's pH-only rows never cut gaps into each other's lines.
+  const readingsWith = name => {
+    const n = String(name).toLowerCase()
+    if (n === 'temperature') return readings.filter(r => typeof r?.temperature === 'number')
+    return readings.filter(r => Object.entries(r?.extra_params || {}).some(([k, v]) => k.toLowerCase() === n && v != null))
+  }
+  const anyLive = Object.keys(liveValues).length > 0
+  // While data arrives, show the tiles of the parameters that are actually arriving; the others are
+  // listed in one line instead of empty tiles. With no data at all, every tile shows "Waiting…".
+  const showTile = n => !anyLive || isLive(n) || alertFor(n)
   const sensorParams = params.filter(p => p.name.toLowerCase() !== 'temperature')
+  const notReceiving = anyLive ? params.filter(p => !isLive(p.name)).map(p => displayParamName(p.name)) : []
   const [paramToast, setParamToast] = useState('')
 
   useEffect(() => {
@@ -224,7 +243,7 @@ export default function DashboardPage({ wsData, health, thresholds, onAlertCount
 
         {/* Tiles — status tiles always; sensor tiles only for the company's own parameters */}
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 auto-rows-fr gap-4">
-          {has('temperature') && (
+          {has('temperature') && showTile('temperature') && (
             <AlertFrame alert={alertFor('temperature')} blinking={blinking(alertFor('temperature'))}>
               <TemperatureCard reading={displayReading} thresholds={thresholds}
                 alert={alertFor('temperature')} blinking={blinking(alertFor('temperature'))} />
@@ -234,7 +253,7 @@ export default function DashboardPage({ wsData, health, thresholds, onAlertCount
           <AlertsTodayCard count={Math.max(health?.alerts_today ?? 0, activeAlerts.length)} />
           <UptimeCard uptimeSeconds={health?.uptime_seconds ?? null} />
 
-          {sensorParams.map(p => {
+          {sensorParams.filter(p => showTile(p.name)).map(p => {
             // Case-insensitive match — Pro-Server EX column names may differ in case
             const ep = displayReading?.extra_params
             const liveValue = ep
@@ -272,6 +291,14 @@ export default function DashboardPage({ wsData, health, thresholds, onAlertCount
           })}
         </div>
 
+        <UnmatchedValues role={me?.role} />
+
+        {notReceiving.length > 0 && (
+          <p className="text-xs text-gray-500 -mt-1">
+            Not receiving right now: <strong>{notReceiving.join(', ')}</strong>. Their tiles come back as soon as a value arrives.
+          </p>
+        )}
+
         {/* Nothing configured yet (new company) */}
         {!paramsLoading && params.length === 0 && (
           <div className="card px-6 py-8 text-center">
@@ -293,11 +320,11 @@ export default function DashboardPage({ wsData, health, thresholds, onAlertCount
         {/* Second screen — one live chart per parameter the company has */}
         {params.length > 0 && (
           <div className="dash-snap grid grid-cols-1 lg:grid-cols-2 gap-4">
-            {has('temperature') && <LiveChart readings={readings} thresholds={thresholds} />}
+            {has('temperature') && <LiveChart readings={readingsWith('temperature')} thresholds={thresholds} />}
             {sensorParams.map(p => (
               p.name.toLowerCase() === 'ph'
-                ? <PhLiveChart key={p.name} readings={readings} />
-                : <ParamLiveChart key={p.name} readings={readings} param={p} />
+                ? <PhLiveChart key={p.name} readings={readingsWith(p.name)} />
+                : <ParamLiveChart key={p.name} readings={readingsWith(p.name)} param={p} />
             ))}
           </div>
         )}

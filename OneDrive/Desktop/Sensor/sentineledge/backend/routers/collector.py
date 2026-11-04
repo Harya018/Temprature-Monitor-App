@@ -98,7 +98,8 @@ async def receive_reading(body: CollectorReading, request: Request):
     from services.sensor_company import get_source_company_id
     params = {"pressure": body.pressure, "ph": body.ph, **(body.extra or {})}
     await ingest({"temperature": body.temperature, "timestamp": body.timestamp}, params,
-                 get_source_company_id("collector"),            # the company that owns the live collector message_type="live_collector_reading", source=data["source"],
+                 get_source_company_id("collector"),            # the company that owns the live collector
+                 message_type="live_collector_reading", source=data["source"],
                  extra_payload={"pressure": body.pressure, "ph": body.ph, "source": data["source"],
                                 "sequence": state.total_received})
 

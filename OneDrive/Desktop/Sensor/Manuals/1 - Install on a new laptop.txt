@@ -37,6 +37,11 @@ STEP 3 - FIRST-TIME SETUP (ONE CLICK, once)
   for that PostgreSQL's password once).
     * It installs Python 3.12 and PostgreSQL 16 if they are missing.
     * It installs the Python libraries and checks every one of them.
+    * If Pro-Server EX (Pro-face) is installed on the PC, it also sets up
+      the Pro-face live collector by itself (32-bit Python + its
+      libraries). No Pro-Server EX = the Excel live reader is used.
+      Pro-Server EX installed later: run
+      sentineledge\tools\SETUP_PROFACE_COLLECTOR.bat once.
     * It creates the database with its own random password.
     * It sets up the Super Admin with the STANDARD Super Admin password
       (the same on every SentinelEdge PC). Only a scrambled hash of it
@@ -50,6 +55,16 @@ STEP 3 - FIRST-TIME SETUP (ONE CLICK, once)
       where the file is.
   Keep the passwords file private: store the passwords safely, then
   move the file off the PC or delete it. Never give it to the company.
+
+  A protected copy of the PC's own settings (settings file, e-mail key,
+  PostgreSQL password) is kept in C:\ProgramData\SentinelEdge. If the
+  SentinelEdge folder is ever deleted and installed again (e.g. from
+  GitHub), FIRST_TIME_SETUP takes them back from there: the database,
+  the e-mail accounts and the passwords keep working.
+
+  UPDATING an installed PC: extract the new copy and copy its files OVER
+  the existing folder (replace files), then STOP.bat and START.bat. Do
+  not delete the folder first - that is only needed for a broken install.
 
 
 STEP 4 - START (every day)

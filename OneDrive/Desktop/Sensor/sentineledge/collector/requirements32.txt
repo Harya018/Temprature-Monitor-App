@@ -1,0 +1,4 @@
+# Libraries of the Pro-face live collector (32-bit Python 3.12, venv32) - installed by FIRST_TIME_SETUP
+pythonnet==3.1.0
+clr_loader==0.3.1
+requests==2.34.2

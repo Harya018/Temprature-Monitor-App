@@ -14,8 +14,9 @@ if errorlevel 1 (
 echo ==========================================================
 echo   SENTINELEDGE - FIRST-TIME SETUP (run once per PC)
 echo ==========================================================
-echo   Everything is done for you: Python, PostgreSQL, libraries,
-echo   database, Super Admin, firewall - then SentinelEdge starts.
+echo   Everything is done for you: Python, PostgreSQL, libraries, the Pro-face
+echo   collector (if Pro-Server EX is here), database, Super Admin, firewall -
+echo   then SentinelEdge starts.
 echo   Needs internet. Takes 5-20 minutes. Do not close this window.
 echo.
 
@@ -39,7 +40,7 @@ powershell -NoProfile -Command "Get-ChildItem -LiteralPath '%MAIN:~0,-1%' -Recur
 set "SETUP_STATE=%TEMP%\sentineledge_setup_state.txt"
 if exist "%SETUP_STATE%" del "%SETUP_STATE%" >nul 2>&1
 
-echo [1/7] Checking / installing Python and PostgreSQL...
+echo [1/8] Checking / installing Python and PostgreSQL...
 powershell -NoProfile -ExecutionPolicy Bypass -File "%APP%\setup_prereqs.ps1"
 if not "%errorlevel%"=="0" (
     echo.
@@ -72,7 +73,7 @@ if not defined PYEXE (
 >"%APP%\python_path.txt" echo(%PYEXE%
 echo.
 
-echo [2/7] Installing the Python libraries from requirements.txt (a few minutes)...
+echo [2/8] Installing the Python libraries from requirements.txt (a few minutes)...
 "%PYEXE%" -m pip install --upgrade pip --quiet
 "%PYEXE%" -m pip install -r backend\requirements.txt
 if errorlevel 1 (
@@ -97,7 +98,15 @@ if errorlevel 1 (
 echo       Libraries installed and checked.
 echo.
 
-echo [3/7] Creating the database and its password...
+echo [3/8] Pro-face live collector (only when Pro-Server EX is installed on this PC)...
+powershell -NoProfile -ExecutionPolicy Bypass -File "%APP%\setup_collector32.ps1"
+if errorlevel 1 (
+    echo       The Pro-face collector could not be set up - SentinelEdge still works with the Excel reader.
+    echo       Fix the internet connection and run sentineledge\tools\SETUP_PROFACE_COLLECTOR.bat later.
+)
+echo.
+
+echo [4/8] Creating the database and its password...
 :: Only when PostgreSQL was ALREADY on this PC (not installed by this setup) its password is needed
 if not defined PGPASSWORD set /p "PGPASSWORD=  PostgreSQL was already installed. Type the password of its 'postgres' user: "
 "%PSQL%" -U postgres -h localhost -c "SELECT 1" >nul 2>&1
@@ -123,7 +132,7 @@ if errorlevel 1 (
 echo       Database ready (its password was created automatically).
 echo.
 
-echo [4/7] Super Admin account (the standard Super Admin password of every SentinelEdge PC)...
+echo [5/8] Super Admin account (the standard Super Admin password of every SentinelEdge PC)...
 powershell -NoProfile -ExecutionPolicy Bypass -File "%APP%\setup_secrets.ps1" -Mode Super -Psql "%PSQL%" -Python "%PYEXE%"
 if errorlevel 1 (
     set "PGPASSWORD="
@@ -133,7 +142,7 @@ if errorlevel 1 (
 )
 echo.
 
-echo [5/7] Windows firewall: letting the phone app and the main server reach port 5000...
+echo [6/8] Windows firewall: letting the phone app and the main server reach port 5000...
 netsh advfirewall firewall delete rule name="SentinelEdge (port 5000)" >nul 2>&1
 netsh advfirewall firewall add rule name="SentinelEdge (port 5000)" dir=in action=allow protocol=TCP localport=5000 profile=any >nul 2>&1
 if errorlevel 1 (
@@ -143,7 +152,7 @@ if errorlevel 1 (
 )
 echo.
 
-echo [6/7] Checking the program files...
+echo [7/8] Checking the program files...
 "%PYEXE%" -c "import ast; [ast.parse(open(f, encoding='utf-8-sig').read()) for f in ('backend/main.py', 'backend/config.py')]; print('      Program files OK')"
 if errorlevel 1 (
     set "PGPASSWORD="
@@ -159,7 +168,7 @@ if not exist "%APP%\backend\static\index.html" (
 )
 echo.
 
-echo [7/7] Writing all passwords of this PC into one file...
+echo [8/8] Writing all passwords of this PC into one file...
 set "PWFILE=%MAIN%SentinelEdge PASSWORDS - KEEP PRIVATE.txt"
 powershell -NoProfile -ExecutionPolicy Bypass -File "%APP%\setup_secrets.ps1" -Mode Summary -OutFile "%PWFILE%" >nul
 set "PGPASSWORD="

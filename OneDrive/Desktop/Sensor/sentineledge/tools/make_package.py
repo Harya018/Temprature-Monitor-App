@@ -54,7 +54,7 @@ def build(target: str) -> None:
     app_dst = os.path.join(target, "sentineledge")
     os.makedirs(app_dst)
     shutil.copytree(os.path.join(APP, "backend"), os.path.join(app_dst, "backend"), ignore=_ignore)
-    for f in ("setup_prereqs.ps1", "setup_secrets.ps1", ".env.template"):
+    for f in ("setup_prereqs.ps1", "setup_secrets.ps1", "setup_collector32.ps1", ".env.template"):
         shutil.copy2(os.path.join(APP, f), os.path.join(app_dst, f))
 
     # safety check: nothing private slipped through

@@ -849,7 +849,7 @@ async def get_me(request: Request):
             from services.sensor_company import get_sensor_company_id
             row["owns_sensor_feed"] = row.get("company_id") == get_sensor_company_id()
             # Which company each live source on this PC currently feeds
-            row["source_owners"] = _source_owners()
+            row["source_owners"] = _source_owners(row.get("company_id") if row.get("role") != "super_admin" else None)
             from services.sensor_company import collector_installed as _ci, get_source_company_id as _gs
             row["collector_available"] = _ci() and (row.get("company_id") is None
                                                      or _gs("collector") == row.get("company_id"))
@@ -1262,6 +1262,26 @@ async def send_test_alert(parameter_id: int, request: Request):
             "direction": direction, "limit": limit, "subscribers": int(people)}
 
 
+@router.get(
+    "/admin/incoming-unmatched",
+    summary="Values the company's live sources send that are not one of its parameters",
+    description="Seen in the last 10 minutes. They are not stored; the admin can request them as parameters.",
+)
+async def incoming_unmatched(admin: dict = Depends(require_admin)):
+    from services.live_ingest import unmatched_for
+    from database.connection import execute_read
+    cid = admin.get("company_id")
+    if not cid:
+        return []
+    rows = unmatched_for(cid)
+    pending = {str(r["n"]).lower() for r in execute_read(
+        "SELECT payload->>'name' AS n FROM pending_approvals WHERE status = 'pending' AND action_type = 'add_parameter' "
+        "AND (payload->>'company_id')::int = %s", (cid,)) or []}
+    for r in rows:
+        r["requested"] = r["name"].lower() in pending
+    return rows
+
+
 class _ParamRequestIn(BaseModel):
     name:      str = Field(min_length=1, max_length=100)
     unit:      str = Field(min_length=1, max_length=50)
@@ -1637,27 +1657,34 @@ def api_save_proserver_settings(body: _ProServerSettingsIn, admin: dict = Depend
     return JSONResponse({"status": "saved", "active": excel_sensor.is_active(), "auto_save": body.auto_save})
 
 
-@router.get("/admin/data-source", dependencies=[Depends(require_feed_admin)])
-def api_get_data_source():
-    """State of the two independent live sources."""
+@router.get("/admin/data-source")
+def api_get_data_source(admin: dict = Depends(require_feed_admin)):
+    """State of the two independent live sources. Another company's Excel file (path, rows) is not shown."""
     import core.excel_sensor as excel_sensor
     from services.data_sources import collector_enabled
+    from services.sensor_company import get_source_company_id
+    cid = admin.get("company_id")
+    mine = cid is None or admin.get("role") == "super_admin" or get_source_company_id("excel") == cid
     return {
         "collector_enabled": collector_enabled(),
         "excel_enabled":     excel_sensor.EXCEL_LIVE_ENABLED,
-        "file_path":         excel_sensor.EXCEL_FILE_PATH,
-        "excel":             excel_sensor.get_enabled_status(),
-        "owners":            _source_owners(),
+        "file_path":         excel_sensor.EXCEL_FILE_PATH if mine else "",
+        "excel":             excel_sensor.get_enabled_status() if mine else {"enabled": excel_sensor.EXCEL_LIVE_ENABLED},
+        "owners":            _source_owners(cid if admin.get("role") != "super_admin" else None),
     }
 
 
-def _source_owners() -> dict:
-    """Which company each live source on this PC belongs to."""
+def _source_owners(viewer_company_id=None) -> dict:
+    """Which company each live source on this PC belongs to. A company admin sees its own company's
+    name; another company on the same PC is shown only as "another company" (no name)."""
     from services.sensor_company import SOURCES, get_source_company_id
     from database.connection import execute_read as _er
     out = {}
     for src in SOURCES:
         cid = get_source_company_id(src)
+        if viewer_company_id is not None and cid is not None and cid != viewer_company_id:
+            out[src] = {"company_id": None, "company_name": "another company"}
+            continue
         r = _er("SELECT name FROM companies WHERE id = %s", (cid,)) if cid else []
         out[src] = {"company_id": cid, "company_name": r[0]["name"] if r else None}
     return out
@@ -1739,7 +1766,7 @@ async def api_set_data_source(body: _DataSourceIn, admin: dict = Depends(require
     return {"collector_enabled": data_sources.collector_enabled(),
             "excel_enabled": excel_sensor.EXCEL_LIVE_ENABLED,
             "file_path": excel_sensor.EXCEL_FILE_PATH,
-            "owners": _source_owners()}
+            "owners": _source_owners(admin.get("company_id") if admin.get("role") != "super_admin" else None)}
 
 
 @router.get("/admin/proserver/reading-status", dependencies=[Depends(require_feed_admin)])

@@ -12,6 +12,18 @@ $pyUrl    = 'https://www.python.org/ftp/python/3.12.10/python-3.12.10-amd64.exe'
 $pgUrl    = 'https://get.enterprisedb.com/postgresql/postgresql-16.9-1-windows-x64.exe'
 $state    = Join-Path $env:TEMP 'sentineledge_setup_state.txt'     # read back by FIRST_TIME_SETUP.bat
 
+# Protected copy of this PC's secrets OUTSIDE the program folder, so deleting the SentinelEdge folder and
+# installing a fresh copy (e.g. from GitHub) keeps them. Only Administrators, SYSTEM and this user.
+$keep = if ($env:SENTINEL_KEEP_DIR) { $env:SENTINEL_KEEP_DIR } else { Join-Path $env:ProgramData 'SentinelEdge' }
+function Ensure-Keep {
+    if (-not (Test-Path $keep)) {
+        New-Item -ItemType Directory -Force $keep | Out-Null
+        if (-not $env:SENTINEL_KEEP_DIR) {
+            & icacls $keep /inheritance:r /grant:r "*S-1-5-32-544:(OI)(CI)F" "*S-1-5-18:(OI)(CI)F" "$($env:USERDOMAIN)\$($env:USERNAME):(OI)(CI)F" | Out-Null
+        }
+    }
+}
+
 function Find-Python {
     foreach ($p in @("$env:ProgramFiles\Python312\python.exe", "$env:LOCALAPPDATA\Programs\Python\Python312\python.exe")) {
         if (Test-Path $p) { return $p }
@@ -75,12 +87,15 @@ if (-not $psql) {
     if (-not $psql) { Write-Host '      PostgreSQL installed but psql was not found.'; exit 3 }
     New-Item -ItemType Directory -Force $secrets | Out-Null
     "postgres user password (created by setup): $pw" | Set-Content (Join-Path $secrets 'postgres_password.txt') -Encoding ascii
+    Ensure-Keep
+    "postgres user password (created by setup): $pw" | Set-Content (Join-Path $keep 'postgres_password.txt') -Encoding ascii
     "PGPASSWORD=$pw" | Add-Content $state -Encoding ascii
     Write-Host '      PostgreSQL installed. Its password is saved in sentineledge\backend\secrets\postgres_password.txt'
 }
 # PostgreSQL was installed by an earlier run of this setup: reuse the password it saved
 if (-not (Select-String -Path $state -Pattern '^PGPASSWORD=' -Quiet)) {
     $saved = Join-Path $secrets 'postgres_password.txt'
+    if (-not (Test-Path $saved)) { $saved = Join-Path $keep 'postgres_password.txt' }      # program folder re-installed
     if (Test-Path $saved) {
         $pw = ((Get-Content $saved -Raw) -split ':', 2)[1].Trim()
         if ($pw) { "PGPASSWORD=$pw" | Add-Content $state -Encoding ascii; Write-Host '      Using the PostgreSQL password saved by the earlier setup.' }

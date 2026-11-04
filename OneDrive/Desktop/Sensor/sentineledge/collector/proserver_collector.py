@@ -56,7 +56,7 @@ def log(tag: str, msg: str) -> None:
 # ── Config ─────────────────────────────────────────────────────────────────────
 
 def load_config() -> dict:
-    with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+    with open(CONFIG_FILE, "r", encoding="utf-8-sig") as f:      # also reads a file saved with a BOM
         return json.load(f)
 
 # ── ProEasy session ────────────────────────────────────────────────────────────

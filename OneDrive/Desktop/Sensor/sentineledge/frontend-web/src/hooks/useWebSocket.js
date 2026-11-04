@@ -9,7 +9,7 @@
  * Keeps last 60 readings in state.
  * Calls onBreach(breach) for each breach in an incoming message.
  */
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 
 /** Derive the correct WebSocket URL, including the admin token if available. */
 function getWsUrl() {
@@ -74,6 +74,9 @@ function removeAlertIds(prev, ids) {
   })
 }
 
+// a parameter with no new value for this long is no longer shown as live
+const LIVE_MS = 120000
+
 export default function useWebSocket({ onBreach } = {}) {
   const [lastReading,          setLastReading]          = useState(null)
   const [lastCollectorReading, setLastCollectorReading] = useState(null)
@@ -82,6 +85,15 @@ export default function useWebSocket({ onBreach } = {}) {
   const [connectionStatus,     setConnectionStatus]     = useState('CONNECTING')
   const [lastEvent,            setLastEvent]            = useState(null)
   const [activeAlerts,         setActiveAlerts]         = useState([])
+  // Newest value of EACH parameter, whichever live source sent it (Pro-face collector: temperature,
+  // pressure, pH; ESP32 / Excel file: pH only). A pH-only message never blanks the other tiles.
+  // { lowerName: { value, at (ms received), ts (reading time), source } }
+  const [liveValues,           setLiveValues]           = useState({})
+  const [liveTick,             setLiveTick]             = useState(0)
+  useEffect(() => {                       // re-check every 10 s which values are still live
+    const t = setInterval(() => setLiveTick(n => n + 1), 10000)
+    return () => clearInterval(t)
+  }, [])
 
   const wsRef      = useRef(null)
   const retryDelay = useRef(1000)
@@ -214,6 +226,16 @@ export default function useWebSocket({ onBreach } = {}) {
           // separately so it is never overwritten by other temperature messages.
           if ('temperature' in msg) {
             setLastReading(msg)
+            if (msg.is_valid !== false) {
+              setLiveValues(prev => {
+                const now = Date.now(), next = { ...prev }, src = msg.source || msg.type || 'sensor'
+                if (msg.temperature != null) next.temperature = { value: msg.temperature, at: now, ts: msg.timestamp, source: src }
+                for (const [k, v] of Object.entries(msg.extra_params || {})) {
+                  if (v != null) next[String(k).toLowerCase()] = { value: v, at: now, ts: msg.timestamp, source: src }
+                }
+                return next
+              })
+            }
             if (msg.type === 'live_collector_reading') {
               setLastCollectorReading(msg)
             }
@@ -346,5 +368,25 @@ export default function useWebSocket({ onBreach } = {}) {
     setActiveAlerts(prev => removeAlertIds(prev, ids))
   }, [])
 
-  return { lastReading, lastCollectorReading, readings, isConnected, connectionStatus, lastEvent, activeAlerts, clearAlerts }
+  // Only values that arrived in the last LIVE_MS count as live: when a source stops (e.g. the
+  // Pro-face collector), its parameters drop off and only what still arrives is shown.
+  const { liveNow, liveReading } = useMemo(() => {
+    const cutoff = Date.now() - LIVE_MS
+    const fresh = Object.fromEntries(Object.entries(liveValues).filter(([, v]) => v.at >= cutoff))
+    const names = Object.keys(fresh)
+    if (!names.length) return { liveNow: {}, liveReading: null }
+    const newest = names.reduce((a, b) => (fresh[a].at >= fresh[b].at ? a : b))
+    const extra = Object.fromEntries(names.filter(n => n !== 'temperature').map(n => [n, fresh[n].value]))
+    return {
+      liveNow: fresh,
+      liveReading: {
+        temperature: fresh.temperature ? fresh.temperature.value : null,
+        timestamp: fresh.temperature ? fresh.temperature.ts : fresh[newest].ts,
+        extra_params: extra,
+        sequence: lastCollectorReading?.sequence ?? null,
+      },
+    }
+  }, [liveValues, liveTick, lastCollectorReading])
+
+  return { lastReading, lastCollectorReading, liveReading, liveValues: liveNow, readings, isConnected, connectionStatus, lastEvent, activeAlerts, clearAlerts }
 }

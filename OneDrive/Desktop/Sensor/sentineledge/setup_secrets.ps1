@@ -17,6 +17,18 @@ $root    = Split-Path -Parent $MyInvocation.MyCommand.Path
 $envFile = Join-Path $root '.env.development'
 $secrets = Join-Path $root 'backend\secrets'
 
+# Protected copy of this PC's secrets OUTSIDE the program folder, so deleting the SentinelEdge folder and
+# installing a fresh copy (e.g. from GitHub) keeps them. Only Administrators, SYSTEM and this user.
+$keep = if ($env:SENTINEL_KEEP_DIR) { $env:SENTINEL_KEEP_DIR } else { Join-Path $env:ProgramData 'SentinelEdge' }
+function Ensure-Keep {
+    if (-not (Test-Path $keep)) {
+        New-Item -ItemType Directory -Force $keep | Out-Null
+        if (-not $env:SENTINEL_KEEP_DIR) {
+            & icacls $keep /inheritance:r /grant:r "*S-1-5-32-544:(OI)(CI)F" "*S-1-5-18:(OI)(CI)F" "$($env:USERDOMAIN)\$($env:USERNAME):(OI)(CI)F" | Out-Null
+        }
+    }
+}
+
 # The Super Admin password - the same on every SentinelEdge PC (main server and every company PC).
 # Only its bcrypt hash is kept here; the server stores this hash as it is (it never sees the password).
 $SuperAdminUser = 'superadmin'
@@ -36,6 +48,17 @@ function Get-DbPassword {
 }
 
 if ($Mode -eq 'Db') {
+    # program folder re-installed (e.g. from GitHub) on a PC that was set up before: take this PC's
+    # settings file (database password, e-mail account) and e-mail key back from the protected copy
+    if (-not (Test-Path $envFile) -and (Test-Path (Join-Path $keep 'env.backup'))) {
+        Copy-Item (Join-Path $keep 'env.backup') $envFile
+        Write-Host '      Settings of this PC restored from the protected copy (e-mail account and database kept).'
+    }
+    $key = Join-Path $secrets 'settings.key'
+    if (-not (Test-Path $key) -and (Test-Path (Join-Path $keep 'settings.key'))) {
+        New-Item -ItemType Directory -Force $secrets | Out-Null
+        Copy-Item (Join-Path $keep 'settings.key') $key
+    }
     # the password already in .env.development wins (so a second run never breaks a working install)
     $pw = Get-DbPassword
     if (-not $pw) { $pw = New-Pw 20 }
@@ -44,6 +67,7 @@ if ($Mode -eq 'Db') {
     & $Psql -U postgres -h localhost -v ON_ERROR_STOP=1 -q -c $sql
     if ($LASTEXITCODE -ne 0) { exit 1 }
     $url = "postgresql://sentineledge:$pw@localhost:5432/sentineledge"
+    try { Ensure-Keep } catch {}
     if (Test-Path $envFile) {
         $txt = Get-Content $envFile -Raw
         if ($txt -match '(?m)^DATABASE_URL=') { $txt = [regex]::Replace($txt, '(?m)^DATABASE_URL=.*$', "DATABASE_URL=$url") }
@@ -135,6 +159,9 @@ DATABASE  (only needed for repairs - never needed for daily use)
   SentinelEdge user        : sentineledge
   Its password             : $(if ($dbPw) { $dbPw } else { '(not found)' })
   Settings file            : $envFile
+  Protected copy           : $keep
+                             (settings file, e-mail key, PostgreSQL password - kept when
+                             the SentinelEdge folder is deleted and installed again)
 
 
 DASHBOARD ADDRESSES

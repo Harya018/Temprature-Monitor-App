@@ -13,6 +13,7 @@ just measured.
 
 from __future__ import annotations
 
+import re
 import time
 from typing import Optional
 
@@ -30,6 +31,32 @@ logger = get_logger(__name__)
 PARAM_COOLDOWN_S = 300              # one alert per company / parameter / direction per 5 minutes
 _param_cache: dict = {}             # company_id -> (expires, {lower name: row})
 _cooldowns: dict = {}               # (company_id, name, direction) -> monotonic time of last alert
+# Values a source sends that the company has NO parameter for (dropped, but listed on the dashboard so
+# the admin can request them): company_id -> {name: {"value", "at" (epoch s), "source"}}
+_unmatched: dict = {}
+_NOT_A_MEASUREMENT = re.compile(r"(millis|timestamp|^time$|^date|datetime|^seq|sequence|^id$|index|counter|serial|^raw|^row|^no$)")
+
+
+def _note_unmatched(company_id, name, value, source) -> None:
+    from utils.column_match import norm
+    n = norm(name)
+    if not n or _NOT_A_MEASUREMENT.search(n):
+        return
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return                                       # text columns are not readings
+    _unmatched.setdefault(company_id, {})[str(name).strip()] = {"value": value, "at": time.time(), "source": source}
+
+
+def unmatched_for(company_id, within_s: int = 600) -> list:
+    """What this company's sources sent in the last `within_s` seconds that it has no parameter for."""
+    now = time.time()
+    rows = [{"name": k, "value": v["value"], "seen_seconds_ago": int(now - v["at"]), "source": v["source"]}
+            for k, v in (_unmatched.get(company_id) or {}).items() if now - v["at"] <= within_s]
+    have = set(_company_parameters(company_id))
+    from utils.column_match import match_parameter
+    return sorted((r for r in rows if not match_parameter(r["name"], {n: {} for n in have})), key=lambda r: r["name"].lower())
 
 
 def _company_parameters(company_id) -> dict:
@@ -111,8 +138,12 @@ async def ingest(reading: dict, extra: Optional[dict], company_id, *,
         name = match_parameter(k, params)                 # "pH Value", "PH (pH)", "ph_value" -> ph
         if name and name != "temperature" and name not in ep:
             ep[name] = v
+        elif not name:
+            _note_unmatched(company_id, k, v, source)
     reading = dict(reading)
     if "temperature" not in params:
+        if reading.get("temperature") is not None:
+            _note_unmatched(company_id, "temperature", reading["temperature"], source)
         reading["temperature"] = None                     # e.g. a pH-only company
     if reading.get("temperature") is None and not ep:
         return {"valid": True, "stored": False}           # nothing this company has approved

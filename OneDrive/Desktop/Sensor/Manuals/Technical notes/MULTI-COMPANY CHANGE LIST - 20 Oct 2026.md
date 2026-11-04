@@ -75,6 +75,16 @@
 - "Act as admin": recorded as "Super Admin (as <name>)"; ending it ends the session (it stayed valid up to 1 h).
 - Activity log: every entry filed under the admin's company; subscriber switch-on/off and PIN changes logged; settings change history records the admin's name; deleting alert history records who did it.
 
+## H. 30 Oct - 4 Nov 2026: live data that adapts to what arrives
+- Dashboard keeps the newest value of EACH parameter, from whichever source sends it (Pro-face collector, Excel/ESP32, OPC): pH only -> pH; collector -> all three; a source that stops drops off after 2 min ("Not receiving right now: ..."). Collector readings were sent without their label (bug in routers/collector.py) - fixed; Excel/OPC readings labelled too.
+- Each chart only gets the messages that carry its parameter (no gaps from the other source).
+- Health: every live source of the company is checked and listed (collector + Excel together), so a stalled one is visible.
+- "Also arriving from your live sources": values a source sends that are not a parameter of the company (e.g. humidity from the collector) are listed on the dashboard; main admins press Request (Settings > Add Parameter opens with the name), Super Admin approves. Counters/time/raw columns are ignored.
+- Settings no longer shows another company's name / Excel file path for a live source on a shared PC ("another company").
+- FIRST_TIME_SETUP step 3: Pro-Server EX found -> 32-bit Python (C:\Python312-32) + collector\venv32 built automatically (setup_collector32.ps1, collector\requirements32.txt); tools\SETUP_PROFACE_COLLECTOR.bat for later.
+- Protected copy C:\ProgramData\SentinelEdge (env.backup, settings.key, postgres_password.txt): kept up to date by the server; a re-installed folder gets them back (setup + server), so deleting the folder no longer loses the database password or the e-mail accounts.
+- Tests kept outside the temp folder: C:\Users\harya\SentinelEdge_Build\tests.
+
 ## G. New-PC setup (one click)
 - FIRST_TIME_SETUP.bat moved to the main folder (next to START.bat); the package puts it there too.
 - One click: only the Windows Administrator "Yes" (plus the postgres password only if PostgreSQL was already installed). No Super Admin question, no "Start now?" - SentinelEdge starts by itself at the end.

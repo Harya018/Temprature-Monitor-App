@@ -576,6 +576,13 @@ async def lifespan(app: FastAPI):
     #    connected, so a company server nobody had open would not store the Excel reader's rows or raise alerts.
     _ensure_reading_loop()
 
+    # 7. Protected copy of this PC's secrets outside the program folder (survives a fresh re-install)
+    try:
+        from services import keep_safe
+        keep_safe.backup_all()
+    except Exception as exc:
+        logger.debug("keep_safe backup skipped: %s", exc)
+
     yield
 
     # ── Shutdown ──────────────────────────────────────────────────────────────
@@ -882,12 +889,14 @@ async def _process_reading(reading: dict, company_id) -> None:
         from services.sensor_company import get_source_company_id
         await ingest({"temperature": excel_sensor.current_temperature,      # None for a pH-only plant
                       "timestamp":   excel_sensor.current_timestamp or reading["timestamp"]},
-                     dict(excel_sensor.extra_readings), get_source_company_id("excel"))
+                     dict(excel_sensor.extra_readings), get_source_company_id("excel"),
+                     message_type="excel_reading", source="excel", extra_payload={"source": "excel"})
     elif opc_sensor.is_active() and opc_sensor.current_temperature is not None:
         from services.sensor_company import get_source_company_id
         await ingest({"temperature": opc_sensor.current_temperature,
                       "timestamp":   opc_sensor.current_timestamp or reading["timestamp"]},
-                     dict(opc_sensor.extra_readings), get_source_company_id("excel"))
+                     dict(opc_sensor.extra_readings), get_source_company_id("excel"),
+                     message_type="opc_reading", source="opc", extra_payload={"source": "opc"})
     elif reading.get("is_live") is False:
         return                                      # CSV playback / synthetic curve: not real data
     else:

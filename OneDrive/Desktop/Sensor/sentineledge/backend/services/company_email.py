@@ -50,8 +50,13 @@ def _fernet():
     from cryptography.fernet import Fernet
     kp = _key_path()
     if not kp.exists():
+        from services import keep_safe          # program folder re-installed: take the key back
+        keep_safe.restore(str(kp), "settings.key")
+    if not kp.exists():
         kp.parent.mkdir(parents=True, exist_ok=True)
         kp.write_bytes(Fernet.generate_key())
+        from services import keep_safe
+        keep_safe.save(str(kp), "settings.key")
     return Fernet(kp.read_bytes().strip())
 
 

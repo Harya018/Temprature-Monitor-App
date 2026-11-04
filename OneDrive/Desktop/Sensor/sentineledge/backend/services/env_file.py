@@ -65,6 +65,8 @@ def set_values(values: dict, path: Optional[str] = None) -> str:
         with os.fdopen(fd, "w", encoding="utf-8", newline="") as f:
             f.write(out)
         os.replace(tmp, path)
+        from services import keep_safe          # protected copy outside the program folder
+        keep_safe.save(path, "env.backup")
     except Exception:
         try:
             os.remove(tmp)

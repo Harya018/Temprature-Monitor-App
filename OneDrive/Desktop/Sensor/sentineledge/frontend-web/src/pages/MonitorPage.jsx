@@ -70,7 +70,7 @@ function MonitorScreen({ wsData, thresholds }) {
 
   // Collector reading is authoritative while the collector is active, so the
   // display holds its value between the collector's ~4 s samples.
-  const displayReading = lastCollectorReading ?? lastReading
+  const displayReading = wsData?.liveReading ?? lastCollectorReading ?? lastReading
   const temp     = displayReading?.temperature
   const severity = getSeverity(temp, thresholds)
   const cfg      = SEV_CONFIG[severity]
