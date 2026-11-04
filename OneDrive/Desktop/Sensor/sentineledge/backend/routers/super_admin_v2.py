@@ -289,10 +289,14 @@ async def super_admin_login(body: _SuperAdminLoginIn, request: Request):
         logger.warning("super_admin_login tracking failed: %s", exc)
 
     logger.info("Super admin login: username=%s ip=%s 2fa=%s", admin["name"], client_ip, admin["requires_2fa"])
+    from routers.sa_signins import record_login           # sign-in log: time, IP, device, PC name ...
+    import asyncio as _aio
+    login_id = await _aio.to_thread(record_login, admin["id"], request)   # reads Tailscale status: off the event loop
     return {
         "token": token,
         "username": admin["name"],
         "two_fa_required": bool(admin["requires_2fa"]),
+        "login_id": login_id,
     }
 
 

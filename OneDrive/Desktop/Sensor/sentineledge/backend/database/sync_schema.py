@@ -47,6 +47,27 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_alerts_node_alert
 """
 
 HUB_DDL = """
+-- every Super Admin sign-in on this PC (routers/sa_signins.py) - location only if the person allowed it
+CREATE TABLE IF NOT EXISTS sa_login_log (
+    id              SERIAL PRIMARY KEY,
+    admin_id        INTEGER,
+    at              TIMESTAMPTZ DEFAULT NOW(),
+    ip              TEXT,
+    is_local        BOOLEAN,
+    user_agent      TEXT,
+    browser         TEXT,
+    os              TEXT,
+    computer        TEXT,
+    windows_user    TEXT,
+    tailscale_ip    TEXT,
+    screen          TEXT,
+    timezone        TEXT,
+    language        TEXT,
+    lat             DOUBLE PRECISION,
+    lon             DOUBLE PRECISION,
+    accuracy_m      DOUBLE PRECISION,
+    location_status TEXT
+);
 -- acknowledgements made on the main server for alerts that belong to a company server: delivered with the
 -- next heartbeat and removed from the queue once that server confirms it applied them
 CREATE TABLE IF NOT EXISTS node_ack_queue (
@@ -119,10 +140,14 @@ CREATE TABLE IF NOT EXISTS outbox (
 def ensure_tables(role: str) -> None:
     """Create the sync tables for this server's role. Safe to call every start."""
     from database.connection import execute_write
-    try:
-        ddl = COMMON_DDL + (HUB_DDL if role == "hub" else NODE_DDL)
-        for stmt in [s.strip() for s in ddl.split(";") if s.strip()]:
+    ddl = COMMON_DDL + (HUB_DDL if role == "hub" else NODE_DDL)
+    failed = 0
+    for stmt in [s.strip() for s in ddl.split(";") if s.strip()]:
+        if all(not ln.strip() or ln.strip().startswith("--") for ln in stmt.splitlines()):
+            continue                                  # only comments (e.g. a ';' inside a comment)
+        try:                                          # one statement failing must not skip the others
             execute_write(stmt)
-        logger.info("Sync tables ready (role=%s)", role)
-    except Exception as exc:
-        logger.error("Could not create sync tables: %s", exc)
+        except Exception as exc:
+            failed += 1
+            logger.error("Could not create a sync table: %s | %.80s", exc, stmt)
+    logger.info("Sync tables ready (role=%s)%s", role, f" - {failed} statement(s) failed" if failed else "")

@@ -77,6 +77,9 @@ export default function SuperAdminLogin() {
       sessionStorage.setItem('admin_username', data.username)
       sessionStorage.setItem('authenticated',  'true')
       sessionStorage.setItem('login_time',     new Date().toISOString())
+      // the "before you start" popup in the panel completes this sign-in's log entry
+      if (data.login_id != null) sessionStorage.setItem('sa_login_id', String(data.login_id))
+      sessionStorage.setItem('sa_welcome', '1')
 
       navigate('/super-admin', { replace: true })
 

@@ -659,7 +659,8 @@ class _SecurityHeadersMiddleware(BaseHTTPMiddleware):
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
-        response.headers["Permissions-Policy"] = "geolocation=(), microphone=(), camera=()"
+        # location only for SentinelEdge's own pages (Super Admin sign-in log, with the person's consent)
+        response.headers["Permissions-Policy"] = "geolocation=(self), microphone=(), camera=()"
         response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
         response.headers["Content-Security-Policy"] = (
             "default-src 'self'; "
@@ -1131,6 +1132,8 @@ if SERVER_ROLE == "hub":
     app.include_router(sa_router_factory())
     from routers.sa_account import router as sa_account_router
     app.include_router(sa_account_router)
+    from routers.sa_signins import router as sa_signins_router
+    app.include_router(sa_signins_router)
 else:
     from routers.node_api import router as node_api_router
     app.include_router(node_api_router)

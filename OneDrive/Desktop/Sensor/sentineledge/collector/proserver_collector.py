@@ -442,7 +442,8 @@ def post_reading(backend_url: str, api_key: str,
                  temperature: float | None,
                  pressure:    float | None,
                  ph:          float | None,
-                 seq:         int = 0) -> None:
+                 seq:         int = 0,
+                 extra:       dict | None = None) -> None:
     payload = {
         "api_key":     api_key,
         "timestamp":   datetime.now().isoformat(),
@@ -451,6 +452,11 @@ def post_reading(backend_url: str, api_key: str,
         "pressure":    pressure,
         "ph":          ph,
     }
+    # every other symbol in collector_config.json "readings" (e.g. humidity) goes along too; the
+    # server keeps those the company has as parameters and lists the rest as "also arriving"
+    extra = {k: v for k, v in (extra or {}).items() if v is not None and k not in ("temperature", "pressure", "ph")}
+    if extra:
+        payload["extra"] = extra
     resp = requests.post(backend_url, json=payload, timeout=5)
     # Diagnostic block — full precision, ms timestamp, sequence number
     ts_ms = datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
@@ -458,6 +464,8 @@ def post_reading(backend_url: str, api_key: str,
     print(f"T={temperature}", flush=True)
     print(f"P={pressure}", flush=True)
     print(f"pH={ph}", flush=True)
+    for k, v in extra.items():
+        print(f"{k}={v}", flush=True)
     print(f"POST={resp.status_code}", flush=True)
     print(flush=True)
     resp.raise_for_status()
@@ -553,7 +561,8 @@ def run_test(config: dict) -> None:
         post_reading(backend_url, api_key,
                      values.get("temperature"),
                      values.get("pressure"),
-                     values.get("ph"))
+                     values.get("ph"),
+                     extra=values)
         log("HTTP", "POST succeeded")
     except Exception as e:
         log("HTTP", f"POST failed: {e}")
@@ -627,7 +636,7 @@ def run_continuous(config: dict) -> None:
                              values.get("temperature"),
                              values.get("pressure"),
                              values.get("ph"),
-                             seq=cycle)
+                             seq=cycle, extra=values)
             else:
                 log("COLLECTOR", f"#{cycle} all reads null — skipping POST")
 

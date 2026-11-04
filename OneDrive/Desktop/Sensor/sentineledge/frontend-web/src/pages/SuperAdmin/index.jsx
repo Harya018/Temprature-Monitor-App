@@ -4534,10 +4534,10 @@ function CommsTab() {
 
 const SEC = '/api/super-admin/security'
 
-const SEC_SUBTABS = ['Login Attempts', 'Blocked IPs', 'IP Whitelist', 'Audit Log', 'Retention', 'Incidents', '2FA Mgmt']
+const SEC_SUBTABS = ['Super Admin sign-ins', 'Login Attempts', 'Blocked IPs', 'IP Whitelist', 'Audit Log', 'Retention', 'Incidents', '2FA Mgmt']
 
 function SecurityTab() {
-  const [sub, setSub]   = useState('Login Attempts')
+  const [sub, setSub]   = useState('Super Admin sign-ins')
   const [data, setData] = useState([])
   const [busy, setBusy] = useState(false)
   const [err,  setErr]  = useState('')
@@ -4547,6 +4547,7 @@ function SecurityTab() {
   const load = useCallback((subTab) => {
     setBusy(true); setErr(''); setData([])
     const map = {
+      'Super Admin sign-ins': `${SA}/sign-ins?limit=300`,
       'Login Attempts': `${SEC}/login-attempts?days=7`,
       'Blocked IPs':    `${SEC}/login-attempts/blocked`,
       'IP Whitelist':   `${SEC}/ip-whitelist`,
@@ -4636,6 +4637,39 @@ function SecurityTab() {
 
       {msg && <p style={{ color: '#22C55E', fontSize: 12, marginBottom: 8 }}>{msg}</p>}
       {err && <Err msg={err} />}
+
+      {/* ── Super Admin sign-ins ── */}
+      {sub === 'Super Admin sign-ins' && (
+        <div>
+          <div style={rowStyle}>
+            <span className="sa-cfg-stat-val">{data.length} sign-ins on this PC</span>
+          </div>
+          {busy ? <Spinner /> : (
+            <div style={{ overflowX: 'auto' }}>
+              <table className="sa-table">
+                <thead><tr><th>Time</th><th>Where</th><th>PC / Windows user</th><th>Browser</th><th>Tailscale</th><th>Location</th></tr></thead>
+                <tbody>
+                  {data.map(r => (
+                    <tr key={r.id}>
+                      <td style={{ fontSize: 11, whiteSpace: 'nowrap' }}>{r.at ? new Date(r.at).toLocaleString() : '—'}</td>
+                      <td><Badge label={r.is_local ? 'On this PC' : 'Remote'} type={r.is_local ? 'active' : 'WARNING'} /> <code style={{ fontSize: 11 }}>{r.ip}</code></td>
+                      <td style={{ fontSize: 12 }}>{r.computer || '—'}{r.windows_user ? ` / ${r.windows_user}` : ''}</td>
+                      <td style={{ fontSize: 12 }}>{[r.browser, r.os].filter(Boolean).join(' · ')}{r.screen ? ` · ${r.screen}` : ''}{r.timezone ? ` · ${r.timezone}` : ''}</td>
+                      <td><code style={{ fontSize: 11 }}>{r.tailscale_ip || '—'}</code></td>
+                      <td style={{ fontSize: 12 }}>
+                        {r.lat != null
+                          ? <a href={`https://www.google.com/maps?q=${r.lat},${r.lon}`} target="_blank" rel="noopener noreferrer">{Number(r.lat).toFixed(4)}, {Number(r.lon).toFixed(4)}</a>
+                          : (r.location_status || 'not shared')}
+                        {r.accuracy_m != null && <span style={{ color: 'var(--sa-text-muted)' }}> ±{Math.round(r.accuracy_m)} m</span>}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      )}
 
       {/* ── Login Attempts ── */}
       {sub === 'Login Attempts' && (
@@ -7337,6 +7371,86 @@ const TABS = [
   { id: 'syslogs',     label: 'System Logs',       Icon: Terminal      },
 ]
 
+// ─── After every Super Admin sign-in: "before you start" ─────────────────────
+// Completes this sign-in's log entry (screen, time zone, language and - only if the person allows it in
+// the browser - the location), and shows whether Tailscale is on for this PC and what to do if not.
+function SignInWelcome({ onClose }) {
+  const [ts, setTs]       = useState(null)
+  const [loc, setLoc]     = useState('not asked')        // not asked | asking | allowed | denied | unavailable
+  const loginId = Number(sessionStorage.getItem('sa_login_id') || 0)
+
+  const send = (extra) => {
+    if (!loginId) return Promise.resolve()
+    return post(`${SA}/sign-in-details`, {
+      login_id: loginId,
+      screen: `${window.screen.width}x${window.screen.height}`,
+      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || '',
+      language: navigator.language || '',
+      ...extra,
+    }).catch(() => {})
+  }
+
+  useEffect(() => {
+    send({})
+    get(`${SA}/tailscale`).then(d => setTs(d?.tailscale || null)).catch(() => setTs(null))
+  }, []) // eslint-disable-line
+
+  const shareLocation = () => {
+    if (!navigator.geolocation) { setLoc('unavailable'); send({ location_status: 'unavailable' }); return }
+    setLoc('asking')
+    navigator.geolocation.getCurrentPosition(
+      p => { setLoc('allowed'); send({ location: { lat: p.coords.latitude, lon: p.coords.longitude, accuracy: p.coords.accuracy }, location_status: 'allowed' }) },
+      e => { const st = e && e.code === 1 ? 'denied' : 'unavailable'; setLoc(st); send({ location_status: st }) },
+      { enableHighAccuracy: false, timeout: 15000, maximumAge: 60000 })
+  }
+
+  const finish = () => { sessionStorage.removeItem('sa_welcome'); onClose() }
+  const tsLine = !ts ? 'Checking…'
+    : !ts.installed ? 'Not installed on this PC'
+    : ts.running ? `Connected · ${ts.ip || ''}`
+    : ts.state === 'needs_login' ? 'Installed — sign in needed' : 'Installed — turned off'
+  const tsOk = ts && ts.running
+  const locText = { 'not asked': 'Not shared', asking: 'Waiting for the browser…', allowed: 'Shared — saved with this sign-in',
+                    denied: 'Not allowed in the browser', unavailable: 'Not available on this PC' }[loc]
+
+  return (
+    <Modal title="Before you start" onClose={finish}
+      footer={<button className="sa-btn primary" onClick={finish}>Continue</button>}>
+      <div style={{ display: 'grid', gap: 14, fontSize: 13 }}>
+        <div>
+          <div style={{ fontWeight: 700, marginBottom: 4 }}>This sign-in is recorded</div>
+          <div style={{ color: 'var(--sa-text-muted)' }}>
+            Time, this PC's name and Windows user, IP address, browser and Windows version, screen, time zone and
+            this PC's Tailscale address are saved in Security › Super Admin sign-ins.
+          </div>
+        </div>
+        <div>
+          <div style={{ fontWeight: 700, marginBottom: 4 }}>Location (optional)</div>
+          <div style={{ display: 'flex', gap: 10, alignItems: 'center', flexWrap: 'wrap' }}>
+            <button className="sa-btn secondary sm" onClick={shareLocation} disabled={loc === 'asking' || loc === 'allowed'}>Share location</button>
+            <span style={{ color: loc === 'allowed' ? '#059669' : 'var(--sa-text-muted)' }}>{locText}</span>
+          </div>
+          <div style={{ color: 'var(--sa-text-muted)', marginTop: 4, fontSize: 12 }}>
+            The browser asks first. Windows Location must be on (Settings › Privacy &amp; security › Location).
+          </div>
+        </div>
+        <div>
+          <div style={{ fontWeight: 700, marginBottom: 4 }}>Tailscale on this PC: <span style={{ color: tsOk ? '#059669' : '#D97706' }}>{tsLine}</span></div>
+          {!tsOk && ts && (
+            <ol style={{ margin: '4px 0 0 18px', padding: 0, color: 'var(--sa-text-muted)', display: 'grid', gap: 3 }}>
+              {!ts.installed && <li>Download <strong>Tailscale for Windows</strong> from tailscale.com/download and install it.</li>}
+              <li>Click the Tailscale icon near the clock and <strong>Log in</strong> (main server: your own account; a company PC: the company's account).</li>
+              <li>In the Tailscale menu switch on <strong>Run unattended</strong> and <strong>Start on login</strong>.</li>
+              <li>A company PC: open the share link from the main server and press <strong>Accept</strong>, then pair it (Companies › the company › Company server).</li>
+              <li>The main server: Config › Tailscale — save the share link for the companies.</li>
+            </ol>
+          )}
+        </div>
+      </div>
+    </Modal>
+  )
+}
+
 export default function SuperAdmin() {
   const navigate = useNavigate()
   const [tab,          setTab]          = useState('overview')
@@ -7346,6 +7460,7 @@ export default function SuperAdmin() {
   const [anomalyCount,  setAnomalyCount]  = useState(0)
 
   const username = sessionStorage.getItem('admin_username') || 'superadmin'
+  const [welcome, setWelcome] = useState(() => sessionStorage.getItem('sa_welcome') === '1')
 
   useEffect(() => {
     document.title = 'SentinelEdge — Super Admin'
@@ -7501,6 +7616,7 @@ export default function SuperAdmin() {
         {/* Content */}
         <div className="sa-body">
           {renderContent()}
+          {welcome && <SignInWelcome onClose={() => setWelcome(false)} />}
         </div>
       </div>
 
